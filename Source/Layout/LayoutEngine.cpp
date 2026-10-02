@@ -874,6 +874,19 @@ struct Engine {
         return std::strtod(text.c_str(), nullptr);
     }
 
+    void FillEllipseShadow(int centerX, int centerY, int radiusX, int radiusY, int blur, Color color, bool fixed) {
+        if (blur <= 0) {
+            FillEllipse(centerX, centerY, radiusX, radiusY, color, fixed);
+            return;
+        }
+        for (int extra = blur; extra >= 0; --extra) {
+            Color layer = color;
+            const int alpha = static_cast<int>(color.alpha) * (blur - extra + 1) / (blur + 1);
+            layer.alpha = static_cast<std::uint8_t>(alpha < 0 ? 0 : (alpha > 255 ? 255 : alpha));
+            FillEllipse(centerX, centerY, radiusX + extra, radiusY + extra, layer, fixed);
+        }
+    }
+
     void FillEllipse(int centerX, int centerY, int radiusX, int radiusY, Color color, bool fixed) {
         if (radiusX < 1 || radiusY < 1 || color.alpha == 0) {
             return;
@@ -1090,6 +1103,87 @@ struct Engine {
         }
     }
 
+    void StrokeCorners(const std::vector<SvgPoint>& points, int originX, int originY, Color color, bool fixed, int thickness, const std::string& join,
+        double miterLimit) {
+        if (color.alpha == 0 || thickness <= 1 || points.size() < 3 || join == "bevel") {
+            return;
+        }
+        if (join == "round") {
+            const int radius = std::max(1, thickness / 2);
+            for (std::size_t index = 1; index + 1 < points.size(); ++index) {
+                const int centerX = originX + static_cast<int>(points[index].x);
+                const int centerY = originY + static_cast<int>(points[index].y);
+                for (int row = -radius; row <= radius; ++row) {
+                    for (int column = -radius; column <= radius; ++column) {
+                        if (column * column + row * row <= radius * radius) {
+                            Fill(centerX + column, centerY + row, 1, 1, color, fixed);
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        const double limit = miterLimit > 0 ? miterLimit : 4;
+        for (std::size_t index = 1; index + 1 < points.size(); ++index) {
+            const double ax = points[index].x - points[index - 1].x;
+            const double ay = points[index].y - points[index - 1].y;
+            const double bx = points[index + 1].x - points[index].x;
+            const double by = points[index + 1].y - points[index].y;
+            const double aLength = std::sqrt(ax * ax + ay * ay);
+            const double bLength = std::sqrt(bx * bx + by * by);
+            if (aLength < 1 || bLength < 1) {
+                continue;
+            }
+            const double ux = ax / aLength;
+            const double uy = ay / aLength;
+            const double vx = bx / bLength;
+            const double vy = by / bLength;
+            const double dot = std::max(-1.0, std::min(1.0, ux * vx + uy * vy));
+            const double sine = std::sin(std::acos(dot) / 2);
+            if (sine < 0.05 || (1.0 / sine) > limit) {
+                continue;
+            }
+            const double cross = ux * vy - uy * vx;
+            double normalX = cross >= 0 ? uy + vy : -uy - vy;
+            double normalY = cross >= 0 ? -ux - vx : ux + vx;
+            const double normalLength = std::sqrt(normalX * normalX + normalY * normalY);
+            if (normalLength < 0.001) {
+                continue;
+            }
+            normalX /= normalLength;
+            normalY /= normalLength;
+            const double extension = thickness / 2.0 / sine;
+            const int brush = std::max(1, thickness / 2);
+            for (double distance = thickness / 2.0 + 1; distance <= extension; distance += 1) {
+                const int tipX = originX + static_cast<int>(points[index].x + normalX * distance) - brush / 2;
+                const int tipY = originY + static_cast<int>(points[index].y + normalY * distance) - brush / 2;
+                Fill(tipX, tipY, brush, brush, color, fixed);
+            }
+        }
+    }
+
+    void StrokeCaps(const std::vector<SvgPoint>& points, int originX, int originY, Color color, bool fixed, int thickness, const std::string& cap) {
+        if (color.alpha == 0 || thickness <= 1 || points.size() < 2 || (cap != "square" && cap != "round")) {
+            return;
+        }
+        const double extend = thickness / 2.0;
+        auto extendEnd = [&](const SvgPoint& from, const SvgPoint& toward) {
+            const double deltaX = from.x - toward.x;
+            const double deltaY = from.y - toward.y;
+            const double length = std::sqrt(deltaX * deltaX + deltaY * deltaY);
+            if (!(length > 0)) {
+                return;
+            }
+            const int x1 = originX + static_cast<int>(from.x);
+            const int y1 = originY + static_cast<int>(from.y);
+            const int x2 = originX + static_cast<int>(from.x + deltaX / length * extend);
+            const int y2 = originY + static_cast<int>(from.y + deltaY / length * extend);
+            StrokeLine(x1, y1, x2, y2, color, fixed, thickness);
+        };
+        extendEnd(points.front(), points[1]);
+        extendEnd(points.back(), points[points.size() - 2]);
+    }
+
     bool ReadSvgNumber(const std::string& text, std::size_t& index, double& number) {
         while (index < text.size() && (text[index] == ' ' || text[index] == '\t' || text[index] == '\n' || text[index] == '\r' ||
                                            text[index] == ',')) {
@@ -1152,6 +1246,105 @@ struct Engine {
         return points;
     }
 
+    double SvgVectorAngle(double ux, double uy, double vx, double vy) {
+        const double length = std::sqrt((ux * ux + uy * uy) * (vx * vx + vy * vy));
+        if (!(length > 0)) {
+            return 0;
+        }
+        double cosine = (ux * vx + uy * vy) / length;
+        if (cosine < -1) {
+            cosine = -1;
+        }
+        if (cosine > 1) {
+            cosine = 1;
+        }
+        double angle = std::acos(cosine);
+        if (ux * vy - uy * vx < 0) {
+            angle = -angle;
+        }
+        return angle;
+    }
+
+    void AddQuadratic(std::vector<SvgPoint>& points, double x0, double y0, double x1, double y1, double x2, double y2) {
+        for (int step = 1; step <= 8; ++step) {
+            const double t = static_cast<double>(step) / 8.0;
+            const double u = 1.0 - t;
+            SvgPoint point;
+            point.x = u * u * x0 + 2 * u * t * x1 + t * t * x2;
+            point.y = u * u * y0 + 2 * u * t * y1 + t * t * y2;
+            points.push_back(point);
+        }
+    }
+
+    void AddArc(std::vector<SvgPoint>& points, double x1, double y1, double radiusX, double radiusY, double rotationDeg, bool largeArc, bool sweep,
+        double x2, double y2) {
+        if (std::abs(x1 - x2) < 0.00001 && std::abs(y1 - y2) < 0.00001) {
+            return;
+        }
+        radiusX = std::abs(radiusX);
+        radiusY = std::abs(radiusY);
+        if (!(radiusX > 0) || !(radiusY > 0)) {
+            points.push_back(SvgPoint{x2, y2});
+            return;
+        }
+        const double pi = std::acos(-1.0);
+        const double phi = rotationDeg * pi / 180.0;
+        const double cosPhi = std::cos(phi);
+        const double sinPhi = std::sin(phi);
+        const double midX = (x1 - x2) / 2;
+        const double midY = (y1 - y2) / 2;
+        const double primeX = cosPhi * midX + sinPhi * midY;
+        const double primeY = -sinPhi * midX + cosPhi * midY;
+        double radiusXSq = radiusX * radiusX;
+        double radiusYSq = radiusY * radiusY;
+        const double primeXSq = primeX * primeX;
+        const double primeYSq = primeY * primeY;
+        const double lambda = primeXSq / radiusXSq + primeYSq / radiusYSq;
+        if (lambda > 1) {
+            const double scale = std::sqrt(lambda);
+            radiusX *= scale;
+            radiusY *= scale;
+            radiusXSq = radiusX * radiusX;
+            radiusYSq = radiusY * radiusY;
+        }
+        const double denominator = radiusXSq * primeYSq + radiusYSq * primeXSq;
+        if (!(denominator > 0)) {
+            points.push_back(SvgPoint{x2, y2});
+            return;
+        }
+        double numerator = radiusXSq * radiusYSq - radiusXSq * primeYSq - radiusYSq * primeXSq;
+        if (numerator < 0) {
+            numerator = 0;
+        }
+        double coefficient = std::sqrt(numerator / denominator);
+        if (largeArc == sweep) {
+            coefficient = -coefficient;
+        }
+        const double centerPrimeX = coefficient * radiusX * primeY / radiusY;
+        const double centerPrimeY = coefficient * -radiusY * primeX / radiusX;
+        const double centerX = cosPhi * centerPrimeX - sinPhi * centerPrimeY + (x1 + x2) / 2;
+        const double centerY = sinPhi * centerPrimeX + cosPhi * centerPrimeY + (y1 + y2) / 2;
+        const double theta1 = SvgVectorAngle(1, 0, (primeX - centerPrimeX) / radiusX, (primeY - centerPrimeY) / radiusY);
+        double delta = SvgVectorAngle((primeX - centerPrimeX) / radiusX, (primeY - centerPrimeY) / radiusY, (-primeX - centerPrimeX) / radiusX,
+            (-primeY - centerPrimeY) / radiusY);
+        if (!sweep && delta > 0) {
+            delta -= 2 * pi;
+        } else if (sweep && delta < 0) {
+            delta += 2 * pi;
+        }
+        const double portion = std::abs(delta) / (2 * pi);
+        const int steps = portion < 0.05 ? 4 : (portion > 1 ? 24 : static_cast<int>(portion * 24 + 0.5));
+        for (int step = 1; step <= steps; ++step) {
+            const double theta = theta1 + delta * (static_cast<double>(step) / steps);
+            const double cosTheta = std::cos(theta);
+            const double sinTheta = std::sin(theta);
+            SvgPoint point;
+            point.x = cosPhi * radiusX * cosTheta - sinPhi * radiusY * sinTheta + centerX;
+            point.y = sinPhi * radiusX * cosTheta + cosPhi * radiusY * sinTheta + centerY;
+            points.push_back(point);
+        }
+    }
+
     void AddCurve(std::vector<SvgPoint>& points, double x0, double y0, double x1, double y1, double x2, double y2, double x3, double y3) {
         for (int step = 1; step <= 8; ++step) {
             const double t = static_cast<double>(step) / 8.0;
@@ -1177,6 +1370,7 @@ struct Engine {
         double lastControlX = 0;
         double lastControlY = 0;
         bool lastWasCubic = false;
+        bool lastWasQuadratic = false;
         std::size_t index = 0;
         char command = 0;
         auto mapPoint = [&](const SvgPoint& point) {
@@ -1203,6 +1397,12 @@ struct Engine {
             }
             if (stroke.alpha != 0) {
                 StrokePolyline(mapped, originX, originY, stroke, fixed, close, thickness);
+                if (gradientSpace != nullptr) {
+                    StrokeCorners(mapped, originX, originY, stroke, fixed, thickness, gradientSpace->lineJoin, gradientSpace->miterLimit);
+                    if (!close) {
+                        StrokeCaps(mapped, originX, originY, stroke, fixed, thickness, gradientSpace->lineCap);
+                    }
+                }
             } else if (gradientNode != nullptr && gradientSpace != nullptr && !gradientSpace->strokeUrl.empty() && mapped.size() >= 2) {
                 int left = 1000000;
                 int top = 1000000;
@@ -1252,6 +1452,7 @@ struct Engine {
                 currentX = startX;
                 currentY = startY;
                 lastWasCubic = false;
+                lastWasQuadratic = false;
                 command = 0;
                 continue;
             }
@@ -1268,31 +1469,55 @@ struct Engine {
                 }
                 figure.push_back(SvgPoint{currentX, currentY});
                 lastWasCubic = false;
+                lastWasQuadratic = false;
                 continue;
             }
             if (operation == 'A') {
-                for (int skip = 0; skip < 5; ++skip) {
-                    if (!ReadSvgNumber(data, index, first)) {
-                        return;
-                    }
+                double radiusX = 0;
+                double radiusY = 0;
+                double rotation = 0;
+                double largeArc = 0;
+                double sweep = 0;
+                double endX = 0;
+                double endY = 0;
+                if (!ReadSvgNumber(data, index, radiusX) || !ReadSvgNumber(data, index, radiusY) || !ReadSvgNumber(data, index, rotation) ||
+                    !ReadSvgNumber(data, index, largeArc) || !ReadSvgNumber(data, index, sweep) || !ReadSvgNumber(data, index, endX) ||
+                    !ReadSvgNumber(data, index, endY)) {
+                    break;
                 }
-                if (!ReadSvgNumber(data, index, first) || !ReadSvgNumber(data, index, second)) {
-                    return;
+                if (relative) {
+                    endX += currentX;
+                    endY += currentY;
                 }
-                currentX = relative ? currentX + first : first;
-                currentY = relative ? currentY + second : second;
-                figure.push_back(SvgPoint{currentX, currentY});
+                AddArc(figure, currentX, currentY, radiusX, radiusY, rotation, largeArc >= 0.5, sweep >= 0.5, endX, endY);
+                currentX = endX;
+                currentY = endY;
                 lastWasCubic = false;
+                lastWasQuadratic = false;
                 continue;
             }
             if (!ReadSvgNumber(data, index, first) || !ReadSvgNumber(data, index, second)) {
                 break;
             }
-            if (operation == 'M' || operation == 'L' || operation == 'T') {
+            if (operation == 'T') {
+                const double controlX = lastWasQuadratic ? currentX * 2 - lastControlX : currentX;
+                const double controlY = lastWasQuadratic ? currentY * 2 - lastControlY : currentY;
+                const double x = relative ? currentX + first : first;
+                const double y = relative ? currentY + second : second;
+                AddQuadratic(figure, currentX, currentY, controlX, controlY, x, y);
+                lastControlX = controlX;
+                lastControlY = controlY;
+                lastWasQuadratic = true;
+                lastWasCubic = false;
+                currentX = x;
+                currentY = y;
+                continue;
+            }
+            if (operation == 'M' || operation == 'L') {
                 const double x = relative ? currentX + first : first;
                 const double y = relative ? currentY + second : second;
                 if (operation == 'M') {
-                    if (figure.size() > 2) {
+                    if (figure.size() >= 2) {
                         finish(false);
                     } else {
                         figure.clear();
@@ -1305,6 +1530,7 @@ struct Engine {
                 currentY = y;
                 figure.push_back(SvgPoint{currentX, currentY});
                 lastWasCubic = false;
+                lastWasQuadratic = false;
                 continue;
             }
             double third = 0;
@@ -1313,12 +1539,17 @@ struct Engine {
                 break;
             }
             if (operation == 'Q') {
+                const double controlX = relative ? currentX + first : first;
+                const double controlY = relative ? currentY + second : second;
                 const double x = relative ? currentX + third : third;
                 const double y = relative ? currentY + fourth : fourth;
+                AddQuadratic(figure, currentX, currentY, controlX, controlY, x, y);
+                lastControlX = controlX;
+                lastControlY = controlY;
+                lastWasQuadratic = true;
+                lastWasCubic = false;
                 currentX = x;
                 currentY = y;
-                figure.push_back(SvgPoint{currentX, currentY});
-                lastWasCubic = false;
                 continue;
             }
             if (operation == 'S') {
@@ -1332,6 +1563,7 @@ struct Engine {
                 lastControlX = controlX;
                 lastControlY = controlY;
                 lastWasCubic = true;
+                lastWasQuadratic = false;
                 currentX = x;
                 currentY = y;
                 continue;
@@ -1351,10 +1583,11 @@ struct Engine {
             lastControlX = x2;
             lastControlY = y2;
             lastWasCubic = true;
+            lastWasQuadratic = false;
             currentX = x;
             currentY = y;
         }
-        if (figure.size() > 2) {
+        if (figure.size() >= 2) {
             finish(false);
         }
         if (contours.empty()) {
@@ -1389,6 +1622,9 @@ struct Engine {
         double pixelWidth = 0;
         double pixelHeight = 0;
         double strokeWidth = 1;
+        std::string lineJoin = "miter";
+        std::string lineCap = "butt";
+        double miterLimit = 4;
         double opacity = 1;
         Color fill{0, 0, 0, 255};
         Color stroke{0, 0, 0, 0};
@@ -1412,6 +1648,7 @@ struct Engine {
         Color currentColor{0, 0, 0, 255};
         int shapeRendering = 0;
         int textRendering = 0;
+        std::string filterUrl;
     };
 
     __attribute__((noinline, noclone, cdecl)) Color WithOpacity(Color color, double opacity) {
@@ -1541,6 +1778,15 @@ struct Engine {
         }
         if (!AttributeValue(node, "stroke-width").empty()) {
             space.strokeWidth = std::atof(AttributeValue(node, "stroke-width").c_str());
+        }
+        if (!AttributeValue(node, "stroke-linejoin").empty()) {
+            space.lineJoin = ToLowerAscii(AttributeValue(node, "stroke-linejoin"));
+        }
+        if (!AttributeValue(node, "stroke-linecap").empty()) {
+            space.lineCap = ToLowerAscii(AttributeValue(node, "stroke-linecap"));
+        }
+        if (!AttributeValue(node, "stroke-miterlimit").empty()) {
+            space.miterLimit = std::atof(AttributeValue(node, "stroke-miterlimit").c_str());
         }
         if (!AttributeValue(node, "fill-opacity").empty()) {
             space.fillOpacity = std::max(0.0, std::min(1.0, std::atof(AttributeValue(node, "fill-opacity").c_str())));
@@ -2410,8 +2656,14 @@ struct Engine {
         char command = 0;
         double x = 0;
         double y = 0;
+        double startX = 0;
+        double startY = 0;
+        double lastControlX = 0;
+        double lastControlY = 0;
+        bool lastWasCubic = false;
+        bool lastWasQuadratic = false;
         while (index < data.size()) {
-            while (index < data.size() && (data[index] == ' ' || data[index] == '\t' || data[index] == ',')) {
+            while (index < data.size() && (data[index] == ' ' || data[index] == '\t' || data[index] == '\n' || data[index] == '\r' || data[index] == ',')) {
                 ++index;
             }
             if (index >= data.size()) {
@@ -2427,6 +2679,11 @@ struct Engine {
             const bool relative = command >= 'a' && command <= 'z';
             const char operation = relative ? static_cast<char>(command - 'a' + 'A') : command;
             if (operation == 'Z') {
+                points.push_back(SvgPoint{startX, startY});
+                x = startX;
+                y = startY;
+                lastWasCubic = false;
+                lastWasQuadratic = false;
                 command = 0;
                 continue;
             }
@@ -2442,21 +2699,117 @@ struct Engine {
                     y = relative ? y + first : first;
                 }
                 points.push_back(SvgPoint{x, y});
+                lastWasCubic = false;
+                lastWasQuadratic = false;
+                continue;
+            }
+            if (operation == 'A') {
+                double radiusX = 0;
+                double radiusY = 0;
+                double rotation = 0;
+                double largeArc = 0;
+                double sweep = 0;
+                double endX = 0;
+                double endY = 0;
+                if (!ReadSvgNumber(data, index, radiusX) || !ReadSvgNumber(data, index, radiusY) || !ReadSvgNumber(data, index, rotation) ||
+                    !ReadSvgNumber(data, index, largeArc) || !ReadSvgNumber(data, index, sweep) || !ReadSvgNumber(data, index, endX) ||
+                    !ReadSvgNumber(data, index, endY)) {
+                    break;
+                }
+                if (relative) {
+                    endX += x;
+                    endY += y;
+                }
+                AddArc(points, x, y, radiusX, radiusY, rotation, largeArc >= 0.5, sweep >= 0.5, endX, endY);
+                x = endX;
+                y = endY;
+                lastWasCubic = false;
+                lastWasQuadratic = false;
                 continue;
             }
             if (!ReadSvgNumber(data, index, first) || !ReadSvgNumber(data, index, second)) {
                 break;
             }
+            if (operation == 'T') {
+                const double controlX = lastWasQuadratic ? x * 2 - lastControlX : x;
+                const double controlY = lastWasQuadratic ? y * 2 - lastControlY : y;
+                const double nextX = relative ? x + first : first;
+                const double nextY = relative ? y + second : second;
+                AddQuadratic(points, x, y, controlX, controlY, nextX, nextY);
+                lastControlX = controlX;
+                lastControlY = controlY;
+                lastWasQuadratic = true;
+                lastWasCubic = false;
+                x = nextX;
+                y = nextY;
+                continue;
+            }
             if (operation == 'M' || operation == 'L') {
                 x = relative ? x + first : first;
                 y = relative ? y + second : second;
-                points.push_back(SvgPoint{x, y});
                 if (operation == 'M') {
+                    startX = x;
+                    startY = y;
                     command = relative ? 'l' : 'L';
                 }
+                points.push_back(SvgPoint{x, y});
+                lastWasCubic = false;
+                lastWasQuadratic = false;
                 continue;
             }
-            break;
+            double third = 0;
+            double fourth = 0;
+            if (!ReadSvgNumber(data, index, third) || !ReadSvgNumber(data, index, fourth)) {
+                break;
+            }
+            if (operation == 'Q') {
+                const double controlX = relative ? x + first : first;
+                const double controlY = relative ? y + second : second;
+                const double nextX = relative ? x + third : third;
+                const double nextY = relative ? y + fourth : fourth;
+                AddQuadratic(points, x, y, controlX, controlY, nextX, nextY);
+                lastControlX = controlX;
+                lastControlY = controlY;
+                lastWasQuadratic = true;
+                lastWasCubic = false;
+                x = nextX;
+                y = nextY;
+                continue;
+            }
+            if (operation == 'S') {
+                const double controlX = relative ? x + first : first;
+                const double controlY = relative ? y + second : second;
+                const double nextX = relative ? x + third : third;
+                const double nextY = relative ? y + fourth : fourth;
+                const double reflectedX = lastWasCubic ? x * 2 - lastControlX : x;
+                const double reflectedY = lastWasCubic ? y * 2 - lastControlY : y;
+                AddCurve(points, x, y, reflectedX, reflectedY, controlX, controlY, nextX, nextY);
+                lastControlX = controlX;
+                lastControlY = controlY;
+                lastWasCubic = true;
+                lastWasQuadratic = false;
+                x = nextX;
+                y = nextY;
+                continue;
+            }
+            double fifth = 0;
+            double sixth = 0;
+            if (!ReadSvgNumber(data, index, fifth) || !ReadSvgNumber(data, index, sixth)) {
+                break;
+            }
+            const double x1 = relative ? x + first : first;
+            const double y1 = relative ? y + second : second;
+            const double x2 = relative ? x + third : third;
+            const double y2 = relative ? y + fourth : fourth;
+            const double nextX = relative ? x + fifth : fifth;
+            const double nextY = relative ? y + sixth : sixth;
+            AddCurve(points, x, y, x1, y1, x2, y2, nextX, nextY);
+            lastControlX = x2;
+            lastControlY = y2;
+            lastWasCubic = true;
+            lastWasQuadratic = false;
+            x = nextX;
+            y = nextY;
         }
         return points;
     }
@@ -2564,20 +2917,8 @@ struct Engine {
                     tile.scaleY = tileHeight;
                 }
                 const std::string patternTransform = AttributeValue(*pattern, "patterntransform");
-                const std::size_t patternScale = patternTransform.find("scale");
-                if (patternScale != std::string::npos) {
-                    std::size_t index = patternTransform.find('(', patternScale);
-                    double scaleX = 1;
-                    double scaleY = 1;
-                    if (index != std::string::npos) {
-                        ++index;
-                        if (ReadSvgNumber(patternTransform, index, scaleX)) {
-                            scaleY = scaleX;
-                            ReadSvgNumber(patternTransform, index, scaleY);
-                            tile.scaleX *= scaleX;
-                            tile.scaleY *= scaleY;
-                        }
-                    }
+                if (!patternTransform.empty()) {
+                    ApplySvgTransform(patternTransform, tile);
                 }
                 tile.clipped = true;
                 tile.clipX = tileX;
@@ -3033,6 +3374,9 @@ struct Engine {
         int dx = 0;
         int dy = 0;
         int blur = 0;
+        bool dropShadow = false;
+        int shadowDx = 0;
+        int shadowDy = 0;
         int dilate = 0;
         int erode = 0;
         bool saturate = false;
@@ -3152,7 +3496,11 @@ struct Engine {
     }
 
     bool ResolveFilter(Node& node, const SvgSpace& space, SvgFilter& effect) {
-        const std::string id = SvgPaintId(AttributeValue(node, "filter"));
+        std::string reference = AttributeValue(node, "filter");
+        if (reference.empty()) {
+            reference = space.filterUrl;
+        }
+        const std::string id = SvgPaintId(reference);
         if (id.empty()) {
             return false;
         }
@@ -3206,6 +3554,36 @@ struct Engine {
             } else if (tag == "fegaussianblur") {
                 effect = SvgFilter();
                 effect.blur = std::max(1, static_cast<int>(std::atof(AttributeValue(*child, "stddeviation").c_str()) * std::max(space.scaleX, space.scaleY)));
+                found = true;
+            } else if (tag == "fedropshadow") {
+                effect = SvgFilter();
+                effect.dropShadow = true;
+                const double shiftX = AttributeValue(*child, "dx").empty() ? 2 : std::atof(AttributeValue(*child, "dx").c_str());
+                const double shiftY = AttributeValue(*child, "dy").empty() ? 2 : std::atof(AttributeValue(*child, "dy").c_str());
+                effect.shadowDx = shiftX > -100000 && shiftX < 100000 ? static_cast<int>(shiftX * space.scaleX) : 0;
+                effect.shadowDy = shiftY > -100000 && shiftY < 100000 ? static_cast<int>(shiftY * space.scaleY) : 0;
+                const double deviation = AttributeValue(*child, "stddeviation").empty() ? 2 : std::atof(AttributeValue(*child, "stddeviation").c_str());
+                const double scaledDeviation = deviation * std::max(space.scaleX, space.scaleY);
+                if (scaledDeviation > 0 && scaledDeviation < 64) {
+                    effect.blur = static_cast<int>(scaledDeviation + 0.5);
+                } else if (scaledDeviation >= 64) {
+                    effect.blur = 64;
+                }
+                effect.floodColor = Color{0, 0, 0, 255};
+                const std::string shadowColor = AttributeValue(*child, "flood-color");
+                if (!shadowColor.empty()) {
+                    ParseColor(shadowColor, effect.floodColor);
+                }
+                if (!AttributeValue(*child, "flood-opacity").empty()) {
+                    const double opacity = std::atof(AttributeValue(*child, "flood-opacity").c_str());
+                    int alpha = 255;
+                    if (!(opacity > 0)) {
+                        alpha = 0;
+                    } else if (opacity < 1) {
+                        alpha = static_cast<int>(opacity * 255.0);
+                    }
+                    effect.floodColor.alpha = static_cast<std::uint8_t>(alpha);
+                }
                 found = true;
             } else if (tag == "femorphology") {
                 effect = SvgFilter();
@@ -3905,6 +4283,28 @@ struct Engine {
                         Fill(tileX, tileY, std::min(width, regionX + regionWidth - tileX), std::min(height, regionY + regionHeight - tileY), shown, fixed);
                     }
                 }
+            } else if (!painted && filtered && filterEffect.dropShadow && shown.alpha != 0 && width > 0 && height > 0) {
+                const int radius = filterEffect.blur;
+                const int shadowX = x + filterEffect.shadowDx;
+                const int shadowY = y + filterEffect.shadowDy;
+                if (radius <= 0) {
+                    Fill(shadowX, shadowY, width, height, filterEffect.floodColor, fixed);
+                } else {
+                    for (int row = -radius; row < height + radius; ++row) {
+                        for (int column = -radius; column < width + radius; ++column) {
+                            const int outsideX = column < 0 ? -column : (column >= width ? column - width + 1 : 0);
+                            const int outsideY = row < 0 ? -row : (row >= height ? row - height + 1 : 0);
+                            const int distance = std::max(outsideX, outsideY);
+                            if (distance > radius) {
+                                continue;
+                            }
+                            Color blurred = filterEffect.floodColor;
+                            blurred.alpha = static_cast<std::uint8_t>(filterEffect.floodColor.alpha * (radius - distance + 1) / (radius + 1));
+                            Fill(shadowX + column, shadowY + row, 1, 1, blurred, fixed);
+                        }
+                    }
+                }
+                Fill(x, y, width, height, shown, fixed);
             } else if (!painted && filtered && filterEffect.blur > 0 && shown.alpha != 0 && width > 0 && height > 0) {
                 const int radius = filterEffect.blur;
                 for (int row = -radius; row < height + radius; ++row) {
@@ -4113,6 +4513,10 @@ struct Engine {
                 outline += ' ';
             }
             outline += "Z";
+            SvgFilter roundShadow;
+            if (ResolveFilter(node, space, roundShadow) && roundShadow.dropShadow) {
+                PaintPath(outline, static_cast<int>(space.originX) + roundShadow.shadowDx, static_cast<int>(space.originY) + roundShadow.shadowDy, roundShadow.floodColor, Color{0, 0, 0, 0}, fixed, thickness, space.scaleX, space.scaleY, space.minX, space.minY, false, nullptr, nullptr);
+            }
             PaintPath(outline, static_cast<int>(space.originX), static_cast<int>(space.originY), fill, stroke, fixed, thickness, space.scaleX, space.scaleY, space.minX, space.minY, false, &node, &space);
             RememberSvgLink(node, SvgX(space, centerX - radiusX), SvgY(space, centerY - radiusY), SvgLength(space, radiusX * 2, true), SvgLength(space, radiusY * 2, false), fixed);
         } else if (!space.hidden && tag == "circle") {
@@ -4122,6 +4526,10 @@ struct Engine {
             const int cy = space.shapeRendering == 2 ? static_cast<int>(std::lround(rawCy)) : SvgY(space, SvgNumber(node, "cy", 0));
             const int radiusX = SvgLength(space, SvgNumber(node, "r", 0), true);
             const int radiusY = SvgLength(space, SvgNumber(node, "r", 0), false);
+            SvgFilter circleShadow;
+            if (ResolveFilter(node, space, circleShadow) && circleShadow.dropShadow) {
+                FillEllipseShadow(cx + circleShadow.shadowDx, cy + circleShadow.shadowDy, radiusX, radiusY, circleShadow.blur, circleShadow.floodColor, fixed);
+            }
             FillEllipse(cx, cy, radiusX, radiusY, fill, fixed);
             StrokeEllipse(cx, cy, radiusX, radiusY, thickness, stroke, fixed);
             RememberSvgLink(node, cx - radiusX, cy - radiusY, radiusX * 2, radiusY * 2, fixed);
@@ -4132,6 +4540,10 @@ struct Engine {
             const int cy = space.shapeRendering == 2 ? static_cast<int>(std::lround(rawCy)) : SvgY(space, SvgNumber(node, "cy", 0));
             const int radiusX = SvgLength(space, SvgNumber(node, "rx", 0), true);
             const int radiusY = SvgLength(space, SvgNumber(node, "ry", 0), false);
+            SvgFilter ellipseShadow;
+            if (ResolveFilter(node, space, ellipseShadow) && ellipseShadow.dropShadow) {
+                FillEllipseShadow(cx + ellipseShadow.shadowDx, cy + ellipseShadow.shadowDy, radiusX, radiusY, ellipseShadow.blur, ellipseShadow.floodColor, fixed);
+            }
             FillEllipse(cx, cy, radiusX, radiusY, fill, fixed);
             StrokeEllipse(cx, cy, radiusX, radiusY, thickness, stroke, fixed);
             RememberSvgLink(node, cx - radiusX, cy - radiusY, radiusX * 2, radiusY * 2, fixed);
@@ -4179,68 +4591,36 @@ struct Engine {
                     }
                 }
             }
+            SvgFilter lineShadow;
+            if (ResolveFilter(node, space, lineShadow) && lineShadow.dropShadow) {
+                StrokeLine(x1 + lineShadow.shadowDx, y1 + lineShadow.shadowDy, x2 + lineShadow.shadowDx, y2 + lineShadow.shadowDy, lineShadow.floodColor, fixed, thickness, dasharray, std::atof(AttributeValue(node, "stroke-dashoffset").c_str()));
+            }
             StrokeLine(x1, y1, x2, y2, stroke, fixed, thickness, dasharray, std::atof(AttributeValue(node, "stroke-dashoffset").c_str()));
             PaintLineMarkers(node, space, x1, y1, x2, y2, fixed);
             RememberSvgLink(node, std::min(x1, x2), std::min(y1, y2), std::abs(x2 - x1) + thickness, std::abs(y2 - y1) + thickness, fixed);
         } else if (!space.hidden && (tag == "polygon" || tag == "polyline")) {
             const std::vector<SvgPoint> points = MapSvgPoints(ParsePointList(AttributeValue(node, "points")), space);
+            SvgFilter shapeShadow;
+            if (ResolveFilter(node, space, shapeShadow) && shapeShadow.dropShadow) {
+                std::vector<SvgPoint> shifted;
+                shifted.reserve(points.size());
+                for (const SvgPoint& point : points) {
+                    shifted.push_back(SvgPoint{point.x + shapeShadow.shadowDx, point.y + shapeShadow.shadowDy});
+                }
+                if (tag == "polygon") {
+                    FillPolygon(shifted, 0, 0, shapeShadow.floodColor, fixed, space.fillEvenOdd);
+                }
+                if (tag == "polyline" || stroke.alpha != 0) {
+                    StrokePolyline(shifted, 0, 0, shapeShadow.floodColor, fixed, tag == "polygon", thickness);
+                }
+            }
             if (tag == "polygon") {
                 FillPolygon(points, 0, 0, fill, fixed, space.fillEvenOdd);
             }
             StrokePolyline(points, 0, 0, stroke, fixed, tag == "polygon", thickness);
-            const std::string join = ToLowerAscii(AttributeValue(node, "stroke-linejoin"));
-            const double miterLimit = AttributeValue(node, "stroke-miterlimit").empty() ? 4 : std::atof(AttributeValue(node, "stroke-miterlimit").c_str());
-            if (stroke.alpha != 0 && join != "round" && join != "bevel" && thickness > 1 && points.size() > 2) {
-                for (std::size_t index = 1; index + 1 < points.size(); ++index) {
-                    const double ax = points[index].x - points[index - 1].x;
-                    const double ay = points[index].y - points[index - 1].y;
-                    const double bx = points[index + 1].x - points[index].x;
-                    const double by = points[index + 1].y - points[index].y;
-                    const double aLength = std::sqrt(ax * ax + ay * ay);
-                    const double bLength = std::sqrt(bx * bx + by * by);
-                    if (aLength < 1 || bLength < 1) {
-                        continue;
-                    }
-                    const double ux = ax / aLength;
-                    const double uy = ay / aLength;
-                    const double vx = bx / bLength;
-                    const double vy = by / bLength;
-                    const double dot = std::max(-1.0, std::min(1.0, ux * vx + uy * vy));
-                    const double sine = std::sin(std::acos(dot) / 2);
-                    if (sine < 0.05 || (1.0 / sine) > miterLimit) {
-                        continue;
-                    }
-                    const double cross = ux * vy - uy * vx;
-                    double normalX = cross >= 0 ? uy + vy : -uy - vy;
-                    double normalY = cross >= 0 ? -ux - vx : ux + vx;
-                    const double normalLength = std::sqrt(normalX * normalX + normalY * normalY);
-                    if (normalLength < 0.001) {
-                        continue;
-                    }
-                    normalX /= normalLength;
-                    normalY /= normalLength;
-                    const double extension = thickness / 2.0 / sine;
-                    const int brush = std::max(1, thickness / 2);
-                    for (double distance = thickness / 2.0 + 1; distance <= extension; distance += 1) {
-                        const int tipX = static_cast<int>(points[index].x + normalX * distance) - brush / 2;
-                        const int tipY = static_cast<int>(points[index].y + normalY * distance) - brush / 2;
-                        Fill(tipX, tipY, brush, brush, stroke, fixed);
-                    }
-                }
-            }
-            if (join == "round" && thickness > 1 && points.size() > 2) {
-                const int radius = std::max(1, thickness / 2);
-                for (std::size_t index = 1; index + 1 < points.size(); ++index) {
-                    const int centerX = static_cast<int>(points[index].x);
-                    const int centerY = static_cast<int>(points[index].y);
-                    for (int row = -radius; row <= radius; ++row) {
-                        for (int column = -radius; column <= radius; ++column) {
-                            if (column * column + row * row <= radius * radius) {
-                                Fill(centerX + column, centerY + row, 1, 1, stroke, fixed);
-                            }
-                        }
-                    }
-                }
+            StrokeCorners(points, 0, 0, stroke, fixed, thickness, space.lineJoin, space.miterLimit);
+            if (tag == "polyline") {
+                StrokeCaps(points, 0, 0, stroke, fixed, thickness, space.lineCap);
             }
             if (!AttributeValue(node, "marker-mid").empty()) {
                 const std::size_t last = points.size();
@@ -4262,6 +4642,11 @@ struct Engine {
                 RememberSvgLink(node, minX, minY, maxX - minX, maxY - minY, fixed);
             }
         } else         if (!space.hidden && tag == "path") {
+            SvgFilter pathShadow;
+            if (ResolveFilter(node, space, pathShadow) && pathShadow.dropShadow) {
+                PaintPath(AttributeValue(node, "d"), static_cast<int>(space.originX) + pathShadow.shadowDx, static_cast<int>(space.originY) + pathShadow.shadowDy, pathShadow.floodColor, Color{0, 0, 0, 0}, fixed, thickness,
+                    space.scaleX, space.scaleY, space.minX, space.minY, space.fillEvenOdd, nullptr, nullptr);
+            }
             PaintPath(AttributeValue(node, "d"), static_cast<int>(space.originX), static_cast<int>(space.originY), fill, stroke, fixed, thickness,
                 space.scaleX, space.scaleY, space.minX, space.minY, space.fillEvenOdd, &node, &space);
         } else if (!space.hidden && tag == "image") {
@@ -4285,6 +4670,29 @@ struct Engine {
                 fetchMode = ToLowerAscii(AttributeValue(node, "crossorigin")) == "use-credentials" ? "include" : "anonymous";
             }
             NoteResourceFetch(href, ToLowerAscii(AttributeValue(node, "fetchpriority")), fetchMode);
+            SvgFilter imageShadow;
+            if (ResolveFilter(node, space, imageShadow) && imageShadow.dropShadow) {
+                const int radius = imageShadow.blur;
+                const int shadowX = op.x + imageShadow.shadowDx;
+                const int shadowY = op.y + imageShadow.shadowDy;
+                if (radius <= 0) {
+                    Fill(shadowX, shadowY, op.width, op.height, imageShadow.floodColor, fixed);
+                } else {
+                    for (int row = -radius; row < op.height + radius; ++row) {
+                        for (int column = -radius; column < op.width + radius; ++column) {
+                            const int outsideX = column < 0 ? -column : (column >= op.width ? column - op.width + 1 : 0);
+                            const int outsideY = row < 0 ? -row : (row >= op.height ? row - op.height + 1 : 0);
+                            const int distance = std::max(outsideX, outsideY);
+                            if (distance > radius) {
+                                continue;
+                            }
+                            Color blurred = imageShadow.floodColor;
+                            blurred.alpha = static_cast<std::uint8_t>(imageShadow.floodColor.alpha * (radius - distance + 1) / (radius + 1));
+                            Fill(shadowX + column, shadowY + row, 1, 1, blurred, fixed);
+                        }
+                    }
+                }
+            }
             op.fixed = fixed;
             result->ops.push_back(op);
             RememberSvgLink(node, op.x, op.y, op.width, op.height, fixed);
@@ -4390,6 +4798,14 @@ struct Engine {
                 double glyphY = 0;
                 if (PointAlong(course, exactSpacing ? glyphIndex * exactStep : traveled, glyphX, glyphY)) {
                     const int sideShift = ToLowerAscii(AttributeValue(node, "side")) == "right" ? 0 : textStyle.fontSizePx;
+                    SvgFilter pathShadow;
+                    if (ResolveFilter(node, space, pathShadow) && pathShadow.dropShadow) {
+                        ResolvedStyle shadowStyle = textStyle;
+                        shadowStyle.color = pathShadow.floodColor;
+                        shadowStyle.underline = false;
+                        shadowStyle.strike = false;
+                        Text(static_cast<int>(glyphX) + pathShadow.shadowDx, static_cast<int>(glyphY) - sideShift + pathShadow.shadowDy, glyph, shadowStyle, fixed);
+                    }
                     Text(static_cast<int>(glyphX), static_cast<int>(glyphY) - sideShift, glyph, textStyle, fixed);
                 }
                 ++glyphIndex;
@@ -4477,6 +4893,18 @@ struct Engine {
                     baseline = -SvgLength(space, std::atof(baselineShift.c_str()), false);
                 }
                 const int textY = SvgY(space, SvgNumber(node, "y", 0)) + SvgLength(space, SvgNumber(node, "dy", 0), false) + baseline - dominantDrop;
+                SvgFilter textShadow;
+                const bool shadowText = ResolveFilter(node, space, textShadow) && textShadow.dropShadow;
+                auto paintGlyph = [&](int glyphX, int glyphY, const std::string& glyph, const ResolvedStyle& style) {
+                    if (shadowText) {
+                        ResolvedStyle shadowStyle = style;
+                        shadowStyle.color = textShadow.floodColor;
+                        shadowStyle.underline = false;
+                        shadowStyle.strike = false;
+                        Text(glyphX + textShadow.shadowDx, glyphY + textShadow.shadowDy, glyph, shadowStyle, fixed);
+                    }
+                    Text(glyphX, glyphY, glyph, style, fixed);
+                };
                 const std::string writingMode = ToLowerAscii(AttributeValue(node, "writing-mode"));
                 if ((writingMode == "tb" || writingMode.find("vertical") != std::string::npos) && !content.empty()) {
                     int cursor = textY;
@@ -4485,7 +4913,7 @@ struct Engine {
                     for (std::size_t byte = 0; byte < content.size(); ++byte) {
                         const std::string glyph(1, content[byte]);
                         const int advance = upright ? textStyle.fontSizePx : std::max(1, MeasureTextPx(glyph, textStyle.fontSizePx, textStyle.bold, textStyle.italic, textStyle.fontFamily));
-                        Text(textX, cursor, glyph, textStyle, fixed);
+                        paintGlyph(textX, cursor, glyph, textStyle);
                         cursor += advance;
                     }
                     RememberSvgLink(node, textX, textY, textStyle.fontSizePx, std::max(1, cursor - textY), fixed);
@@ -4561,7 +4989,7 @@ struct Engine {
                     int cursor = textY;
                     for (std::size_t byte = 0; byte < content.size(); ++byte) {
                         const std::string glyph(1, content[byte]);
-                        Text(textX, cursor, glyph, textStyle, fixed);
+                        paintGlyph(textX, cursor, glyph, textStyle);
                         cursor += textStyle.fontSizePx;
                     }
                     RememberSvgLink(node, textX, textY, textStyle.fontSizePx, std::max(1, cursor - textY), fixed);
@@ -4570,7 +4998,7 @@ struct Engine {
                     for (std::size_t byte = 0; byte < content.size(); ++byte) {
                         const std::string glyph(1, content[byte]);
                         const int advance = std::max(1, static_cast<int>(MeasureTextPx(glyph, textStyle.fontSizePx, textStyle.bold, textStyle.italic, textStyle.fontFamily) * stretch + 0.5));
-                        Text(cursor, textY, glyph, textStyle, fixed);
+                        paintGlyph(cursor, textY, glyph, textStyle);
                         cursor += advance;
                     }
                     RememberSvgLink(node, textX, textY, std::max(1, cursor - textX), textStyle.fontSizePx, fixed);
@@ -4584,7 +5012,7 @@ struct Engine {
                             glyphStyle.fontSizePx = std::max(1, textStyle.fontSizePx * 7 / 10);
                         }
                         const int advance = std::max(1, MeasureTextPx(glyph, glyphStyle.fontSizePx, glyphStyle.bold, glyphStyle.italic, glyphStyle.fontFamily));
-                        Text(cursor, textY, glyph, glyphStyle, fixed);
+                        paintGlyph(cursor, textY, glyph, glyphStyle);
                         cursor += advance;
                     }
                     RememberSvgLink(node, textX, textY, std::max(1, cursor - textX), textStyle.fontSizePx, fixed);
@@ -4593,7 +5021,7 @@ struct Engine {
                     for (std::size_t byte = 0; byte < content.size(); ++byte) {
                         const std::string glyph(1, content[byte]);
                         const int advance = std::max(1, MeasureTextPx(glyph, textStyle.fontSizePx, textStyle.bold, textStyle.italic, textStyle.fontFamily));
-                        Text(cursor, textY, glyph, textStyle, fixed);
+                        paintGlyph(cursor, textY, glyph, textStyle);
                         cursor += advance + spacing;
                         if (glyph == " ") {
                             cursor += wordSpacing;
@@ -4601,7 +5029,7 @@ struct Engine {
                     }
                     RememberSvgLink(node, textX, textY, std::max(1, cursor - textX), textStyle.fontSizePx, fixed);
                 } else {
-                    Text(textX, textY, content, textStyle, fixed);
+                    paintGlyph(textX, textY, content, textStyle);
                     RememberSvgLink(node, textX, textY, std::max(1, textWidth), textStyle.fontSizePx, fixed);
                 }
                 }
@@ -4616,6 +5044,9 @@ struct Engine {
             }
         } else if (tag == "svg" || tag == "g" || tag == "a" || tag == "symbol" || tag == "defs" || tag == "marker" || tag == "text" ||
                    node.kind == ElementKind::Svg) {
+            if (!AttributeValue(node, "filter").empty() && tag != "defs" && tag != "marker") {
+                space.filterUrl = AttributeValue(node, "filter");
+            }
             for (const std::unique_ptr<Node>& child : node.children) {
                 if (child->type == Node::Type::Element) {
                     PaintSvgTree(*child, space, fixed);

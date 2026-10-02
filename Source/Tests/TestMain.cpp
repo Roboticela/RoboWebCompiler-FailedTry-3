@@ -482,6 +482,152 @@ void TestHtmlBehavior() {
     if (pathBox != nullptr) {
         EXPECT(RoboWeb::PixelRed(pathFrame, pathBox->x + 8, pathBox->y + 8) == 255);
     }
+    RoboWeb::Document curvePath = Parse(
+        "<!DOCTYPE html><svg width='40' height='40'><path d='M2 30 Q20 2 38 30 Z' fill='#ff0000'/></svg>", diagnostics);
+    RoboWeb::LayoutResult curveLayout = RoboWeb::LayoutDocument(curvePath, 120, 80);
+    RoboWeb::Framebuffer curveFrame = RoboWeb::RenderDocument(curveLayout, 0);
+    const RoboWeb::ElementBox* curveBox = RoboWeb::FindBox(curveLayout, "svg");
+    EXPECT(curveBox != nullptr);
+    if (curveBox != nullptr) {
+        EXPECT(RoboWeb::PixelGreen(curveFrame, curveBox->x + 20, curveBox->y + 22) == 0);
+        EXPECT(RoboWeb::PixelGreen(curveFrame, curveBox->x + 20, curveBox->y + 8) == 255);
+    }
+    RoboWeb::Document arcPath = Parse(
+        "<!DOCTYPE html><svg width='40' height='40'><path d='M8 20 A12 12 0 1 1 32 20 A12 12 0 1 1 8 20 Z' fill='#ff0000'/></svg>",
+        diagnostics);
+    RoboWeb::LayoutResult arcLayout = RoboWeb::LayoutDocument(arcPath, 120, 80);
+    RoboWeb::Framebuffer arcFrame = RoboWeb::RenderDocument(arcLayout, 0);
+    const RoboWeb::ElementBox* arcBox = RoboWeb::FindBox(arcLayout, "svg");
+    EXPECT(arcBox != nullptr);
+    if (arcBox != nullptr) {
+        EXPECT(RoboWeb::PixelGreen(arcFrame, arcBox->x + 20, arcBox->y + 20) == 0);
+        EXPECT(RoboWeb::PixelGreen(arcFrame, arcBox->x + 2, arcBox->y + 2) == 255);
+    }
+    RoboWeb::Document shadowShape = Parse(
+        "<!DOCTYPE html><svg width='40' height='20'><defs><filter id='s'><feDropShadow dx='14' dy='0' stdDeviation='0' flood-color='#00ff00' flood-opacity='1'/></filter></defs><rect width='8' height='8' fill='#ff0000' filter='url(#s)'/></svg>",
+        diagnostics);
+    RoboWeb::LayoutResult shadowLayout = RoboWeb::LayoutDocument(shadowShape, 120, 80);
+    RoboWeb::Framebuffer shadowFrame = RoboWeb::RenderDocument(shadowLayout, 0);
+    const RoboWeb::ElementBox* shadowBox = RoboWeb::FindBox(shadowLayout, "svg");
+    EXPECT(shadowBox != nullptr);
+    if (shadowBox != nullptr) {
+        EXPECT(RoboWeb::PixelGreen(shadowFrame, shadowBox->x + 2, shadowBox->y + 2) == 0);
+        EXPECT(RoboWeb::PixelRed(shadowFrame, shadowBox->x + 16, shadowBox->y + 2) == 0);
+        EXPECT(RoboWeb::PixelGreen(shadowFrame, shadowBox->x + 16, shadowBox->y + 2) == 255);
+    }
+    RoboWeb::Document roundShadow = Parse(
+        "<!DOCTYPE html><svg width='48' height='24'><defs><filter id='s'><feDropShadow dx='20' dy='0' stdDeviation='0' flood-color='#00ff00' flood-opacity='1'/></filter></defs><circle cx='8' cy='8' r='6' fill='#ff0000' filter='url(#s)'/></svg>",
+        diagnostics);
+    RoboWeb::LayoutResult roundShadowLayout = RoboWeb::LayoutDocument(roundShadow, 140, 80);
+    RoboWeb::Framebuffer roundShadowFrame = RoboWeb::RenderDocument(roundShadowLayout, 0);
+    const RoboWeb::ElementBox* roundShadowBox = RoboWeb::FindBox(roundShadowLayout, "svg");
+    EXPECT(roundShadowBox != nullptr);
+    if (roundShadowBox != nullptr) {
+        EXPECT(RoboWeb::PixelGreen(roundShadowFrame, roundShadowBox->x + 8, roundShadowBox->y + 8) == 0);
+        EXPECT(RoboWeb::PixelRed(roundShadowFrame, roundShadowBox->x + 28, roundShadowBox->y + 8) == 0);
+        EXPECT(RoboWeb::PixelGreen(roundShadowFrame, roundShadowBox->x + 28, roundShadowBox->y + 8) == 255);
+    }
+    RoboWeb::Document pathShadow = Parse(
+        "<!DOCTYPE html><svg width='48' height='24'><defs><filter id='s'><feDropShadow dx='20' dy='0' stdDeviation='0' flood-color='#00ff00' flood-opacity='1'/></filter></defs><path d='M2 2 H12 V14 H2 Z' fill='#ff0000' filter='url(#s)'/></svg>",
+        diagnostics);
+    RoboWeb::LayoutResult pathShadowLayout = RoboWeb::LayoutDocument(pathShadow, 140, 80);
+    RoboWeb::Framebuffer pathShadowFrame = RoboWeb::RenderDocument(pathShadowLayout, 0);
+    const RoboWeb::ElementBox* pathShadowBox = RoboWeb::FindBox(pathShadowLayout, "svg");
+    EXPECT(pathShadowBox != nullptr);
+    if (pathShadowBox != nullptr) {
+        EXPECT(RoboWeb::PixelGreen(pathShadowFrame, pathShadowBox->x + 6, pathShadowBox->y + 6) == 0);
+        EXPECT(RoboWeb::PixelRed(pathShadowFrame, pathShadowBox->x + 26, pathShadowBox->y + 6) == 0);
+        EXPECT(RoboWeb::PixelGreen(pathShadowFrame, pathShadowBox->x + 26, pathShadowBox->y + 6) == 255);
+    }
+    RoboWeb::Document polyShadow = Parse(
+        "<!DOCTYPE html><svg width='48' height='24'><defs><filter id='s'><feDropShadow dx='20' dy='0' stdDeviation='0' flood-color='#00ff00' flood-opacity='1'/></filter></defs><polygon points='2,2 14,2 14,14 2,14' fill='#ff0000' filter='url(#s)'/></svg>",
+        diagnostics);
+    RoboWeb::LayoutResult polyShadowLayout = RoboWeb::LayoutDocument(polyShadow, 140, 80);
+    RoboWeb::Framebuffer polyShadowFrame = RoboWeb::RenderDocument(polyShadowLayout, 0);
+    const RoboWeb::ElementBox* polyShadowBox = RoboWeb::FindBox(polyShadowLayout, "svg");
+    EXPECT(polyShadowBox != nullptr);
+    if (polyShadowBox != nullptr) {
+        EXPECT(RoboWeb::PixelGreen(polyShadowFrame, polyShadowBox->x + 6, polyShadowBox->y + 6) == 0);
+        EXPECT(RoboWeb::PixelRed(polyShadowFrame, polyShadowBox->x + 26, polyShadowBox->y + 6) == 0);
+        EXPECT(RoboWeb::PixelGreen(polyShadowFrame, polyShadowBox->x + 26, polyShadowBox->y + 6) == 255);
+    }
+    RoboWeb::Document textShadow = Parse(
+        "<!DOCTYPE html><svg width='80' height='24'><defs><filter id='s'><feDropShadow dx='28' dy='0' stdDeviation='0' flood-color='#00ff00' flood-opacity='1'/></filter></defs><text x='2' y='2' dominant-baseline='hanging' fill='#ff0000' filter='url(#s)'>M</text></svg>",
+        diagnostics);
+    RoboWeb::LayoutResult textShadowLayout = RoboWeb::LayoutDocument(textShadow, 160, 80);
+    const RoboWeb::ElementBox* textShadowBox = RoboWeb::FindBox(textShadowLayout, "svg");
+    EXPECT(textShadowBox != nullptr);
+    if (textShadowBox != nullptr) {
+        bool sawInk = false;
+        bool sawOffset = false;
+        for (const RoboWeb::DrawOp& op : textShadowLayout.ops) {
+            if (op.kind != RoboWeb::DrawOp::Kind::Text || op.text != "M") {
+                continue;
+            }
+            if (op.color.red == 255 && op.color.green == 0 && op.x < textShadowBox->x + 20) {
+                sawInk = true;
+            }
+            if (op.color.red == 0 && op.color.green == 255 && op.x >= textShadowBox->x + 20) {
+                sawOffset = true;
+            }
+        }
+        EXPECT(sawInk);
+        EXPECT(sawOffset);
+    }
+    RoboWeb::Document imageShadow = Parse(
+        "<!DOCTYPE html><svg width='40' height='20'><defs><filter id='s'><feDropShadow dx='16' dy='0' stdDeviation='0' flood-color='#00ff00' flood-opacity='1'/></filter></defs><image href='mark.png' width='8' height='8' filter='url(#s)'/></svg>",
+        diagnostics);
+    RoboWeb::LayoutResult imageShadowLayout = RoboWeb::LayoutDocument(imageShadow, 140, 80);
+    RoboWeb::Framebuffer imageShadowFrame = RoboWeb::RenderDocument(imageShadowLayout, 0);
+    const RoboWeb::ElementBox* imageShadowBox = RoboWeb::FindBox(imageShadowLayout, "svg");
+    EXPECT(imageShadowBox != nullptr);
+    if (imageShadowBox != nullptr) {
+        EXPECT(RoboWeb::PixelRed(imageShadowFrame, imageShadowBox->x + 18, imageShadowBox->y + 2) == 0);
+        EXPECT(RoboWeb::PixelGreen(imageShadowFrame, imageShadowBox->x + 18, imageShadowBox->y + 2) == 255);
+        bool sawPicture = false;
+        for (const RoboWeb::DrawOp& op : imageShadowLayout.ops) {
+            if (op.kind == RoboWeb::DrawOp::Kind::Image && op.x < imageShadowBox->x + 12) {
+                sawPicture = true;
+            }
+        }
+        EXPECT(sawPicture);
+    }
+    RoboWeb::Document groupShadow = Parse(
+        "<!DOCTYPE html><svg width='40' height='20'><defs><filter id='s'><feDropShadow dx='16' dy='0' stdDeviation='0' flood-color='#00ff00' flood-opacity='1'/></filter></defs><g filter='url(#s)'><rect width='8' height='8' fill='#ff0000'/></g></svg>",
+        diagnostics);
+    RoboWeb::LayoutResult groupShadowLayout = RoboWeb::LayoutDocument(groupShadow, 140, 80);
+    RoboWeb::Framebuffer groupShadowFrame = RoboWeb::RenderDocument(groupShadowLayout, 0);
+    const RoboWeb::ElementBox* groupShadowBox = RoboWeb::FindBox(groupShadowLayout, "svg");
+    EXPECT(groupShadowBox != nullptr);
+    if (groupShadowBox != nullptr) {
+        EXPECT(RoboWeb::PixelGreen(groupShadowFrame, groupShadowBox->x + 2, groupShadowBox->y + 2) == 0);
+        EXPECT(RoboWeb::PixelRed(groupShadowFrame, groupShadowBox->x + 18, groupShadowBox->y + 2) == 0);
+        EXPECT(RoboWeb::PixelGreen(groupShadowFrame, groupShadowBox->x + 18, groupShadowBox->y + 2) == 255);
+    }
+    RoboWeb::Document joinPath = Parse(
+        "<!DOCTYPE html><svg width='48' height='40'><path d='M10 10 H30 V30' fill='none' stroke='#ff0000' stroke-width='8' stroke-linejoin='miter'/></svg>",
+        diagnostics);
+    RoboWeb::LayoutResult joinPathLayout = RoboWeb::LayoutDocument(joinPath, 160, 80);
+    RoboWeb::Framebuffer joinPathFrame = RoboWeb::RenderDocument(joinPathLayout, 0);
+    const RoboWeb::ElementBox* joinPathBox = RoboWeb::FindBox(joinPathLayout, "svg");
+    EXPECT(joinPathBox != nullptr);
+    if (joinPathBox != nullptr) {
+        EXPECT(RoboWeb::PixelGreen(joinPathFrame, joinPathBox->x + 31, joinPathBox->y + 4) == 0);
+        EXPECT(RoboWeb::PixelRed(joinPathFrame, joinPathBox->x + 31, joinPathBox->y + 4) == 255);
+        EXPECT(RoboWeb::PixelGreen(joinPathFrame, joinPathBox->x + 2, joinPathBox->y + 2) == 255);
+    }
+    RoboWeb::Document capPath = Parse(
+        "<!DOCTYPE html><svg width='40' height='24'><path d='M8 12 H24' fill='none' stroke='#ff0000' stroke-width='8' stroke-linecap='square'/></svg>",
+        diagnostics);
+    RoboWeb::LayoutResult capPathLayout = RoboWeb::LayoutDocument(capPath, 160, 80);
+    RoboWeb::Framebuffer capPathFrame = RoboWeb::RenderDocument(capPathLayout, 0);
+    const RoboWeb::ElementBox* capPathBox = RoboWeb::FindBox(capPathLayout, "svg");
+    EXPECT(capPathBox != nullptr);
+    if (capPathBox != nullptr) {
+        EXPECT(RoboWeb::PixelGreen(capPathFrame, capPathBox->x + 30, capPathBox->y + 12) == 0);
+        EXPECT(RoboWeb::PixelRed(capPathFrame, capPathBox->x + 30, capPathBox->y + 12) == 255);
+        EXPECT(RoboWeb::PixelGreen(capPathFrame, capPathBox->x + 2, capPathBox->y + 2) == 255);
+    }
     RoboWeb::Document scaled = Parse(
         "<!DOCTYPE html><svg width='40' height='20' viewBox='0 0 100 100'><rect x='0' y='0' width='50' height='100' fill='red'/></svg>",
         diagnostics);
@@ -783,6 +929,17 @@ void TestHtmlBehavior() {
     if (movedBox != nullptr) {
         EXPECT(RoboWeb::PixelGreen(movedFrame, movedBox->x + 2, movedBox->y + 4) == 255);
         EXPECT(RoboWeb::PixelGreen(movedFrame, movedBox->x + 12, movedBox->y + 4) == 0);
+    }
+    RoboWeb::Document curvedMotion = Parse(
+        "<!DOCTYPE html><svg width='90' height='40'><rect width='8' height='8' fill='#ff0000'><animateMotion dur='2s' path='M0 0 Q40 20 80 0'/></rect></svg>",
+        diagnostics);
+    RoboWeb::LayoutResult curvedMotionLayout = RoboWeb::LayoutDocument(curvedMotion, 180, 80);
+    RoboWeb::Framebuffer curvedMotionFrame = RoboWeb::RenderDocument(curvedMotionLayout, 0);
+    const RoboWeb::ElementBox* curvedMotionBox = RoboWeb::FindBox(curvedMotionLayout, "svg");
+    EXPECT(curvedMotionBox != nullptr);
+    if (curvedMotionBox != nullptr) {
+        EXPECT(RoboWeb::PixelGreen(curvedMotionFrame, curvedMotionBox->x + 44, curvedMotionBox->y + 2) == 255);
+        EXPECT(RoboWeb::PixelGreen(curvedMotionFrame, curvedMotionBox->x + 44, curvedMotionBox->y + 14) == 0);
     }
     RoboWeb::SetSvgAnimationTime(0);
     RoboWeb::Document grayed = Parse(
@@ -1134,6 +1291,18 @@ void TestHtmlBehavior() {
     EXPECT(scaledPatternBox != nullptr);
     if (scaledPatternBox != nullptr) {
         EXPECT(RoboWeb::PixelGreen(scaledPatternFrame, scaledPatternBox->x + 6, scaledPatternBox->y + 4) == 0);
+    }
+    RoboWeb::Document shiftedPattern = Parse(
+        "<!DOCTYPE html><svg width='32' height='16'><defs><pattern id='slide' width='16' height='16' patternUnits='userSpaceOnUse' patternTransform='translate(8,0)'><rect width='4' height='16' fill='#ff0000'/></pattern></defs><rect width='32' height='16' fill='url(#slide)'/></svg>",
+        diagnostics);
+    RoboWeb::LayoutResult shiftedPatternLayout = RoboWeb::LayoutDocument(shiftedPattern, 160, 80);
+    RoboWeb::Framebuffer shiftedPatternFrame = RoboWeb::RenderDocument(shiftedPatternLayout, 0);
+    const RoboWeb::ElementBox* shiftedPatternBox = RoboWeb::FindBox(shiftedPatternLayout, "svg");
+    EXPECT(shiftedPatternBox != nullptr);
+    if (shiftedPatternBox != nullptr) {
+        EXPECT(RoboWeb::PixelGreen(shiftedPatternFrame, shiftedPatternBox->x + 2, shiftedPatternBox->y + 4) == 255);
+        EXPECT(RoboWeb::PixelGreen(shiftedPatternFrame, shiftedPatternBox->x + 10, shiftedPatternBox->y + 4) == 0);
+        EXPECT(RoboWeb::PixelRed(shiftedPatternFrame, shiftedPatternBox->x + 10, shiftedPatternBox->y + 4) == 255);
     }
     RoboWeb::Document specular = Parse(
         "<!DOCTYPE html><svg width='20' height='20'><defs><filter id='shine'><feSpecularLighting lighting-color='#0000ff' specularConstant='1' specularExponent='1'><feDistantLight azimuth='0' elevation='90'/></feSpecularLighting></filter></defs><rect width='20' height='20' fill='red' filter='url(#shine)'/></svg>",
