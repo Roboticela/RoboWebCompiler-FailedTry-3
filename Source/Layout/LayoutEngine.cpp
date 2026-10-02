@@ -816,7 +816,35 @@ struct Engine {
         }
     }
 
-    void StrokeLine(int x0, int y0, int x1, int y1, Color color, bool fixed, int thickness = 1) {
+    void StrokeLine(int x0, int y0, int x1, int y1, Color color, bool fixed, int thickness = 1, const std::string& dasharray = std::string(), double dashOffset = 0) {
+        std::vector<double> dashes;
+        std::size_t dashIndex = 0;
+        double dashValue = 0;
+        while (ReadSvgNumber(dasharray, dashIndex, dashValue)) {
+            dashes.push_back(std::max(0.0, dashValue));
+        }
+        const bool dashed = !dashes.empty();
+        std::size_t pattern = 0;
+        double remaining = dashed ? dashes[0] : 0;
+        bool drawing = true;
+        if (dashed) {
+            double cycle = 0;
+            for (double dash : dashes) {
+                cycle += dash;
+            }
+            if (cycle > 0) {
+                dashOffset = std::fmod(dashOffset, cycle);
+                if (dashOffset < 0) {
+                    dashOffset += cycle;
+                }
+            }
+            while (!dashes.empty() && dashOffset >= dashes[pattern]) {
+                dashOffset -= dashes[pattern];
+                drawing = !drawing;
+                pattern = (pattern + 1) % dashes.size();
+            }
+            remaining = dashes[pattern] - dashOffset;
+        }
         const int deltaX = std::abs(x1 - x0);
         const int stepX = x0 < x1 ? 1 : -1;
         const int deltaY = -std::abs(y1 - y0);
@@ -824,7 +852,17 @@ struct Engine {
         int error = deltaX + deltaY;
         const int mark = std::max(1, thickness);
         for (int guard = 0; guard < 4096; ++guard) {
-            Fill(x0 - mark / 2, y0 - mark / 2, mark, mark, color, fixed);
+            if (!dashed || drawing) {
+                Fill(x0 - mark / 2, y0 - mark / 2, mark, mark, color, fixed);
+            }
+            if (dashed) {
+                remaining -= 1;
+                while (remaining <= 0 && !dashes.empty()) {
+                    drawing = !drawing;
+                    pattern = (pattern + 1) % dashes.size();
+                    remaining += dashes[pattern] == 0 ? 1 : dashes[pattern];
+                }
+            }
             if (x0 == x1 && y0 == y1) {
                 break;
             }
@@ -1126,6 +1164,9 @@ struct Engine {
         double rotateX = 0;
         double rotateY = 0;
         std::string textAnchor = "start";
+        double fillOpacity = 1;
+        double strokeOpacity = 1;
+        Color currentColor{0, 0, 0, 255};
     };
 
     Color WithOpacity(Color color, double opacity) {
@@ -1143,8 +1184,14 @@ struct Engine {
         if (!AttributeValue(node, "opacity").empty()) {
             space.opacity *= std::atof(AttributeValue(node, "opacity").c_str());
         }
+        if (!AttributeValue(node, "color").empty()) {
+            ParseColor(AttributeValue(node, "color"), space.currentColor);
+        }
         const std::string fillText = ToLowerAscii(AttributeValue(node, "fill"));
-        if (fillText == "none") {
+        if (fillText == "currentcolor") {
+            space.fill = space.currentColor;
+            space.fillUrl.clear();
+        } else if (fillText == "none") {
             space.fill.alpha = 0;
             space.fillUrl.clear();
         } else if (fillText.find("url(") != std::string::npos) {
@@ -1155,13 +1202,21 @@ struct Engine {
             space.fillUrl.clear();
         }
         const std::string strokeText = ToLowerAscii(AttributeValue(node, "stroke"));
-        if (strokeText == "none") {
+        if (strokeText == "currentcolor") {
+            space.stroke = space.currentColor;
+        } else if (strokeText == "none") {
             space.stroke.alpha = 0;
         } else if (!strokeText.empty() && strokeText.find("url(") == std::string::npos) {
             ParseColor(strokeText, space.stroke);
         }
         if (!AttributeValue(node, "stroke-width").empty()) {
             space.strokeWidth = std::atof(AttributeValue(node, "stroke-width").c_str());
+        }
+        if (!AttributeValue(node, "fill-opacity").empty()) {
+            space.fillOpacity = std::max(0.0, std::min(1.0, std::atof(AttributeValue(node, "fill-opacity").c_str())));
+        }
+        if (!AttributeValue(node, "stroke-opacity").empty()) {
+            space.strokeOpacity = std::max(0.0, std::min(1.0, std::atof(AttributeValue(node, "stroke-opacity").c_str())));
         }
         const std::string rule = ToLowerAscii(AttributeValue(node, "fill-rule"));
         if (rule == "evenodd") {
@@ -1198,7 +1253,7 @@ struct Engine {
     }
 
     bool SvgSwitchMatches(const Node& child) {
-        if (HasAttribute(child, "requiredextensions")) {
+        if (HasAttribute(child, "requiredextensions") || HasAttribute(child, "requiredfeatures")) {
             return false;
         }
         const std::string languages = ToLowerAscii(AttributeValue(child, "systemlanguage"));
@@ -1243,6 +1298,9 @@ struct Engine {
     void RememberSvgLink(Node& node, int x, int y, int width, int height, bool fixed) {
         Node* link = SvgLink(node);
         if (link == nullptr || width <= 0 || height <= 0) {
+            return;
+        }
+        if (ToLowerAscii(AttributeValue(node, "pointer-events")) == "none" || ToLowerAscii(AttributeValue(*link, "pointer-events")) == "none") {
             return;
         }
         ResolvedStyle style;
@@ -1506,15 +1564,43 @@ struct Engine {
             const double centerY = objectBox ? y + cy * height : SvgY(space, cy);
             const double radiusX = std::max(0.001, objectBox ? radius * width : radius * space.scaleX);
             const double radiusY = std::max(0.001, objectBox ? radius * height : radius * space.scaleY);
+            const double focalX = AttributeValue(*gradient, "fx").empty() ? centerX : (objectBox ? x + SvgOffset(AttributeValue(*gradient, "fx")) * width : SvgX(space, SvgOffset(AttributeValue(*gradient, "fx"))));
+            const double focalY = AttributeValue(*gradient, "fy").empty() ? centerY : (objectBox ? y + SvgOffset(AttributeValue(*gradient, "fy")) * height : SvgY(space, SvgOffset(AttributeValue(*gradient, "fy"))));
+            const double focusX = (focalX - centerX) / radiusX;
+            const double focusY = (focalY - centerY) / radiusY;
             for (int row = 0; row < height; ++row) {
                 for (int column = 0; column < width; ++column) {
                     if (space.clipped && (x + column < space.clipX || y + row < space.clipY || x + column >= space.clipX + space.clipWidth ||
                                              y + row >= space.clipY + space.clipHeight)) {
                         continue;
                     }
-                    const double dx = (x + column - centerX) / radiusX;
-                    const double dy = (y + row - centerY) / radiusY;
-                    Fill(x + column, y + row, 1, 1, WithOpacity(SampleStops(stops, std::sqrt(dx * dx + dy * dy)), space.opacity), fixed);
+                    const double pointX = (x + column - centerX) / radiusX;
+                    const double pointY = (y + row - centerY) / radiusY;
+                    const double vectorX = pointX - focusX;
+                    const double vectorY = pointY - focusY;
+                    double offset = 0;
+                    const double quadraticA = focusX * focusX + focusY * focusY - 1;
+                    const double quadraticB = 2 * (focusX * vectorX + focusY * vectorY);
+                    const double quadraticC = vectorX * vectorX + vectorY * vectorY;
+                    const double discriminant = quadraticB * quadraticB - 4 * quadraticA * quadraticC;
+                    if (std::abs(quadraticA) < 0.000001) {
+                        offset = std::abs(quadraticB) < 0.000001 ? 0 : -quadraticC / quadraticB;
+                    } else if (discriminant >= 0) {
+                        offset = (-quadraticB - std::sqrt(discriminant)) / (2 * quadraticA);
+                        const double other = (-quadraticB + std::sqrt(discriminant)) / (2 * quadraticA);
+                        if (offset < 0 || (other >= 0 && other < offset)) {
+                            offset = other;
+                        }
+                    }
+                    if (!AttributeValue(*gradient, "fr").empty() && radius > 0) {
+                        const double focalRadius = SvgOffset(AttributeValue(*gradient, "fr")) / radius;
+                        if (focalRadius >= 1) {
+                            offset = offset <= 1 ? 0 : offset;
+                        } else if (focalRadius > 0) {
+                            offset = (offset - focalRadius) / (1 - focalRadius);
+                        }
+                    }
+                    Fill(x + column, y + row, 1, 1, WithOpacity(SampleStops(stops, offset), space.opacity * space.fillOpacity), fixed);
                 }
             }
             return true;
@@ -1527,10 +1613,27 @@ struct Engine {
         double startY = objectBox ? y + y1 * height : SvgY(space, y1);
         double endX = objectBox ? x + x2 * width : SvgX(space, x2);
         double endY = objectBox ? y + y2 * height : SvgY(space, y2);
+        const std::string gradientTransform = AttributeValue(*gradient, "gradienttransform");
+        const std::size_t gradientScale = gradientTransform.find("scale");
+        if (gradientScale != std::string::npos) {
+            std::size_t index = gradientTransform.find('(', gradientScale);
+            double scaleX = 1;
+            double scaleY = 1;
+            if (index != std::string::npos) {
+                ++index;
+                if (ReadSvgNumber(gradientTransform, index, scaleX)) {
+                    scaleY = scaleX;
+                    ReadSvgNumber(gradientTransform, index, scaleY);
+                    endX = startX + (endX - startX) * scaleX;
+                    endY = startY + (endY - startY) * scaleY;
+                }
+            }
+        }
         const double deltaX = endX - startX;
         const double deltaY = endY - startY;
         const double length = deltaX * deltaX + deltaY * deltaY;
-            for (int row = 0; row < height; ++row) {
+        const std::string spread = ToLowerAscii(AttributeValue(*gradient, "spreadmethod"));
+        for (int row = 0; row < height; ++row) {
             for (int column = 0; column < width; ++column) {
                 if (space.clipped && (x + column < space.clipX || y + row < space.clipY || x + column >= space.clipX + space.clipWidth ||
                                          y + row >= space.clipY + space.clipHeight)) {
@@ -1540,7 +1643,17 @@ struct Engine {
                 if (length > 0) {
                     t = ((x + column - startX) * deltaX + (y + row - startY) * deltaY) / length;
                 }
-                Fill(x + column, y + row, 1, 1, WithOpacity(SampleStops(stops, t), space.opacity), fixed);
+                if (spread == "repeat") {
+                    t -= std::floor(t);
+                } else if (spread == "reflect") {
+                    if (t < 0) {
+                        t = -t;
+                    }
+                    const double period = std::floor(t);
+                    const double fraction = t - period;
+                    t = static_cast<int>(period) % 2 == 0 ? fraction : 1 - fraction;
+                }
+                Fill(x + column, y + row, 1, 1, WithOpacity(SampleStops(stops, t), space.opacity * space.fillOpacity), fixed);
             }
         }
         return true;
@@ -1640,8 +1753,20 @@ struct Engine {
         const double refX = std::atof(AttributeValue(*marker, "refx").c_str());
         const double refY = std::atof(AttributeValue(*marker, "refy").c_str());
         SvgSpace local = space;
-        local.originX = pixelX - refX * space.scaleX;
-        local.originY = pixelY - refY * space.scaleY;
+        if (!AttributeValue(*marker, "markerwidth").empty()) {
+            local.scaleX *= std::atof(AttributeValue(*marker, "markerwidth").c_str()) / 3.0;
+        }
+        if (!AttributeValue(*marker, "markerheight").empty()) {
+            local.scaleY *= std::atof(AttributeValue(*marker, "markerheight").c_str()) / 3.0;
+        }
+        const std::string orient = ToLowerAscii(AttributeValue(*marker, "orient"));
+        if (!orient.empty() && orient != "auto" && orient != "auto-start-reverse") {
+            local.rotateDeg += std::atof(orient.c_str());
+            local.rotateX = refX;
+            local.rotateY = refY;
+        }
+        local.originX = pixelX - refX * local.scaleX;
+        local.originY = pixelY - refY * local.scaleY;
         local.minX = 0;
         local.minY = 0;
         PaintSvgTree(*marker, local, fixed, true);
@@ -1684,6 +1809,26 @@ struct Engine {
                 tile.minY = 0;
                 tile.scaleX = space.scaleX;
                 tile.scaleY = space.scaleY;
+                if (ToLowerAscii(AttributeValue(*pattern, "patterncontentunits")) == "objectboundingbox") {
+                    tile.scaleX = tileWidth;
+                    tile.scaleY = tileHeight;
+                }
+                const std::string patternTransform = AttributeValue(*pattern, "patterntransform");
+                const std::size_t patternScale = patternTransform.find("scale");
+                if (patternScale != std::string::npos) {
+                    std::size_t index = patternTransform.find('(', patternScale);
+                    double scaleX = 1;
+                    double scaleY = 1;
+                    if (index != std::string::npos) {
+                        ++index;
+                        if (ReadSvgNumber(patternTransform, index, scaleX)) {
+                            scaleY = scaleX;
+                            ReadSvgNumber(patternTransform, index, scaleY);
+                            tile.scaleX *= scaleX;
+                            tile.scaleY *= scaleY;
+                        }
+                    }
+                }
                 tile.clipped = true;
                 tile.clipX = tileX;
                 tile.clipY = tileY;
@@ -1817,9 +1962,19 @@ struct Engine {
                         continue;
                     }
                     local = std::fmod(local, duration);
-                } else if (local >= duration) {
-                    continue;
+                } else {
+                    const double repeatDuration = clock(AttributeValue(*child, "repeatdur"));
+                    if (repeatDuration > 0) {
+                        if (local >= repeatDuration) {
+                            continue;
+                        }
+                        local = std::fmod(local, duration);
+                    } else if (local >= duration) {
+                        continue;
+                    }
                 }
+                const std::string calcMode = ToLowerAscii(AttributeValue(*child, "calcmode"));
+                const double progress = calcMode == "discrete" && local / duration < 0.5 ? 0 : (calcMode == "discrete" ? 1 : local / duration);
                 std::string value;
                 if (tag == "animatetransform") {
                     const std::string type = ToLowerAscii(AttributeValue(*child, "type"));
@@ -1884,7 +2039,23 @@ struct Engine {
                             value = interpolate(stops[static_cast<std::size_t>(index)], stops[static_cast<std::size_t>(index + 1)], mix);
                         }
                     } else {
-                        value = interpolate(AttributeValue(*child, "from"), AttributeValue(*child, "to"), local / duration);
+                        std::string from = AttributeValue(*child, "from");
+                        std::string to = AttributeValue(*child, "to");
+                        std::string base = "0";
+                        for (const Attribute& attributeValue : node.attributes) {
+                            if (ToLowerAscii(attributeValue.name) == ToLowerAscii(attribute)) {
+                                base = attributeValue.value;
+                                break;
+                            }
+                        }
+                        if (from.empty() && !AttributeValue(*child, "by").empty()) {
+                            from = base;
+                            to = std::to_string(static_cast<int>(std::atof(from.c_str()) + std::atof(AttributeValue(*child, "by").c_str()) + 0.5));
+                        }
+                        value = interpolate(from, to, progress);
+                        if (ToLowerAscii(AttributeValue(*child, "additive")) == "sum") {
+                            value = std::to_string(static_cast<int>(std::atof(base.c_str()) + std::atof(value.c_str()) + 0.5));
+                        }
                     }
                 }
                 if (value.empty()) {
@@ -1943,6 +2114,41 @@ struct Engine {
         int erode = 0;
         bool saturate = false;
         double saturateAmount = 1;
+        bool transfer = false;
+        double slope[4] = {1, 1, 1, 1};
+        double intercept[4] = {0, 0, 0, 0};
+        bool transferChannel[4] = {false, false, false, false};
+        bool blend = false;
+        int blendMode = 0;
+        Color blendColor{255, 255, 255, 255};
+        bool arithmetic = false;
+        double k1 = 0;
+        double k2 = 0;
+        double k3 = 0;
+        double k4 = 0;
+        bool tile = false;
+        bool convolve = false;
+        double convolveGain = 1;
+        double convolveBias = 0;
+        bool imageReplace = false;
+        Color imageColor{0, 0, 0, 255};
+        bool turbulence = false;
+        int turbulenceSeed = 0;
+        double turbulenceFrequency = 0;
+        bool diffuse = false;
+        double diffuseAmount = 1;
+        Color lightColor{255, 255, 255, 255};
+        bool pointLight = false;
+        double pointX = 0;
+        double pointY = 0;
+        double pointZ = 1;
+        bool spot = false;
+        double aimX = 0;
+        double aimY = 0;
+        double aimZ = 0;
+        double spotLimit = -1;
+        bool mergeSource = false;
+        bool mergeFlood = false;
         Color floodColor{0, 0, 0, 0};
         bool region = false;
         int x = 0;
@@ -1950,6 +2156,47 @@ struct Engine {
         int width = 0;
         int height = 0;
     };
+
+    void MapFilterRegion(const Node& filter, const Node& target, const Node& primitive, const SvgSpace& space, SvgFilter& effect) {
+        const bool objectBox = ToLowerAscii(AttributeValue(filter, "filterunits")) == "objectboundingbox";
+        if (!objectBox) {
+            effect.x = SvgX(space, SvgNumber(primitive, "x", 0));
+            effect.y = SvgY(space, SvgNumber(primitive, "y", 0));
+            effect.width = SvgLength(space, SvgNumber(primitive, "width", 0), true);
+            effect.height = SvgLength(space, SvgNumber(primitive, "height", 0), false);
+            return;
+        }
+        const double elementX = SvgNumber(target, "x", 0);
+        const double elementY = SvgNumber(target, "y", 0);
+        const double elementWidth = SvgNumber(target, "width", 0);
+        const double elementHeight = SvgNumber(target, "height", 0);
+        effect.x = SvgX(space, elementX + SvgOffset(AttributeValue(primitive, "x")) * elementWidth);
+        effect.y = SvgY(space, elementY + SvgOffset(AttributeValue(primitive, "y")) * elementHeight);
+        effect.width = std::max(0, SvgLength(space, SvgOffset(AttributeValue(primitive, "width")) * elementWidth, true));
+        effect.height = std::max(0, SvgLength(space, SvgOffset(AttributeValue(primitive, "height")) * elementHeight, false));
+    }
+
+    void ReadSvgLight(const SvgSpace& space, Node& lighting, SvgFilter& effect, double constant) {
+        for (const std::unique_ptr<Node>& lamp : lighting.children) {
+            const std::string lampTag = ToLowerAscii(lamp->tagName);
+            if (lampTag != "fepointlight" && lampTag != "fespotlight") {
+                continue;
+            }
+            effect.pointLight = true;
+            effect.spot = lampTag == "fespotlight";
+            effect.pointX = SvgX(space, std::atof(AttributeValue(*lamp, "x").c_str()));
+            effect.pointY = SvgY(space, std::atof(AttributeValue(*lamp, "y").c_str()));
+            effect.pointZ = std::atof(AttributeValue(*lamp, "z").c_str()) * std::max(space.scaleX, space.scaleY);
+            effect.diffuseAmount = constant;
+            if (effect.spot) {
+                effect.aimX = SvgX(space, std::atof(AttributeValue(*lamp, "pointsatx").c_str()));
+                effect.aimY = SvgY(space, std::atof(AttributeValue(*lamp, "pointsaty").c_str()));
+                effect.aimZ = std::atof(AttributeValue(*lamp, "pointsatz").c_str()) * std::max(space.scaleX, space.scaleY);
+                const double degrees = AttributeValue(*lamp, "limitingconeangle").empty() ? 90 : std::atof(AttributeValue(*lamp, "limitingconeangle").c_str());
+                effect.spotLimit = std::cos(degrees * std::acos(-1.0) / 180.0);
+            }
+        }
+    }
 
     bool ResolveFilter(Node& node, const SvgSpace& space, SvgFilter& effect) {
         const std::string id = SvgPaintId(AttributeValue(node, "filter"));
@@ -1965,6 +2212,8 @@ struct Engine {
             return false;
         }
         bool found = false;
+        Color lastColor{255, 255, 255, 255};
+        std::string lastName;
         for (const std::unique_ptr<Node>& child : filter->children) {
             const std::string tag = ToLowerAscii(child->tagName);
             if (tag == "feflood") {
@@ -1981,11 +2230,10 @@ struct Engine {
                 }
                 if (!AttributeValue(*child, "width").empty() && !AttributeValue(*child, "height").empty()) {
                     effect.region = true;
-                    effect.x = SvgX(space, SvgNumber(*child, "x", 0));
-                    effect.y = SvgY(space, SvgNumber(*child, "y", 0));
-                    effect.width = SvgLength(space, SvgNumber(*child, "width", 0), true);
-                    effect.height = SvgLength(space, SvgNumber(*child, "height", 0), false);
+                    MapFilterRegion(*filter, node, *child, space, effect);
                 }
+                lastColor = effect.floodColor;
+                lastName = AttributeValue(*child, "result");
                 found = true;
             } else if (tag == "feoffset") {
                 effect = SvgFilter();
@@ -2011,6 +2259,171 @@ struct Engine {
                     effect.saturate = true;
                     effect.saturateAmount = std::max(0.0, std::min(1.0, std::atof(AttributeValue(*child, "values").c_str())));
                 }
+                found = true;
+            } else if (tag == "fecomponenttransfer") {
+                effect = SvgFilter();
+                effect.transfer = true;
+                for (const std::unique_ptr<Node>& channel : child->children) {
+                    const std::string channelTag = ToLowerAscii(channel->tagName);
+                    int index = channelTag == "fefuncr" ? 0 : channelTag == "fefuncg" ? 1 : channelTag == "fefuncb" ? 2 : channelTag == "fefunca" ? 3 : -1;
+                    if (index < 0) {
+                        continue;
+                    }
+                    effect.transferChannel[index] = true;
+                    if (ToLowerAscii(AttributeValue(*channel, "type")) == "linear") {
+                        if (!AttributeValue(*channel, "slope").empty()) {
+                            effect.slope[index] = std::atof(AttributeValue(*channel, "slope").c_str());
+                        }
+                        if (!AttributeValue(*channel, "intercept").empty()) {
+                            effect.intercept[index] = std::atof(AttributeValue(*channel, "intercept").c_str());
+                        }
+                    }
+                }
+                found = true;
+            } else if (tag == "feblend") {
+                effect = SvgFilter();
+                effect.blend = true;
+                effect.blendColor = lastColor;
+                const std::string mode = ToLowerAscii(AttributeValue(*child, "mode"));
+                if (mode == "screen") {
+                    effect.blendMode = 2;
+                } else if (mode == "darken") {
+                    effect.blendMode = 3;
+                } else if (mode == "lighten") {
+                    effect.blendMode = 4;
+                } else {
+                    effect.blendMode = 1;
+                }
+                found = true;
+            } else if (tag == "fecomposite") {
+                effect = SvgFilter();
+                effect.arithmetic = ToLowerAscii(AttributeValue(*child, "operator")) == "arithmetic";
+                effect.blendColor = lastColor;
+                effect.k1 = std::atof(AttributeValue(*child, "k1").c_str());
+                effect.k2 = AttributeValue(*child, "k2").empty() ? 0 : std::atof(AttributeValue(*child, "k2").c_str());
+                effect.k3 = std::atof(AttributeValue(*child, "k3").c_str());
+                effect.k4 = std::atof(AttributeValue(*child, "k4").c_str());
+                found = effect.arithmetic;
+            } else if (tag == "fetile") {
+                effect = SvgFilter();
+                effect.tile = true;
+                if (!AttributeValue(*child, "width").empty() && !AttributeValue(*child, "height").empty()) {
+                    effect.region = true;
+                    MapFilterRegion(*filter, node, *child, space, effect);
+                }
+                found = true;
+            } else if (tag == "femerge") {
+                effect.mergeSource = false;
+                effect.mergeFlood = false;
+                for (const std::unique_ptr<Node>& mergeNode : child->children) {
+                    if (ToLowerAscii(mergeNode->tagName) != "femergenode") {
+                        continue;
+                    }
+                    const std::string input = ToLowerAscii(AttributeValue(*mergeNode, "in"));
+                    if (input.empty() || input == "sourcegraphic") {
+                        effect.mergeSource = true;
+                    } else if (!lastName.empty() && input == ToLowerAscii(lastName)) {
+                        effect.mergeFlood = true;
+                    }
+                }
+                effect.flood = effect.mergeFlood && !effect.mergeSource;
+                found = true;
+            } else if (tag == "feconvolvematrix") {
+                effect = SvgFilter();
+                effect.convolve = true;
+                double sum = 0;
+                std::size_t index = 0;
+                const std::string matrix = AttributeValue(*child, "kernelmatrix");
+                double value = 0;
+                while (ReadSvgNumber(matrix, index, value)) {
+                    sum += value;
+                }
+                const double divisor = AttributeValue(*child, "divisor").empty() ? (sum == 0 ? 1 : sum) : std::atof(AttributeValue(*child, "divisor").c_str());
+                effect.convolveGain = std::abs(divisor) < 0.000001 ? 0 : sum / divisor;
+                effect.convolveBias = std::atof(AttributeValue(*child, "bias").c_str());
+                found = true;
+            } else if (tag == "fedisplacementmap") {
+                effect = SvgFilter();
+                const double scale = std::atof(AttributeValue(*child, "scale").c_str()) * std::max(space.scaleX, space.scaleY);
+                const std::string xChannel = ToLowerAscii(AttributeValue(*child, "xchannelselector"));
+                const std::string yChannel = ToLowerAscii(AttributeValue(*child, "ychannelselector"));
+                auto channel = [&](const std::string& name) {
+                    if (name == "r") {
+                        return lastColor.red;
+                    }
+                    if (name == "g") {
+                        return lastColor.green;
+                    }
+                    if (name == "b") {
+                        return lastColor.blue;
+                    }
+                    return lastColor.alpha;
+                };
+                effect.dx = static_cast<int>(scale * (channel(xChannel.empty() ? "a" : xChannel) / 255.0 - 0.5));
+                effect.dy = static_cast<int>(scale * (channel(yChannel.empty() ? "a" : yChannel) / 255.0 - 0.5));
+                found = true;
+            } else if (tag == "feimage") {
+                effect = SvgFilter();
+                std::string href = AttributeValue(*child, "href");
+                if (href.empty()) {
+                    href = AttributeValue(*child, "xlink:href");
+                }
+                const std::string imageId = SvgPaintId(href);
+                Node* root = filter;
+                while (root->parent != nullptr) {
+                    root = root->parent;
+                }
+                Node* source = imageId.empty() ? nullptr : FindSvgById(*root, imageId);
+                if (source != nullptr) {
+                    const std::string paint = ToLowerAscii(AttributeValue(*source, "fill"));
+                    if (!paint.empty() && paint != "none" && paint.find("url(") == std::string::npos) {
+                        ParseColor(paint, effect.imageColor);
+                        effect.imageReplace = true;
+                        found = true;
+                    }
+                }
+            } else if (tag == "feturbulence") {
+                effect = SvgFilter();
+                effect.turbulence = true;
+                effect.turbulenceSeed = static_cast<int>(std::atof(AttributeValue(*child, "seed").c_str()));
+                effect.turbulenceFrequency = std::max(0.01, std::atof(AttributeValue(*child, "basefrequency").c_str()));
+                found = true;
+            } else if (tag == "fediffuselighting") {
+                effect = SvgFilter();
+                effect.diffuse = true;
+                const std::string light = AttributeValue(*child, "lighting-color");
+                if (!light.empty()) {
+                    ParseColor(ToLowerAscii(light), effect.lightColor);
+                }
+                const double constant = AttributeValue(*child, "diffuseconstant").empty() ? 1 : std::atof(AttributeValue(*child, "diffuseconstant").c_str());
+                double elevation = 0;
+                for (const std::unique_ptr<Node>& lamp : child->children) {
+                    if (ToLowerAscii(lamp->tagName) == "fedistantlight") {
+                        elevation = std::atof(AttributeValue(*lamp, "elevation").c_str());
+                    }
+                }
+                const double facing = std::sin(elevation * std::acos(-1.0) / 180.0);
+                effect.diffuseAmount = std::max(0.0, facing) * constant;
+                ReadSvgLight(space, *child, effect, constant);
+                found = true;
+            } else if (tag == "fespecularlighting") {
+                effect = SvgFilter();
+                effect.diffuse = true;
+                const std::string light = AttributeValue(*child, "lighting-color");
+                if (!light.empty()) {
+                    ParseColor(ToLowerAscii(light), effect.lightColor);
+                }
+                const double constant = AttributeValue(*child, "specularconstant").empty() ? 1 : std::atof(AttributeValue(*child, "specularconstant").c_str());
+                const double exponent = AttributeValue(*child, "specularexponent").empty() ? 1 : std::atof(AttributeValue(*child, "specularexponent").c_str());
+                double elevation = 0;
+                for (const std::unique_ptr<Node>& lamp : child->children) {
+                    if (ToLowerAscii(lamp->tagName) == "fedistantlight") {
+                        elevation = std::atof(AttributeValue(*lamp, "elevation").c_str());
+                    }
+                }
+                const double facing = std::max(0.0, std::sin(elevation * std::acos(-1.0) / 180.0));
+                effect.diffuseAmount = constant * std::pow(facing, std::max(1.0, exponent));
+                ReadSvgLight(space, *child, effect, constant);
                 found = true;
             }
         }
@@ -2118,15 +2531,16 @@ struct Engine {
             }
         }
         ReadSvgPaint(node, space);
-        const Color fill = WithOpacity(space.fill, space.opacity);
-        const Color stroke = WithOpacity(space.stroke, space.opacity);
-        const int thickness = std::max(1, static_cast<int>(space.strokeWidth * std::max(space.scaleX, space.scaleY) + 0.5));
+        const Color fill = WithOpacity(space.fill, space.opacity * space.fillOpacity);
+        const Color stroke = WithOpacity(space.stroke, space.opacity * space.strokeOpacity);
+        const bool fixedStroke = ToLowerAscii(AttributeValue(node, "vector-effect")) == "non-scaling-stroke";
+        const int thickness = std::max(1, static_cast<int>(space.strokeWidth * (fixedStroke ? 1 : std::max(space.scaleX, space.scaleY)) + 0.5));
         if (!space.hidden && tag == "rect") {
             SvgFilter filterEffect;
             const bool filtered = ResolveFilter(node, space, filterEffect);
             const int x = SvgX(space, SvgNumber(node, "x", 0)) + (filtered ? filterEffect.dx : 0);
             const int y = SvgY(space, SvgNumber(node, "y", 0)) + (filtered ? filterEffect.dy : 0);
-            if (filtered && filterEffect.flood) {
+            if (filtered && filterEffect.flood && !filterEffect.mergeSource) {
                 const int floodX = filterEffect.region ? filterEffect.x : x;
                 const int floodY = filterEffect.region ? filterEffect.y : y;
                 const int floodWidth = filterEffect.region ? filterEffect.width : SvgLength(space, SvgNumber(node, "width", 0), true);
@@ -2152,12 +2566,80 @@ struct Engine {
                 fillHeight -= filterEffect.erode * 2;
             }
             Color shown = fill;
+            if (filtered && filterEffect.imageReplace) {
+                shown = filterEffect.imageColor;
+            }
+            if (filtered && filterEffect.diffuse && !filterEffect.pointLight) {
+                auto lit = [&](int value) {
+                    return static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, value * filterEffect.diffuseAmount)));
+                };
+                shown.red = lit(filterEffect.lightColor.red);
+                shown.green = lit(filterEffect.lightColor.green);
+                shown.blue = lit(filterEffect.lightColor.blue);
+                shown.alpha = 255;
+            }
+            if (filtered && filterEffect.convolve) {
+                auto mapChannel = [&](int value) {
+                    const double mapped = value * filterEffect.convolveGain + filterEffect.convolveBias * 255.0;
+                    return static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, mapped)));
+                };
+                shown.red = mapChannel(shown.red);
+                shown.green = mapChannel(shown.green);
+                shown.blue = mapChannel(shown.blue);
+            }
             if (filtered && filterEffect.saturate) {
                 const int gray = (shown.red * 30 + shown.green * 59 + shown.blue * 11) / 100;
                 const double amount = filterEffect.saturateAmount;
                 shown.red = static_cast<std::uint8_t>(gray + (shown.red - gray) * amount);
                 shown.green = static_cast<std::uint8_t>(gray + (shown.green - gray) * amount);
                 shown.blue = static_cast<std::uint8_t>(gray + (shown.blue - gray) * amount);
+            }
+            if (filtered && filterEffect.transfer) {
+                auto mapChannel = [](int value, double slope, double intercept) {
+                    const double mapped = static_cast<double>(value) / 255.0 * slope + intercept;
+                    return static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, mapped * 255.0)));
+                };
+                if (filterEffect.transferChannel[0]) {
+                    shown.red = mapChannel(shown.red, filterEffect.slope[0], filterEffect.intercept[0]);
+                }
+                if (filterEffect.transferChannel[1]) {
+                    shown.green = mapChannel(shown.green, filterEffect.slope[1], filterEffect.intercept[1]);
+                }
+                if (filterEffect.transferChannel[2]) {
+                    shown.blue = mapChannel(shown.blue, filterEffect.slope[2], filterEffect.intercept[2]);
+                }
+                if (filterEffect.transferChannel[3]) {
+                    shown.alpha = mapChannel(shown.alpha, filterEffect.slope[3], filterEffect.intercept[3]);
+                }
+            }
+            if (filtered && filterEffect.blend) {
+                auto channel = [&](int source, int other) {
+                    const double first = source / 255.0;
+                    const double second = other / 255.0;
+                    double mixed = first * second;
+                    if (filterEffect.blendMode == 2) {
+                        mixed = 1.0 - (1.0 - first) * (1.0 - second);
+                    } else if (filterEffect.blendMode == 3) {
+                        mixed = std::min(first, second);
+                    } else if (filterEffect.blendMode == 4) {
+                        mixed = std::max(first, second);
+                    }
+                    return static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, mixed * 255.0)));
+                };
+                shown.red = channel(shown.red, filterEffect.blendColor.red);
+                shown.green = channel(shown.green, filterEffect.blendColor.green);
+                shown.blue = channel(shown.blue, filterEffect.blendColor.blue);
+            }
+            if (filtered && filterEffect.arithmetic) {
+                auto channel = [&](int source, int other) {
+                    const double first = source / 255.0;
+                    const double second = other / 255.0;
+                    const double mixed = filterEffect.k1 * first * second + filterEffect.k2 * first + filterEffect.k3 * second + filterEffect.k4;
+                    return static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, mixed * 255.0)));
+                };
+                shown.red = channel(shown.red, filterEffect.blendColor.red);
+                shown.green = channel(shown.green, filterEffect.blendColor.green);
+                shown.blue = channel(shown.blue, filterEffect.blendColor.blue);
             }
             if (space.clipped) {
                 const int right = std::min(fillX + fillWidth, space.clipX + space.clipWidth);
@@ -2184,10 +2666,37 @@ struct Engine {
                 }
                 FillPolygon(corners, 0, 0, fill, fixed, false);
             }
+            const std::string paintOrder = ToLowerAscii(AttributeValue(node, "paint-order"));
+            const bool strokeFirst = paintOrder.find("stroke") != std::string::npos &&
+                                     (paintOrder.find("fill") == std::string::npos || paintOrder.find("stroke") < paintOrder.find("fill"));
+            auto strokeRect = [&]() {
+                if (stroke.alpha != 0 && width > 0 && height > 0) {
+                    StrokeLine(x, y, x + width, y, stroke, fixed, thickness);
+                    StrokeLine(x + width, y, x + width, y + height, stroke, fixed, thickness);
+                    StrokeLine(x + width, y + height, x, y + height, stroke, fixed, thickness);
+                    StrokeLine(x, y + height, x, y, stroke, fixed, thickness);
+                }
+            };
+            if (strokeFirst) {
+                strokeRect();
+            }
             const bool painted = space.rotateDeg != 0 ||
                                  (!space.fillUrl.empty() && (FillLinearGradient(node, space, x, y, width, height, fixed) ||
                                                                 FillPattern(node, space, x, y, width, height, fixed)));
-            if (!painted && filtered && filterEffect.blur > 0 && shown.alpha != 0 && width > 0 && height > 0) {
+            if (filtered && filterEffect.mergeFlood && filterEffect.region) {
+                Fill(filterEffect.x, filterEffect.y, filterEffect.width, filterEffect.height, filterEffect.floodColor, fixed);
+            }
+            if (!painted && filtered && filterEffect.tile && width > 0 && height > 0 && shown.alpha != 0) {
+                const int regionX = filterEffect.region ? filterEffect.x : x;
+                const int regionY = filterEffect.region ? filterEffect.y : y;
+                const int regionWidth = filterEffect.region ? filterEffect.width : width;
+                const int regionHeight = filterEffect.region ? filterEffect.height : height;
+                for (int tileY = regionY; tileY < regionY + regionHeight; tileY += height) {
+                    for (int tileX = regionX; tileX < regionX + regionWidth; tileX += width) {
+                        Fill(tileX, tileY, std::min(width, regionX + regionWidth - tileX), std::min(height, regionY + regionHeight - tileY), shown, fixed);
+                    }
+                }
+            } else if (!painted && filtered && filterEffect.blur > 0 && shown.alpha != 0 && width > 0 && height > 0) {
                 const int radius = filterEffect.blur;
                 for (int row = -radius; row < height + radius; ++row) {
                     for (int column = -radius; column < width + radius; ++column) {
@@ -2200,6 +2709,54 @@ struct Engine {
                         Color blurred = shown;
                         blurred.alpha = static_cast<std::uint8_t>(shown.alpha * (radius - distance + 1) / (radius + 1));
                         Fill(x + column, y + row, 1, 1, blurred, fixed);
+                    }
+                }
+            } else if (!painted && filtered && filterEffect.pointLight && width > 0 && height > 0) {
+                const double aimX = filterEffect.aimX - filterEffect.pointX;
+                const double aimY = filterEffect.aimY - filterEffect.pointY;
+                const double aimZ = filterEffect.aimZ - filterEffect.pointZ;
+                const double aimLength = std::sqrt(aimX * aimX + aimY * aimY + aimZ * aimZ);
+                for (int row = 0; row < height; ++row) {
+                    for (int column = 0; column < width; ++column) {
+                        const double towardX = filterEffect.pointX - (x + column);
+                        const double towardY = filterEffect.pointY - (y + row);
+                        const double towardZ = filterEffect.pointZ;
+                        const double towardLength = std::sqrt(towardX * towardX + towardY * towardY + towardZ * towardZ);
+                        double facing = towardLength <= 0 ? 0 : std::max(0.0, towardZ / towardLength);
+                        if (filterEffect.spot && aimLength > 0 && towardLength > 0) {
+                            const double alignment = (-towardX * aimX + -towardY * aimY + -towardZ * aimZ) / (towardLength * aimLength);
+                            if (alignment < filterEffect.spotLimit) {
+                                facing = 0;
+                            }
+                        }
+                        auto lit = [&](int value) {
+                            return static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, value * facing * filterEffect.diffuseAmount)));
+                        };
+                        Color grain;
+                        grain.red = lit(filterEffect.lightColor.red);
+                        grain.green = lit(filterEffect.lightColor.green);
+                        grain.blue = lit(filterEffect.lightColor.blue);
+                        grain.alpha = 255;
+                        Fill(x + column, y + row, 1, 1, grain, fixed);
+                    }
+                }
+            } else if (!painted && filtered && filterEffect.turbulence && width > 0 && height > 0) {
+                auto noise = [&](int px, int py, int salt) {
+                    unsigned value = static_cast<unsigned>(filterEffect.turbulenceSeed * 374761393 + salt * 668265263 + px * 1274126177 + py * 2147001325);
+                    value = (value ^ (value >> 13)) * 1274126177u;
+                    return static_cast<std::uint8_t>(value >> 24);
+                };
+                const double frequency = filterEffect.turbulenceFrequency;
+                for (int row = 0; row < height; ++row) {
+                    for (int column = 0; column < width; ++column) {
+                        const int cellX = static_cast<int>(column * frequency);
+                        const int cellY = static_cast<int>(row * frequency);
+                        Color grain;
+                        grain.red = noise(cellX, cellY, 1);
+                        grain.green = noise(cellX, cellY, 2);
+                        grain.blue = noise(cellX, cellY, 3);
+                        grain.alpha = 255;
+                        Fill(x + column, y + row, 1, 1, grain, fixed);
                     }
                 }
             } else if (!painted && fillWidth > 0 && fillHeight > 0 && shown.alpha != 0) {
@@ -2240,11 +2797,24 @@ struct Engine {
             StrokeEllipse(cx, cy, radiusX, radiusY, thickness, stroke, fixed);
             RememberSvgLink(node, cx - radiusX, cy - radiusY, radiusX * 2, radiusY * 2, fixed);
         } else if (!space.hidden && tag == "line") {
-            const int x1 = SvgX(space, SvgNumber(node, "x1", 0));
-            const int y1 = SvgY(space, SvgNumber(node, "y1", 0));
-            const int x2 = SvgX(space, SvgNumber(node, "x2", 0));
-            const int y2 = SvgY(space, SvgNumber(node, "y2", 0));
-            StrokeLine(x1, y1, x2, y2, stroke, fixed, thickness);
+            int x1 = SvgX(space, SvgNumber(node, "x1", 0));
+            int y1 = SvgY(space, SvgNumber(node, "y1", 0));
+            int x2 = SvgX(space, SvgNumber(node, "x2", 0));
+            int y2 = SvgY(space, SvgNumber(node, "y2", 0));
+            const std::string cap = ToLowerAscii(AttributeValue(node, "stroke-linecap"));
+            if ((cap == "square" || cap == "round") && thickness > 1) {
+                const double deltaX = x2 - x1;
+                const double deltaY = y2 - y1;
+                const double length = std::sqrt(deltaX * deltaX + deltaY * deltaY);
+                if (length > 0) {
+                    const double extend = thickness / 2.0;
+                    x1 -= static_cast<int>(deltaX / length * extend);
+                    y1 -= static_cast<int>(deltaY / length * extend);
+                    x2 += static_cast<int>(deltaX / length * extend);
+                    y2 += static_cast<int>(deltaY / length * extend);
+                }
+            }
+            StrokeLine(x1, y1, x2, y2, stroke, fixed, thickness, AttributeValue(node, "stroke-dasharray"), std::atof(AttributeValue(node, "stroke-dashoffset").c_str()));
             PaintLineMarkers(node, space, x1, y1, x2, y2, fixed);
             RememberSvgLink(node, std::min(x1, x2), std::min(y1, y2), std::abs(x2 - x1) + thickness, std::abs(y2 - y1) + thickness, fixed);
         } else if (!space.hidden && (tag == "polygon" || tag == "polyline")) {
@@ -2253,6 +2823,20 @@ struct Engine {
                 FillPolygon(points, 0, 0, fill, fixed, space.fillEvenOdd);
             }
             StrokePolyline(points, 0, 0, stroke, fixed, tag == "polygon", thickness);
+            if (ToLowerAscii(AttributeValue(node, "stroke-linejoin")) == "round" && thickness > 1 && points.size() > 2) {
+                const int radius = std::max(1, thickness / 2);
+                for (std::size_t index = 1; index + 1 < points.size(); ++index) {
+                    const int centerX = static_cast<int>(points[index].x);
+                    const int centerY = static_cast<int>(points[index].y);
+                    for (int row = -radius; row <= radius; ++row) {
+                        for (int column = -radius; column <= radius; ++column) {
+                            if (column * column + row * row <= radius * radius) {
+                                Fill(centerX + column, centerY + row, 1, 1, stroke, fixed);
+                            }
+                        }
+                    }
+                }
+            }
             if (!AttributeValue(node, "marker-mid").empty()) {
                 const std::size_t last = points.size();
                 for (std::size_t index = 1; last > 1 && index + 1 < last; ++index) {
@@ -2375,17 +2959,58 @@ struct Engine {
                 textStyle.color = fill;
                 const int fontSize = std::max(1, SvgNumber(node, "font-size", DEFAULT_FONT_SIZE_PX));
                 textStyle.fontSizePx = std::max(1, SvgLength(space, fontSize, false));
+                const std::string weight = ToLowerAscii(AttributeValue(node, "font-weight"));
+                textStyle.bold = weight == "bold" || weight == "bolder" || std::atoi(weight.c_str()) >= 700;
+                const std::string decoration = ToLowerAscii(AttributeValue(node, "text-decoration"));
+                textStyle.underline = decoration.find("underline") != std::string::npos;
+                textStyle.strike = decoration.find("line-through") != std::string::npos;
+                textStyle.italic = ToLowerAscii(AttributeValue(node, "font-style")) == "italic" || ToLowerAscii(AttributeValue(node, "font-style")) == "oblique";
                 const std::string content = GatherText(node);
                 int textX = SvgX(space, SvgNumber(node, "x", 0));
                 const int textWidth = MeasureTextPx(content, textStyle.fontSizePx, textStyle.bold, textStyle.italic, textStyle.fontFamily);
                 if (space.textAnchor == "middle") {
                     textX -= textWidth / 2;
-                } else if (space.textAnchor == "end") {
+                } else if (space.textAnchor == "end" || ToLowerAscii(AttributeValue(node, "direction")) == "rtl") {
                     textX -= textWidth;
                 }
-                const int textY = SvgY(space, SvgNumber(node, "y", 0)) - textStyle.fontSizePx;
-                Text(textX, textY, content, textStyle, fixed);
-                RememberSvgLink(node, textX, textY, std::max(1, textWidth), textStyle.fontSizePx, fixed);
+                textX += SvgLength(space, SvgNumber(node, "dx", 0), true);
+                std::string dominant = ToLowerAscii(AttributeValue(node, "dominant-baseline"));
+                const std::string alignment = ToLowerAscii(AttributeValue(node, "alignment-baseline"));
+                if (alignment == "hanging" || alignment == "before-edge" || alignment == "text-before-edge") {
+                    dominant = "hanging";
+                } else if (alignment == "middle" || alignment == "central") {
+                    dominant = "middle";
+                }
+                int dominantDrop = textStyle.fontSizePx;
+                if (dominant == "hanging" || dominant == "text-before-edge") {
+                    dominantDrop = 0;
+                } else if (dominant == "middle" || dominant == "central") {
+                    dominantDrop = textStyle.fontSizePx / 2;
+                }
+                const std::string baselineShift = ToLowerAscii(AttributeValue(node, "baseline-shift"));
+                int baseline = 0;
+                if (baselineShift == "sub") {
+                    baseline = textStyle.fontSizePx / 2;
+                } else if (baselineShift == "super") {
+                    baseline = -textStyle.fontSizePx / 2;
+                } else if (!baselineShift.empty() && baselineShift != "baseline") {
+                    baseline = -SvgLength(space, std::atof(baselineShift.c_str()), false);
+                }
+                const int textY = SvgY(space, SvgNumber(node, "y", 0)) + SvgLength(space, SvgNumber(node, "dy", 0), false) + baseline - dominantDrop;
+                const int letterSpacing = SvgLength(space, std::atof(AttributeValue(node, "letter-spacing").c_str()), true);
+                if (letterSpacing != 0 && !content.empty()) {
+                    int cursor = textX;
+                    for (std::size_t byte = 0; byte < content.size(); ++byte) {
+                        const std::string glyph(1, content[byte]);
+                        const int advance = std::max(1, MeasureTextPx(glyph, textStyle.fontSizePx, textStyle.bold, textStyle.italic, textStyle.fontFamily));
+                        Text(cursor, textY, glyph, textStyle, fixed);
+                        cursor += advance + letterSpacing;
+                    }
+                    RememberSvgLink(node, textX, textY, std::max(1, cursor - textX), textStyle.fontSizePx, fixed);
+                } else {
+                    Text(textX, textY, content, textStyle, fixed);
+                    RememberSvgLink(node, textX, textY, std::max(1, textWidth), textStyle.fontSizePx, fixed);
+                }
             }
         }
         if (tag == "switch") {
