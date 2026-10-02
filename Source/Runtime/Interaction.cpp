@@ -37,8 +37,83 @@ Node* FormOwner(Node& node) {
     return FindAncestor(node, ElementKind::Form);
 }
 
+bool ControlDisabled(const Node& node) {
+    if (HasAttribute(node, "disabled") || HasAttribute(node, "inert") || node.hiddenByScript) {
+        return true;
+    }
+    for (const Node* ancestor = node.parent; ancestor != nullptr; ancestor = ancestor->parent) {
+        if (HasAttribute(*ancestor, "inert") || ancestor->hiddenByScript) {
+            return true;
+        }
+        if (ancestor->kind == ElementKind::Fieldset && HasAttribute(*ancestor, "disabled")) {
+            return true;
+        }
+        if (ancestor->kind == ElementKind::Optgroup && HasAttribute(*ancestor, "disabled")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool MatchPattern(const std::string& text, const std::string& pattern) {
+    std::size_t textIndex = 0;
+    std::size_t patternIndex = 0;
+    std::size_t starText = std::string::npos;
+    std::size_t starPattern = std::string::npos;
+    auto matchesClass = [&](char patternChar, char value) {
+        if (patternChar == '.') {
+            return true;
+        }
+        if (patternChar == 'd') {
+            return value >= '0' && value <= '9';
+        }
+        if (patternChar == 'w') {
+            return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9') || value == '_';
+        }
+        return patternChar == value;
+    };
+    while (textIndex < text.size()) {
+        if (patternIndex < pattern.size() && pattern[patternIndex] == '\\' && patternIndex + 1 < pattern.size()) {
+            const char kind = pattern[patternIndex + 1];
+            const char value = text[textIndex];
+            if (!matchesClass(kind == 'd' || kind == 'w' ? kind : kind, value) && kind != value) {
+                if (starPattern == std::string::npos) {
+                    return false;
+                }
+                patternIndex = starPattern;
+                textIndex = ++starText;
+                continue;
+            }
+            patternIndex += 2;
+            ++textIndex;
+            continue;
+        }
+        if (patternIndex < pattern.size() && (pattern[patternIndex] == text[textIndex] || pattern[patternIndex] == '.')) {
+            ++patternIndex;
+            ++textIndex;
+            continue;
+        }
+        if (patternIndex < pattern.size() && (pattern[patternIndex] == '*' || pattern[patternIndex] == '+')) {
+            starPattern = patternIndex + 1;
+            starText = textIndex;
+            ++patternIndex;
+            continue;
+        }
+        if (starPattern != std::string::npos) {
+            patternIndex = starPattern;
+            textIndex = ++starText;
+            continue;
+        }
+        return false;
+    }
+    while (patternIndex < pattern.size() && (pattern[patternIndex] == '*' || pattern[patternIndex] == '?')) {
+        ++patternIndex;
+    }
+    return patternIndex == pattern.size();
+}
+
 bool IsSuccessful(const Node& node) {
-    if (HasAttribute(node, "disabled")) {
+    if (ControlDisabled(node)) {
         return false;
     }
     if (node.kind == ElementKind::Input) {
@@ -77,6 +152,53 @@ std::string Encode(const std::string& text) {
 }
 
 void SubmitForm(Document& document, Node& form) {
+    if (!HasAttribute(form, "novalidate")) {
+        std::vector<Node*> check{&form};
+        while (!check.empty()) {
+            Node* current = check.back();
+            check.pop_back();
+            if (current != &form && current->kind == ElementKind::Form) {
+                continue;
+            }
+            if (current->kind == ElementKind::Input || current->kind == ElementKind::Textarea || current->kind == ElementKind::Select) {
+                const std::string value = current->liveValue;
+                const std::string name = AttributeValue(*current, "name");
+                if (HasAttribute(*current, "required") && value.empty() && current->kind != ElementKind::Select) {
+                    document.status = "invalid required " + name;
+                    return;
+                }
+                const int minimumLength = std::atoi(AttributeValue(*current, "minlength").c_str());
+                if (minimumLength > 0 && static_cast<int>(value.size()) < minimumLength) {
+                    document.status = "invalid minlength " + name;
+                    return;
+                }
+                const std::string pattern = AttributeValue(*current, "pattern");
+                if (!pattern.empty() && !value.empty() && !MatchPattern(value, pattern)) {
+                    document.status = "invalid pattern " + name;
+                    return;
+                }
+                const std::string type = ToLowerAscii(AttributeValue(*current, "type"));
+                if (type == "email" && !value.empty() && value.find('@') == std::string::npos) {
+                    document.status = "invalid email " + name;
+                    return;
+                }
+                if (type == "number" && !value.empty()) {
+                    const double number = std::atof(value.c_str());
+                    if (!AttributeValue(*current, "min").empty() && number < std::atof(AttributeValue(*current, "min").c_str())) {
+                        document.status = "invalid min " + name;
+                        return;
+                    }
+                    if (!AttributeValue(*current, "max").empty() && number > std::atof(AttributeValue(*current, "max").c_str())) {
+                        document.status = "invalid max " + name;
+                        return;
+                    }
+                }
+            }
+            for (const std::unique_ptr<Node>& child : current->children) {
+                check.push_back(child.get());
+            }
+        }
+    }
     std::string body;
     std::vector<Node*> stack{&form};
     while (!stack.empty()) {
@@ -93,30 +215,46 @@ void SubmitForm(Document& document, Node& form) {
                 }
                 std::string value = current->liveValue;
                 if (current->kind == ElementKind::Select) {
+                    std::vector<std::string> values;
                     std::vector<Node*> options{current};
                     while (!options.empty()) {
                         Node* optionParent = options.back();
                         options.pop_back();
                         for (const std::unique_ptr<Node>& child : optionParent->children) {
                             if (child->kind == ElementKind::Option && (child->selected || HasAttribute(*child, "selected"))) {
-                                value = AttributeValue(*child, "value");
-                                if (value.empty()) {
-                                    value = GatherText(*child);
+                                std::string optionValue = AttributeValue(*child, "value");
+                                if (optionValue.empty()) {
+                                    optionValue = GatherText(*child);
                                 }
+                                values.push_back(optionValue);
                             } else if (child->kind == ElementKind::Optgroup) {
                                 options.push_back(child.get());
                             }
                         }
                     }
+                    if (!values.empty()) {
+                        value = values[0];
+                        for (std::size_t index = 1; index < values.size(); ++index) {
+                            body += Encode(name) + "=" + Encode(value);
+                            body.push_back('&');
+                            value = values[index];
+                        }
+                    }
                 }
                 body += Encode(name) + "=" + Encode(value);
+                if (HasAttribute(*current, "dirname")) {
+                    body.push_back('&');
+                    body += Encode(AttributeValue(*current, "dirname")) + "=ltr";
+                }
             }
         }
         for (int index = static_cast<int>(current->children.size()) - 1; index >= 0; --index) {
             stack.push_back(current->children[static_cast<std::size_t>(index)].get());
         }
     }
-    document.status = "form data: " + body;
+    const std::string action = AttributeValue(form, "action");
+    const std::string method = AttributeValue(form, "method").empty() ? "get" : AttributeValue(form, "method");
+    document.status = method + " " + action + " form data: " + body;
     RunEvent(document, form, "onsubmit");
 }
 
@@ -146,7 +284,7 @@ Node* LabeledControl(Node& label) {
 }
 
 void Activate(Document& document, Node& node) {
-    if (HasAttribute(node, "disabled") || HasAttribute(node, "inert") || node.hiddenByScript) {
+    if (ControlDisabled(node)) {
         return;
     }
     if (HasAttribute(node, "draggable")) {
@@ -212,12 +350,17 @@ void Activate(Document& document, Node& node) {
     if (node.kind == ElementKind::Option) {
         Node* selectNode = FindAncestor(node, ElementKind::Select);
         if (selectNode != nullptr) {
+            const bool multiple = HasAttribute(*selectNode, "multiple");
             std::vector<Node*> stack{selectNode};
             while (!stack.empty()) {
                 Node* current = stack.back();
                 stack.pop_back();
                 if (current->kind == ElementKind::Option) {
-                    current->selected = current == &node;
+                    if (multiple && current == &node) {
+                        current->selected = !current->selected;
+                    } else if (!multiple) {
+                        current->selected = current == &node;
+                    }
                 }
                 for (const std::unique_ptr<Node>& child : current->children) {
                     stack.push_back(child.get());
@@ -236,6 +379,30 @@ void Activate(Document& document, Node& node) {
     if (node.kind == ElementKind::Button) {
         const std::string type = ToLowerAscii(AttributeValue(node, "type"));
         const std::string effective = type.empty() ? "submit" : type;
+        if (HasAttribute(node, "commandfor")) {
+            Node* root = &node;
+            while (root->parent != nullptr) {
+                root = root->parent;
+            }
+            Node* target = FindElementById(*root, AttributeValue(node, "commandfor"));
+            const std::string command = ToLowerAscii(AttributeValue(node, "command"));
+            if (target != nullptr) {
+                if (command == "close" || command == "request-close") {
+                    target->open = false;
+                    target->popoverOpen = false;
+                } else if (command == "hide-popover") {
+                    target->popoverOpen = false;
+                } else if (command == "toggle-popover") {
+                    target->popoverOpen = !target->popoverOpen;
+                } else if (command == "show-popover") {
+                    target->popoverOpen = true;
+                } else {
+                    target->open = true;
+                }
+                document.status = "command " + command;
+            }
+            return;
+        }
         if (HasAttribute(node, "popovertarget")) {
             Node* root = &node;
             while (root->parent != nullptr) {
@@ -282,10 +449,16 @@ void Activate(Document& document, Node& node) {
     }
     if (node.kind == ElementKind::A) {
         const std::string href = AttributeValue(node, "href");
-        if (!href.empty() && href[0] == '#') {
+        if (!href.empty()) {
+            node.visited = true;
+        }
+        if (HasAttribute(node, "download")) {
+            document.status = "download " + AttributeValue(node, "download") + " " + href;
+        } else if (!href.empty() && href[0] == '#') {
             document.status = "fragment " + href.substr(1);
         } else if (!href.empty()) {
-            document.status = "navigation is not performed";
+            const std::string target = AttributeValue(node, "target");
+            document.status = target.empty() ? "open " + href : "open " + href + " in " + target;
         }
         return;
     }
@@ -420,7 +593,10 @@ void SubmitControl(Document& document, Node& control) {
 }
 
 bool Focusable(const Node& node) {
-    if (node.type != Node::Type::Element || HasAttribute(node, "disabled") || HasAttribute(node, "hidden") || HasAttribute(node, "inert")) {
+    if (node.type != Node::Type::Element || ControlDisabled(node) || HasAttribute(node, "hidden")) {
+        return false;
+    }
+    if (HasAttribute(node, "tabindex") && std::atoi(AttributeValue(node, "tabindex").c_str()) < 0) {
         return false;
     }
     if (node.kind == ElementKind::Input) {
@@ -430,16 +606,38 @@ bool Focusable(const Node& node) {
         node.kind == ElementKind::Summary) {
         return true;
     }
+    if (HasAttribute(node, "tabindex") || HasAttribute(node, "contenteditable")) {
+        return true;
+    }
     return node.kind == ElementKind::A && !AttributeValue(node, "href").empty();
 }
 
 void CollectFocusable(Node& node, std::vector<Node*>& order) {
-    if (node.type == Node::Type::Element && Focusable(node)) {
-        order.push_back(&node);
+    std::vector<Node*> normal;
+    std::vector<std::pair<int, Node*>> positive;
+    std::vector<Node*> stack{&node};
+    while (!stack.empty()) {
+        Node* current = stack.back();
+        stack.pop_back();
+        if (current->type == Node::Type::Element && Focusable(*current)) {
+            const int tabIndex = HasAttribute(*current, "tabindex") ? std::atoi(AttributeValue(*current, "tabindex").c_str()) : 0;
+            if (tabIndex > 0) {
+                positive.push_back({tabIndex, current});
+            } else {
+                normal.push_back(current);
+            }
+        }
+        for (int index = static_cast<int>(current->children.size()) - 1; index >= 0; --index) {
+            stack.push_back(current->children[static_cast<std::size_t>(index)].get());
+        }
     }
-    for (const std::unique_ptr<Node>& child : node.children) {
-        CollectFocusable(*child, order);
+    std::stable_sort(positive.begin(), positive.end(), [](const std::pair<int, Node*>& left, const std::pair<int, Node*>& right) {
+        return left.first < right.first;
+    });
+    for (const std::pair<int, Node*>& entry : positive) {
+        order.push_back(entry.second);
     }
+    order.insert(order.end(), normal.begin(), normal.end());
 }
 
 bool MoveFocus(Document& document, bool reverse) {
@@ -491,6 +689,22 @@ bool DispatchClick(Document& document, const LayoutResult& layout, int x, int y)
         document.focus = hit;
         return false;
     }
+    if (hit->kind == ElementKind::Img && HasAttribute(*hit, "ismap") && target->kind == ElementKind::A) {
+        const ElementBox* box = nullptr;
+        for (const ElementBox& candidate : layout.boxes) {
+            if (candidate.node == hit) {
+                box = &candidate;
+                break;
+            }
+        }
+        if (box != nullptr) {
+            const int localX = x - box->x;
+            const int localY = y - (box->fixed ? box->y : box->y - document.scrollY);
+            document.status = AttributeValue(*target, "href") + "?" + std::to_string(localX) + "," + std::to_string(localY);
+            target->visited = true;
+            return true;
+        }
+    }
     Activate(document, *target);
     RunEvent(document, *target, "onclick");
     if (IsTextField(*target)) {
@@ -526,11 +740,24 @@ bool DispatchKey(Document& document, const std::string& key) {
         return MoveFocus(document, key == "shift-tab");
     }
     Node* focus = document.focus;
-    if (focus == nullptr) {
-        return false;
+    const bool editable = focus != nullptr && (IsTextField(*focus) || HasAttribute(*focus, "contenteditable")) && CanEdit(*focus);
+    if (!editable && document.root != nullptr && key.size() == 1) {
+        std::vector<Node*> stack{document.root.get()};
+        while (!stack.empty()) {
+            Node* current = stack.back();
+            stack.pop_back();
+            const std::string access = AttributeValue(*current, "accesskey");
+            if (!access.empty() && ToLowerAscii(access.substr(0, 1)) == ToLowerAscii(key) && !ControlDisabled(*current)) {
+                Activate(document, *current);
+                document.focus = current;
+                return true;
+            }
+            for (const std::unique_ptr<Node>& child : current->children) {
+                stack.push_back(child.get());
+            }
+        }
     }
-    const bool editable = IsTextField(*focus) || HasAttribute(*focus, "contenteditable");
-    if (!editable || !CanEdit(*focus)) {
+    if (focus == nullptr || !editable) {
         return false;
     }
     int offset = CaretIndex(document, *focus);
@@ -620,6 +847,24 @@ bool DispatchText(Document& document, const std::string& text) {
     }
     if (filtered.empty()) {
         return false;
+    }
+    const std::string capital = ToLowerAscii(AttributeValue(*focus, "autocapitalize"));
+    if (capital == "characters") {
+        for (char& character : filtered) {
+            if (character >= 'a' && character <= 'z') {
+                character = static_cast<char>(character - 'a' + 'A');
+            }
+        }
+    }
+    const std::string mode = ToLowerAscii(AttributeValue(*focus, "inputmode"));
+    if (mode == "numeric" || mode == "decimal") {
+        std::string digits;
+        for (char character : filtered) {
+            if ((character >= '0' && character <= '9') || (mode == "decimal" && (character == '.' || character == '-'))) {
+                digits.push_back(character);
+            }
+        }
+        filtered.swap(digits);
     }
     const int before = static_cast<int>(focus->liveValue.size());
     InsertAtCaret(document, *focus, filtered);

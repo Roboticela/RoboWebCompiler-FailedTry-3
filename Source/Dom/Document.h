@@ -39,6 +39,7 @@ struct Node {
     bool selectExpanded = false;
     bool scriptText = false;
     bool hiddenByScript = false;
+    bool visited = false;
     int marqueeOffset = 0;
     Node* parent = nullptr;
 };

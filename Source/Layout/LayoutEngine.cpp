@@ -215,6 +215,9 @@ bool IsHidden(const Node& node) {
     if (node.kind == ElementKind::Input && InputType(node) == "hidden") {
         return true;
     }
+    if (node.kind == ElementKind::Rp && node.parent != nullptr && node.parent->kind == ElementKind::Ruby) {
+        return true;
+    }
     return SpecFor(node.kind).display == DisplayKind::None;
 }
 
@@ -345,6 +348,26 @@ struct Piece {
     bool atomic = false;
     bool marker = false;
 };
+
+std::vector<Node*> FlowChildren(Node& node) {
+    std::vector<Node*> flow;
+    Node* shadow = nullptr;
+    for (const std::unique_ptr<Node>& child : node.children) {
+        if (child->kind == ElementKind::Template && HasAttribute(*child, "shadowrootmode")) {
+            shadow = child.get();
+        }
+    }
+    if (shadow != nullptr) {
+        for (const std::unique_ptr<Node>& child : shadow->children) {
+            flow.push_back(child.get());
+        }
+        return flow;
+    }
+    for (const std::unique_ptr<Node>& child : node.children) {
+        flow.push_back(child.get());
+    }
+    return flow;
+}
 
 struct Engine {
     Document* document = nullptr;
@@ -504,7 +527,35 @@ struct Engine {
         width = ParsePx(AttributeValue(node, "width"), containing, widthOk);
         height = ParsePx(AttributeValue(node, "height"), viewportHeight, heightOk);
         if (node.kind == ElementKind::Img || node.kind == ElementKind::Input) {
-            const std::string source = node.kind == ElementKind::Input ? AttributeValue(node, "src") : AttributeValue(node, "src");
+            std::string source = AttributeValue(node, "src");
+            if (source.empty() && node.parent != nullptr && node.parent->kind == ElementKind::Picture) {
+                for (const std::unique_ptr<Node>& sibling : node.parent->children) {
+                    if (sibling.get() == &node) {
+                        break;
+                    }
+                    if (sibling->kind != ElementKind::Source) {
+                        continue;
+                    }
+                    source = AttributeValue(*sibling, "src");
+                    if (source.empty()) {
+                        source = AttributeValue(*sibling, "srcset");
+                        const std::size_t space = source.find_first_of(" \t,");
+                        if (space != std::string::npos) {
+                            source = source.substr(0, space);
+                        }
+                    }
+                    if (!source.empty()) {
+                        break;
+                    }
+                }
+            }
+            if (source.empty()) {
+                source = AttributeValue(node, "srcset");
+                const std::size_t space = source.find_first_of(" \t,");
+                if (space != std::string::npos) {
+                    source = source.substr(0, space);
+                }
+            }
             const std::string path = ResolveUrl(*document, source);
             DecodedImage image = path.find("://") == std::string::npos ? DecodeImageFile(path) : DecodedImage();
             if (!widthOk) {
@@ -548,7 +599,15 @@ struct Engine {
         const Color border{118, 118, 118, 255};
         const Color face{240, 240, 240, 255};
         if (node.kind == ElementKind::Img || (node.kind == ElementKind::Input && InputType(node) == "image")) {
-            const std::string path = ResolveUrl(*document, AttributeValue(node, "src"));
+            std::string source = AttributeValue(node, "src");
+            if (source.empty()) {
+                source = AttributeValue(node, "srcset");
+                const std::size_t space = source.find_first_of(" \t,");
+                if (space != std::string::npos) {
+                    source = source.substr(0, space);
+                }
+            }
+            const std::string path = ResolveUrl(*document, source);
             DecodedImage image = path.find("://") == std::string::npos ? DecodeImageFile(path) : DecodedImage();
             if (image.ok) {
                 DrawOp op;
@@ -589,7 +648,10 @@ struct Engine {
             if (node.kind == ElementKind::Meter) {
                 const double low = std::atof(AttributeValue(node, "low").c_str());
                 const double high = AttributeValue(node, "high").empty() ? maximum : std::atof(AttributeValue(node, "high").c_str());
-                if (clamped < low || clamped > high) {
+                const double optimum = AttributeValue(node, "optimum").empty() ? (low + high) / 2.0 : std::atof(AttributeValue(node, "optimum").c_str());
+                if (std::abs(clamped - optimum) <= std::max(0.001, (high - low) / 2.0)) {
+                    fillColor = Color{0, 128, 0, 255};
+                } else if (clamped < low || clamped > high) {
                     fillColor = Color{255, 165, 0, 255};
                 }
             }
@@ -599,12 +661,40 @@ struct Engine {
         }
         Fill(x, y, width, height, face, fixed);
         Stroke(x, y, width, height, border, fixed);
-        std::string label = AttributeValue(node, "src");
+        if (node.kind == ElementKind::Video) {
+            const std::string poster = ResolveUrl(*document, AttributeValue(node, "poster"));
+            DecodedImage image = poster.find("://") == std::string::npos ? DecodeImageFile(poster) : DecodedImage();
+            if (image.ok) {
+                DrawOp op;
+                op.kind = DrawOp::Kind::Image;
+                op.x = x;
+                op.y = y;
+                op.width = width;
+                op.height = height;
+                op.imagePath = poster;
+                op.fixed = fixed;
+                result->ops.push_back(op);
+                return;
+            }
+        }
+        std::string label = AttributeValue(node, "srcdoc");
+        if (label.empty()) {
+            label = AttributeValue(node, "src");
+        }
         if (label.empty()) {
             label = AttributeValue(node, "data");
         }
+        if (node.kind == ElementKind::Canvas) {
+            const std::string fallback = CollapsedText(GatherText(node), false);
+            if (!fallback.empty()) {
+                label = fallback;
+            }
+        }
         if (label.empty()) {
             label = node.tagName;
+        }
+        if (HasAttribute(node, "controls")) {
+            label = "controls " + label;
         }
         Text(x + 4, y + 4, label, style, fixed);
     }
@@ -671,6 +761,16 @@ struct Engine {
             const std::string label = ControlLabel(node);
             width = MeasureTextPx(label, style.fontSizePx, style.bold, style.italic, style.fontFamily) + 28;
             height = LineHeightPx(style.fontSizePx) + CONTROL_PADDING_Y_PX * 2 + CONTROL_BORDER_PX * 2;
+            bool sizeOk = false;
+            const int listSize = ParsePx(AttributeValue(node, "size"), containing, sizeOk);
+            if (sizeOk && listSize > 1) {
+                height = LineHeightPx(style.fontSizePx) * listSize;
+            }
+            return;
+        }
+        if (node.kind == ElementKind::Marquee) {
+            width = style.widthPx > 0 ? style.widthPx : containing;
+            height = style.heightPx > 0 ? style.heightPx : LineHeightPx(style.fontSizePx);
             return;
         }
         if (node.kind == ElementKind::Hr) {
@@ -848,8 +948,10 @@ struct Engine {
             Fill(x, y, width, height, controlFace, fixed);
             Stroke(x, y, width, height, edge, fixed);
             Text(x + CONTROL_BORDER_PX + CONTROL_PADDING_X_PX, y + CONTROL_BORDER_PX + CONTROL_PADDING_Y_PX, ControlLabel(node), style, fixed);
-            if (node.kind == ElementKind::Select && node.selectExpanded) {
-                int optionY = y + height;
+            bool sizeOk = false;
+            const int listSize = node.kind == ElementKind::Select ? ParsePx(AttributeValue(node, "size"), width, sizeOk) : 0;
+            if (node.kind == ElementKind::Select && (node.selectExpanded || (sizeOk && listSize > 1))) {
+                int optionY = sizeOk && listSize > 1 ? y : y + height;
                 std::vector<Node*> stack{&node};
                 while (!stack.empty()) {
                     Node* current = stack.back();
@@ -871,6 +973,29 @@ struct Engine {
                     }
                 }
             }
+            return;
+        }
+        if (node.kind == ElementKind::Marquee) {
+            const std::string text = CollapsedText(GatherText(node), false);
+            const int textWidth = std::max(1, MeasureTextPx(text, style.fontSizePx, style.bold, style.italic, style.fontFamily));
+            const std::string direction = ToLowerAscii(AttributeValue(node, "direction"));
+            const int travel = textWidth + width;
+            int shift = travel == 0 ? 0 : node.marqueeOffset % travel;
+            const std::string behavior = ToLowerAscii(AttributeValue(node, "behavior"));
+            if (behavior == "alternate") {
+                const int cycle = shift % (travel * 2);
+                shift = cycle < travel ? cycle : travel * 2 - cycle;
+            } else if (behavior == "slide") {
+                shift = std::min(shift, width);
+            }
+            int textX = x + width - shift;
+            if (direction == "right") {
+                textX = x - textWidth + shift;
+            }
+            if (style.background.alpha != 0) {
+                Fill(x, y, width, height, style.background, fixed);
+            }
+            Text(textX, y, text, style, fixed, true, x, y, width, height);
             return;
         }
         PaintReplaced(node, x, y, width, height, style, fixed);
@@ -945,7 +1070,7 @@ struct Engine {
             }
             return;
         }
-        for (const std::unique_ptr<Node>& childPtr : node.children) {
+        for (Node* childPtr : FlowChildren(node)) {
             Node& child = *childPtr;
             if (child.type == Node::Type::Text) {
                 const std::string text = CollapsedText(child.text, style.pre);
@@ -1180,6 +1305,37 @@ struct Engine {
                 columnWidth = std::max(1, CharAdvancePx(style.fontSizePx, style.fontFamily));
             }
         }
+        int columnIndex = 0;
+        auto applyColumn = [&](Node& columnNode) {
+            if (columnIndex >= columns) {
+                return;
+            }
+            bool widthOk = false;
+            const int specified = ParsePx(AttributeValue(columnNode, "width"), width, widthOk);
+            if (widthOk && specified > 0) {
+                columnWidths[static_cast<std::size_t>(columnIndex)] = specified;
+            }
+            bool spanOk = false;
+            int span = ParsePx(AttributeValue(columnNode, "span"), width, spanOk);
+            if (!spanOk || span < 1) {
+                span = 1;
+            }
+            columnIndex += span;
+        };
+        for (const std::unique_ptr<Node>& child : table.children) {
+            if (child->kind == ElementKind::Col) {
+                applyColumn(*child);
+            } else if (child->kind == ElementKind::Colgroup) {
+                if (child->children.empty()) {
+                    applyColumn(*child);
+                }
+                for (const std::unique_ptr<Node>& column : child->children) {
+                    if (column->kind == ElementKind::Col) {
+                        applyColumn(*column);
+                    }
+                }
+            }
+        }
         int contentSum = 0;
         for (int columnWidth : columnWidths) {
             contentSum += columnWidth;
@@ -1281,7 +1437,7 @@ struct Engine {
         };
         (void)flushInlines;
         (void)pendingInlines;
-        for (const std::unique_ptr<Node>& childPtr : node.children) {
+        for (Node* childPtr : FlowChildren(node)) {
             Node& child = *childPtr;
             if (child.type == Node::Type::Text) {
                 const std::string text = CollapsedText(child.text, style.pre);
@@ -1384,6 +1540,25 @@ int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, in
     if (style.widthPx > 0) {
         width = std::min(width, style.widthPx);
     }
+    if (node.kind == ElementKind::Frameset) {
+        std::vector<Node*> frames;
+        for (const std::unique_ptr<Node>& child : node.children) {
+            if (child->kind == ElementKind::Frame || child->kind == ElementKind::Frameset) {
+                frames.push_back(child.get());
+            }
+        }
+        const int count = std::max(1, static_cast<int>(frames.size()));
+        const int frameWidth = std::max(1, width / count);
+        const int frameHeight = style.heightPx > 0 ? style.heightPx : 180;
+        for (int index = 0; index < static_cast<int>(frames.size()); ++index) {
+            Node& frame = *frames[static_cast<std::size_t>(index)];
+            const ResolvedStyle frameStyle = ResolveStyle(frame, style, *document);
+            const int childHeight = LayoutBlock(frame, frameStyle, x + index * frameWidth, y, frameWidth, fixed, false);
+            (void)childHeight;
+        }
+        AddBox(node, x, y, width, frameHeight, style, fixed);
+        return frameHeight;
+    }
     if (node.kind == ElementKind::Table) {
         const int height = LayoutTable(node, style, x, y, width, fixed);
         return height;
@@ -1444,7 +1619,20 @@ int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, in
     }
     AddBox(node, x, y, width, borderHeight, style, fixed);
     if (node.kind == ElementKind::Li || node.kind == ElementKind::Summary) {
-        std::string marker = "\xE2\x80\xA2";
+        std::string             marker = "\xE2\x80\xA2";
+        if (node.kind == ElementKind::Li && node.parent != nullptr && node.parent->kind != ElementKind::Ol) {
+            std::string listType = AttributeValue(node, "type");
+            if (listType.empty()) {
+                listType = AttributeValue(*node.parent, "type");
+            }
+            if (listType == "circle") {
+                marker = "o";
+            } else if (listType == "square") {
+                marker = "#";
+            } else if (listType == "none") {
+                marker = "";
+            }
+        }
         if (node.kind == ElementKind::Summary) {
             marker = node.parent != nullptr && node.parent->open ? "v" : ">";
         } else if (node.parent != nullptr && (node.parent->kind == ElementKind::Ol)) {
@@ -1608,7 +1796,13 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
                 continue;
             }
             Color link{0, 0, 0, 255};
-            if (ParseColor(AttributeValue(*ancestor, "link"), link)) {
+            const char* which = "link";
+            if (node.visited) {
+                which = "vlink";
+            } else if (document.hover == &node) {
+                which = "alink";
+            }
+            if (ParseColor(AttributeValue(*ancestor, which), link) || ParseColor(AttributeValue(*ancestor, "link"), link)) {
                 style.color = link;
             }
             break;
@@ -1625,7 +1819,7 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
     if (ParseColor(AttributeValue(node, "color"), parsed) || ParseColor(AttributeValue(node, "text"), parsed)) {
         style.color = parsed;
     }
-    if (ParseColor(AttributeValue(node, "bgcolor"), parsed)) {
+    if (ParseColor(AttributeValue(node, "bgcolor"), parsed) || ParseColor(AttributeValue(node, "background"), parsed)) {
         style.background = parsed;
     }
     const std::string align = ToLowerAscii(AttributeValue(node, "align"));
@@ -1689,6 +1883,25 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
     }
     if (node.kind == ElementKind::Svg) {
         style.display = DisplayKind::Replaced;
+    }
+    if (node.kind == ElementKind::Rt) {
+        style.baselineShift = -style.fontSizePx;
+    }
+    const std::string frameBorder = ToLowerAscii(AttributeValue(node, "frameborder"));
+    if (frameBorder == "0" || frameBorder == "no") {
+        style.border = 0;
+    } else if (!frameBorder.empty()) {
+        style.border = std::max(1, style.border);
+    }
+    const int marginWidth = std::atoi(AttributeValue(node, "marginwidth").c_str());
+    const int marginHeight = std::atoi(AttributeValue(node, "marginheight").c_str());
+    if (marginWidth > 0) {
+        style.paddingLeft = marginWidth;
+        style.paddingRight = marginWidth;
+    }
+    if (marginHeight > 0) {
+        style.paddingTop = marginHeight;
+        style.paddingBottom = marginHeight;
     }
     if (node.tagName == "mi") {
         style.italic = true;

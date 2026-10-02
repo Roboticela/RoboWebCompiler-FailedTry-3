@@ -644,7 +644,10 @@ void Walk(Document& document, Node& node, StyleJob& job) {
             }
         }
     } else if (node.kind == ElementKind::Style) {
-        ParseStylesheet(document, GatherText(node), job);
+        const std::string media = ToLowerAscii(AttributeValue(node, "media"));
+        if (media.find("print") == std::string::npos && media.find("speech") == std::string::npos) {
+            ParseStylesheet(document, GatherText(node), job);
+        }
     }
     if (job.failed) {
         return;

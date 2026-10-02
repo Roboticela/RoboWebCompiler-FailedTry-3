@@ -441,6 +441,32 @@ void TestScriptAndPresentation() {
     }
 }
 
+void TestHtmlBehavior() {
+    RoboWeb::Diagnostics diagnostics;
+    RoboWeb::Document form = Parse(
+        "<!DOCTYPE html><form><input name='email' type='email' required><button>Send</button></form>", diagnostics);
+    RoboWeb::LayoutResult formLayout = RoboWeb::LayoutDocument(form, 240, 120);
+    const RoboWeb::ElementBox* button = RoboWeb::FindBox(formLayout, "button");
+    EXPECT(button != nullptr);
+    if (button != nullptr) {
+        RoboWeb::DispatchClick(form, formLayout, button->x + 4, button->y + 4);
+        EXPECT(form.status.find("invalid required") != std::string::npos);
+    }
+    RoboWeb::Document page = Parse("<!DOCTYPE html><body vlink='red'><a href='page.html'>Go</a></body>", diagnostics);
+    RoboWeb::LayoutResult layout = RoboWeb::LayoutDocument(page, 200, 80);
+    const RoboWeb::ElementBox* link = RoboWeb::FindBox(layout, "a");
+    EXPECT(link != nullptr);
+    if (link != nullptr) {
+        RoboWeb::DispatchClick(page, layout, link->x + 2, link->y + 2);
+        EXPECT(link->node->visited);
+        EXPECT(page.status.find("open page.html") != std::string::npos);
+    }
+    RoboWeb::Document moving = Parse("<!DOCTYPE html><marquee>Move</marquee>", diagnostics);
+    EXPECT(RoboWeb::FindBox(RoboWeb::LayoutDocument(moving, 200, 80), "marquee") != nullptr);
+    RoboWeb::Document frames = Parse("<!DOCTYPE html><frameset cols='50%,50%'><frame src='a'><frame src='b'></frameset>", diagnostics);
+    EXPECT(RoboWeb::FindBox(RoboWeb::LayoutDocument(frames, 300, 200), "frame") != nullptr);
+}
+
 void TestDiagnosticFormat() {
     RoboWeb::Diagnostics diagnostics;
     diagnostics.Error("page.html", 4, 2, "duplicate attribute 'id'");
@@ -463,6 +489,7 @@ int main() {
     TestPixelsAndInteraction();
     TestStyleRule();
     TestScriptAndPresentation();
+    TestHtmlBehavior();
     TestStaticGeneration();
     TestDiagnosticFormat();
     if (gFailed != 0) {
