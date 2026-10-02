@@ -15,6 +15,7 @@ struct CompiledWebFont {
 };
 
 void LoadDocumentStyles(Document& document);
+void ApplyStyleText(ElementStyle& rule, const std::string& declarations);
 bool CompileLinkedStyles(Document& document, std::vector<CompiledWebFont>& fonts, std::string& error);
 
 }

@@ -1,6 +1,7 @@
 #include "Runtime/Interaction.h"
 
 #include "Core/Utf8.h"
+#include "Runtime/MiniScript.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -116,6 +117,7 @@ void SubmitForm(Document& document, Node& form) {
         }
     }
     document.status = "form data: " + body;
+    RunEvent(document, form, "onsubmit");
 }
 
 Node* LabeledControl(Node& label) {
@@ -144,12 +146,16 @@ Node* LabeledControl(Node& label) {
 }
 
 void Activate(Document& document, Node& node) {
-    if (HasAttribute(node, "disabled") || HasAttribute(node, "inert")) {
+    if (HasAttribute(node, "disabled") || HasAttribute(node, "inert") || node.hiddenByScript) {
         return;
+    }
+    if (HasAttribute(node, "draggable")) {
+        document.status = "dragging " + (AttributeValue(node, "id").empty() ? node.tagName : AttributeValue(node, "id"));
     }
     if (node.kind == ElementKind::Summary && node.parent != nullptr && node.parent->kind == ElementKind::Details) {
         node.parent->open = !node.parent->open;
         document.status = node.parent->open ? "details open" : "details closed";
+        RunEvent(document, *node.parent, "ontoggle");
         return;
     }
     if (node.kind == ElementKind::Input) {
@@ -486,6 +492,7 @@ bool DispatchClick(Document& document, const LayoutResult& layout, int x, int y)
         return false;
     }
     Activate(document, *target);
+    RunEvent(document, *target, "onclick");
     if (IsTextField(*target)) {
         PlaceCaret(document, layout, *target, x, y);
     }
@@ -616,7 +623,11 @@ bool DispatchText(Document& document, const std::string& text) {
     }
     const int before = static_cast<int>(focus->liveValue.size());
     InsertAtCaret(document, *focus, filtered);
-    return static_cast<int>(focus->liveValue.size()) != before;
+    const bool changed = static_cast<int>(focus->liveValue.size()) != before;
+    if (changed) {
+        RunEvent(document, *focus, "oninput");
+    }
+    return changed;
 }
 
 void RevealFocus(Document& document, const LayoutResult& layout, int viewportHeight) {

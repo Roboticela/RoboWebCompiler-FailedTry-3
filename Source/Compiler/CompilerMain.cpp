@@ -43,6 +43,7 @@ const char* kRuntimeSources[] = {
     "Render/Renderer.cpp",
     "Render/StyleSheet.cpp",
     "Runtime/Interaction.cpp",
+    "Runtime/MiniScript.cpp",
     "Runtime/HostLoop.cpp",
     "Runtime/Win32Host.cpp",
 };

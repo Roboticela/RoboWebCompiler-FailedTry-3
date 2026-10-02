@@ -103,6 +103,10 @@ std::wstring Caption(const App& app) {
     std::string extra = app.document->status;
     if (extra.empty()) {
         for (Node* node = app.document->hover; node != nullptr; node = node->parent) {
+            if (!AttributeValue(*node, "title").empty()) {
+                extra = AttributeValue(*node, "title");
+                break;
+            }
             if (node->kind == ElementKind::A && !AttributeValue(*node, "href").empty()) {
                 extra = AttributeValue(*node, "href");
                 break;

@@ -96,6 +96,8 @@ struct ResolvedStyle {
     int paddingTop = 0;
     int paddingBottom = 0;
     int border = 0;
+    int widthPx = -1;
+    int heightPx = -1;
     DisplayKind display = DisplayKind::Block;
     std::string fontFamily;
 };

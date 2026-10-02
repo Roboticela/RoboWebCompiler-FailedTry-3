@@ -252,6 +252,51 @@ void WriteCompiledStyles(std::ostringstream& output, const Document& document, c
             output << "        rule.backgroundGreen = " << static_cast<int>(rule.backgroundGreen) << ";\n";
             output << "        rule.backgroundBlue = " << static_cast<int>(rule.backgroundBlue) << ";\n";
         }
+        if (rule.displayKind >= 0) {
+            output << "        rule.displayKind = " << rule.displayKind << ";\n";
+        }
+        if (rule.widthPx >= 0) {
+            output << "        rule.widthPx = " << rule.widthPx << ";\n";
+        }
+        if (rule.heightPx >= 0) {
+            output << "        rule.heightPx = " << rule.heightPx << ";\n";
+        }
+        if (rule.marginTopPx >= 0) {
+            output << "        rule.marginTopPx = " << rule.marginTopPx << ";\n";
+        }
+        if (rule.marginRightPx >= 0) {
+            output << "        rule.marginRightPx = " << rule.marginRightPx << ";\n";
+        }
+        if (rule.marginBottomPx >= 0) {
+            output << "        rule.marginBottomPx = " << rule.marginBottomPx << ";\n";
+        }
+        if (rule.marginLeftPx >= 0) {
+            output << "        rule.marginLeftPx = " << rule.marginLeftPx << ";\n";
+        }
+        if (rule.paddingTopPx >= 0) {
+            output << "        rule.paddingTopPx = " << rule.paddingTopPx << ";\n";
+        }
+        if (rule.paddingRightPx >= 0) {
+            output << "        rule.paddingRightPx = " << rule.paddingRightPx << ";\n";
+        }
+        if (rule.paddingBottomPx >= 0) {
+            output << "        rule.paddingBottomPx = " << rule.paddingBottomPx << ";\n";
+        }
+        if (rule.paddingLeftPx >= 0) {
+            output << "        rule.paddingLeftPx = " << rule.paddingLeftPx << ";\n";
+        }
+        if (rule.textAlign >= 0) {
+            output << "        rule.textAlign = " << rule.textAlign << ";\n";
+        }
+        if (rule.decoration >= 0) {
+            output << "        rule.decoration = " << rule.decoration << ";\n";
+        }
+        if (rule.whiteSpace >= 0) {
+            output << "        rule.whiteSpace = " << rule.whiteSpace << ";\n";
+        }
+        if (rule.borderPx >= 0) {
+            output << "        rule.borderPx = " << rule.borderPx << ";\n";
+        }
         output << "        document.styleRules.push_back(rule);\n";
         output << "    }\n";
     }

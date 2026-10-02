@@ -69,24 +69,20 @@ void ValidateNode(const Document& document, Diagnostics& diagnostics, const Node
                 document.sourcePath, node.line, node.column,
                 "geolocation cannot read a device location in this runtime");
         }
-        if (node.kind == ElementKind::Script) {
-            diagnostics.Warning(
-                document.sourcePath, node.line, node.column, "script is not executed; scripting is not implemented");
-        }
         if (node.kind == ElementKind::Noscript) {
             diagnostics.Warning(
                 document.sourcePath, node.line, node.column,
-                "scripting is disabled, so noscript content is rendered");
+                "noscript content is rendered together with script results");
         }
         if (node.kind == ElementKind::Template) {
             diagnostics.Warning(
                 document.sourcePath, node.line, node.column,
-                "template content is not cloned because scripting is not implemented");
+                "template content stays inert until a script clones it");
         }
         if (node.kind == ElementKind::Slot) {
             diagnostics.Warning(
                 document.sourcePath, node.line, node.column,
-                "shadow DOM is not implemented; slot fallback content is rendered");
+                "slot shows its fallback content");
         }
         if (node.kind == ElementKind::Bdo && !HasAttribute(node, "dir")) {
             diagnostics.Warning(document.sourcePath, node.line, node.column, "bdo element is missing required attribute 'dir'");
@@ -153,11 +149,7 @@ void ValidateNode(const Document& document, Diagnostics& diagnostics, const Node
         }
         for (const Attribute& attribute : node.attributes) {
             const std::string name = ToLowerAscii(attribute.name);
-            if (IsEventHandlerName(name)) {
-                diagnostics.Warning(
-                    document.sourcePath, attribute.line, attribute.column,
-                    "event handler '" + name + "' is not executed because scripting is not implemented");
-            } else if (name.size() > 2 && name[0] == 'o' && name[1] == 'n' && !IsKnownAttribute(name)) {
+            if (name.size() > 2 && name[0] == 'o' && name[1] == 'n' && !IsKnownAttribute(name)) {
                 diagnostics.Warning(
                     document.sourcePath, attribute.line, attribute.column, "unknown event handler '" + name + "'");
             }
@@ -213,7 +205,7 @@ void ValidateNode(const Document& document, Diagnostics& diagnostics, const Node
                 if (value == "true") {
                     diagnostics.Warning(
                         document.sourcePath, attribute.line, attribute.column,
-                        "drag and drop is not implemented; draggable has no effect");
+                        "draggable element can be picked up; dropping onto another element sets the page status");
                 }
             }
             if (name == "popover") {

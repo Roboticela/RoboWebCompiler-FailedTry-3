@@ -81,7 +81,16 @@ void InitializeControlState(Node& node) {
         node.open = node.initialOpen;
         node.popoverOpen = false;
         node.selectExpanded = false;
+        node.scriptText = false;
+        node.hiddenByScript = false;
         node.marqueeOffset = 0;
+        if (HasAttribute(node, "contenteditable")) {
+            const std::string editable = ToLowerAscii(AttributeValue(node, "contenteditable"));
+            if (editable != "false" && node.liveValue.empty()) {
+                node.initialValue = GatherText(node);
+                node.liveValue = node.initialValue;
+            }
+        }
     }
     for (const std::unique_ptr<Node>& child : node.children) {
         child->parent = &node;

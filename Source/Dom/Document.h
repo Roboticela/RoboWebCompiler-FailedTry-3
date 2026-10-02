@@ -37,6 +37,8 @@ struct Node {
     bool open = false;
     bool popoverOpen = false;
     bool selectExpanded = false;
+    bool scriptText = false;
+    bool hiddenByScript = false;
     int marqueeOffset = 0;
     Node* parent = nullptr;
 };
@@ -83,6 +85,21 @@ struct ElementStyle {
     std::uint8_t backgroundGreen = 0;
     std::uint8_t backgroundBlue = 0;
     bool hasBackground = false;
+    int displayKind = -1;
+    int widthPx = -1;
+    int heightPx = -1;
+    int marginTopPx = -1;
+    int marginRightPx = -1;
+    int marginBottomPx = -1;
+    int marginLeftPx = -1;
+    int paddingTopPx = -1;
+    int paddingRightPx = -1;
+    int paddingBottomPx = -1;
+    int paddingLeftPx = -1;
+    int textAlign = -1;
+    int decoration = -1;
+    int whiteSpace = -1;
+    int borderPx = -1;
 };
 
 struct Document {
@@ -98,6 +115,7 @@ struct Document {
     bool caretOn = true;
     int scrollY = 0;
     bool stylesLoaded = false;
+    bool scriptsRan = false;
     std::vector<ElementStyle> styleRules;
 };
 

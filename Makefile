@@ -12,6 +12,7 @@ RUNTIME_OBJS := \
 	$(OBJDIR)/Renderer.o \
 	$(OBJDIR)/StyleSheet.o \
 	$(OBJDIR)/Interaction.o \
+	$(OBJDIR)/MiniScript.o \
 	$(OBJDIR)/HostLoop.o \
 	$(OBJDIR)/Win32Host.o
 
@@ -42,6 +43,7 @@ TEST_OBJS := \
 	$(OBJDIR)/Renderer.o \
 	$(OBJDIR)/StyleSheet.o \
 	$(OBJDIR)/Interaction.o \
+	$(OBJDIR)/MiniScript.o \
 	$(OBJDIR)/HostLoop.o \
 	$(OBJDIR)/Win32Host.o \
 	$(OBJDIR)/CodeGenerator.o \
@@ -103,6 +105,9 @@ $(OBJDIR)/StyleSheet.o: Source/Render/StyleSheet.cpp | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(OBJDIR)/Interaction.o: Source/Runtime/Interaction.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(OBJDIR)/MiniScript.o: Source/Runtime/MiniScript.cpp | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(OBJDIR)/HostLoop.o: Source/Runtime/HostLoop.cpp | $(OBJDIR)

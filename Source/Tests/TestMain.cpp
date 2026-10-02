@@ -104,7 +104,7 @@ void TestAttributes() {
     RoboWeb::Document document = Parse("<!DOCTYPE html><div id='a' zzzz='1' onclick='bad()'></div>", diagnostics);
     RoboWeb::ValidateTree(document, diagnostics);
     EXPECT(CountMessages(diagnostics, RoboWeb::Severity::Warning, "unknown attribute 'zzzz'") == 1);
-    EXPECT(CountMessages(diagnostics, RoboWeb::Severity::Warning, "event handler 'onclick'") == 1);
+    EXPECT(CountMessages(diagnostics, RoboWeb::Severity::Warning, "not executed") == 0);
     RoboWeb::Diagnostics duplicate;
     RoboWeb::Document duplicated = Parse("<!DOCTYPE html><div id='a' id='b'></div>", duplicate);
     (void)duplicated;
@@ -149,12 +149,21 @@ void TestParserRecovery() {
     EXPECT(CountMessages(custom, RoboWeb::Severity::Warning, "custom element") == 1);
 
     RoboWeb::Diagnostics svg;
-    Parse("<!DOCTYPE html><svg></svg>", svg);
-    EXPECT(CountMessages(svg, RoboWeb::Severity::Error, "SVG is not implemented") == 1);
+    RoboWeb::Document svgDocument = Parse("<!DOCTYPE html><svg width='40' height='20'><rect x='0' y='0' width='40' height='20' fill='red'/></svg>", svg);
+    EXPECT(CountMessages(svg, RoboWeb::Severity::Error, "SVG is not implemented") == 0);
+    EXPECT(!svg.HasErrors());
+    RoboWeb::LayoutResult svgLayout = RoboWeb::LayoutDocument(svgDocument, 120, 80);
+    RoboWeb::Framebuffer svgFrame = RoboWeb::RenderDocument(svgLayout, 0);
+    const RoboWeb::ElementBox* svgBox = RoboWeb::FindBox(svgLayout, "svg");
+    EXPECT(svgBox != nullptr);
+    if (svgBox != nullptr) {
+        EXPECT(RoboWeb::PixelRed(svgFrame, svgBox->x + 4, svgBox->y + 4) == 255);
+    }
 
     RoboWeb::Diagnostics math;
-    Parse("<!DOCTYPE html><math></math>", math);
-    EXPECT(CountMessages(math, RoboWeb::Severity::Error, "MathML is not implemented") == 1);
+    RoboWeb::Document mathDocument = Parse("<!DOCTYPE html><math><mi>x</mi><mo>+</mo><mn>1</mn></math>", math);
+    EXPECT(CountMessages(math, RoboWeb::Severity::Error, "MathML is not implemented") == 0);
+    EXPECT(RoboWeb::GatherText(*mathDocument.root).find("x") != std::string::npos);
 
     RoboWeb::Diagnostics image;
     RoboWeb::Document imageDocument = Parse("<!DOCTYPE html><image alt='picture'>", image);
@@ -414,6 +423,24 @@ void TestStyleRule() {
     EXPECT(CountMessages(diagnostics, RoboWeb::Severity::Warning, "CSS is not implemented") == 0);
 }
 
+void TestScriptAndPresentation() {
+    RoboWeb::Diagnostics diagnostics;
+    RoboWeb::Document document = Parse(
+        "<!DOCTYPE html><p id='out'>Old</p><script>document.getElementById('out').textContent = 'New';</script>"
+        "<p style='display:none'>Hidden</p><div style='width:80px;height:30px;background:#00ff00'>Box</div>",
+        diagnostics);
+    EXPECT(!diagnostics.HasErrors());
+    RoboWeb::LayoutResult layout = RoboWeb::LayoutDocument(document, 200, 160);
+    EXPECT(RoboWeb::GatherText(*document.root).find("New") != std::string::npos);
+    EXPECT(RoboWeb::GatherText(*document.root).find("Old") == std::string::npos);
+    const RoboWeb::ElementBox* box = RoboWeb::FindBox(layout, "div");
+    EXPECT(box != nullptr);
+    if (box != nullptr) {
+        EXPECT(box->width == 80);
+        EXPECT(box->height >= 30);
+    }
+}
+
 void TestDiagnosticFormat() {
     RoboWeb::Diagnostics diagnostics;
     diagnostics.Error("page.html", 4, 2, "duplicate attribute 'id'");
@@ -435,6 +462,7 @@ int main() {
     TestLayoutMatchesBrowserDefaults();
     TestPixelsAndInteraction();
     TestStyleRule();
+    TestScriptAndPresentation();
     TestStaticGeneration();
     TestDiagnosticFormat();
     if (gFailed != 0) {

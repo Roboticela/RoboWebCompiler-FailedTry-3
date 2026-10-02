@@ -639,11 +639,14 @@ Document HtmlParser::Parse(const std::string& sourceText, const std::string& pat
             token.name = "img";
         }
         ElementKind kind = FindElement(token.name);
-        if (kind == ElementKind::Svg) {
-            diagnostics.Error(path, token.line, token.column, "SVG is not implemented");
-        } else if (kind == ElementKind::Math) {
-            diagnostics.Error(path, token.line, token.column, "MathML is not implemented");
-        } else if (kind == ElementKind::Unknown) {
+        bool foreign = false;
+        for (Node* frame : stack) {
+            if (frame->kind == ElementKind::Svg || frame->kind == ElementKind::Math) {
+                foreign = true;
+            }
+        }
+        const bool foreignChild = foreign && kind == ElementKind::Unknown;
+        if (kind == ElementKind::Unknown && !foreignChild) {
             if (IsCustomElementName(token.name)) {
                 diagnostics.Warning(
                     path, token.line, token.column,
@@ -660,7 +663,8 @@ Document HtmlParser::Parse(const std::string& sourceText, const std::string& pat
                 path, token.line, token.column, "element '" + token.name + "' is experimental");
         }
         const bool selfClosing = token.data == "/";
-        const bool isVoid = kind != ElementKind::Unknown && (SpecFor(kind).traits & TRAIT_VOID) != 0;
+        const bool isVoid = (kind != ElementKind::Unknown && (SpecFor(kind).traits & TRAIT_VOID) != 0) ||
+                            (foreignChild && selfClosing);
         if (selfClosing && !isVoid && kind != ElementKind::Unknown) {
             diagnostics.Warning(
                 path, token.line, token.column,

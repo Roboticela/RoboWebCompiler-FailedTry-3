@@ -4,8 +4,10 @@
 #include "Render/BitmapFont.h"
 #include "Render/ImageDecoder.h"
 #include "Render/StyleSheet.h"
+#include "Runtime/MiniScript.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdlib>
 
@@ -201,7 +203,7 @@ bool IsHidden(const Node& node) {
     if (node.type != Node::Type::Element) {
         return false;
     }
-    if (HasAttribute(node, "hidden")) {
+    if (node.hiddenByScript || HasAttribute(node, "hidden")) {
         return true;
     }
     if (HasAttribute(node, "popover") && !node.popoverOpen) {
@@ -558,6 +560,9 @@ struct Engine {
                 op.imagePath = path;
                 op.fixed = fixed;
                 result->ops.push_back(op);
+                if (style.border > 0) {
+                    Stroke(x, y, width, height, Color{0, 0, 0, 255}, fixed);
+                }
             } else {
                 Stroke(x, y, width, height, border, fixed);
                 const std::string alt = AttributeValue(node, "alt");
@@ -568,7 +573,9 @@ struct Engine {
             return;
         }
         if (node.kind == ElementKind::Hr) {
-            Fill(x, y, width, HR_THICKNESS_PX, Color{128, 128, 128, 255}, fixed);
+            const int thickness = height > 0 ? height : HR_THICKNESS_PX;
+            const bool colored = HasAttribute(node, "color") || AttributeValue(node, "style").find("color") != std::string::npos;
+            Fill(x, y, width, thickness, colored ? style.color : Color{128, 128, 128, 255}, fixed);
             return;
         }
         if (node.kind == ElementKind::Meter || node.kind == ElementKind::Progress) {
@@ -667,8 +674,13 @@ struct Engine {
             return;
         }
         if (node.kind == ElementKind::Hr) {
-            width = containing;
-            height = HR_THICKNESS_PX;
+            width = style.widthPx > 0 ? style.widthPx : containing;
+            height = style.heightPx > 0 ? style.heightPx : HR_THICKNESS_PX;
+            return;
+        }
+        if (node.kind == ElementKind::Svg) {
+            width = style.widthPx > 0 ? style.widthPx : 300;
+            height = style.heightPx > 0 ? style.heightPx : 150;
             return;
         }
         if (node.kind == ElementKind::Br) {
@@ -679,8 +691,102 @@ struct Engine {
         ReplacedSize(node, style, containing, width, height);
     }
 
+    int SvgNumber(const Node& node, const char* name, int fallback) {
+        const std::string text = AttributeValue(node, name);
+        if (text.empty()) {
+            return fallback;
+        }
+        return std::atoi(text.c_str());
+    }
+
+    void FillEllipse(int centerX, int centerY, int radiusX, int radiusY, Color color, bool fixed) {
+        if (radiusX < 1 || radiusY < 1 || color.alpha == 0) {
+            return;
+        }
+        for (int row = -radiusY; row <= radiusY; ++row) {
+            const double span = 1.0 - (static_cast<double>(row) * row) / (static_cast<double>(radiusY) * radiusY);
+            if (span <= 0) {
+                continue;
+            }
+            const int half = std::max(1, static_cast<int>(radiusX * std::sqrt(span)));
+            Fill(centerX - half, centerY + row, half * 2, 1, color, fixed);
+        }
+    }
+
+    void StrokeLine(int x0, int y0, int x1, int y1, Color color, bool fixed) {
+        const int deltaX = std::abs(x1 - x0);
+        const int stepX = x0 < x1 ? 1 : -1;
+        const int deltaY = -std::abs(y1 - y0);
+        const int stepY = y0 < y1 ? 1 : -1;
+        int error = deltaX + deltaY;
+        for (int guard = 0; guard < 4096; ++guard) {
+            Fill(x0, y0, 1, 1, color, fixed);
+            if (x0 == x1 && y0 == y1) {
+                break;
+            }
+            const int doubled = 2 * error;
+            if (doubled >= deltaY) {
+                error += deltaY;
+                x0 += stepX;
+            }
+            if (doubled <= deltaX) {
+                error += deltaX;
+                y0 += stepY;
+            }
+        }
+    }
+
+    void PaintSvgTree(Node& node, int originX, int originY, bool fixed) {
+        const std::string tag = ToLowerAscii(node.tagName);
+        Color fill{0, 0, 0, 255};
+        const std::string fillText = AttributeValue(node, "fill");
+        if (ToLowerAscii(fillText) == "none") {
+            fill.alpha = 0;
+        } else if (!fillText.empty()) {
+            ParseColor(fillText, fill);
+        }
+        if (tag == "rect") {
+            Fill(originX + SvgNumber(node, "x", 0), originY + SvgNumber(node, "y", 0), SvgNumber(node, "width", 0),
+                SvgNumber(node, "height", 0), fill, fixed);
+        } else if (tag == "circle") {
+            FillEllipse(originX + SvgNumber(node, "cx", 0), originY + SvgNumber(node, "cy", 0), SvgNumber(node, "r", 0),
+                SvgNumber(node, "r", 0), fill, fixed);
+        } else if (tag == "ellipse") {
+            FillEllipse(originX + SvgNumber(node, "cx", 0), originY + SvgNumber(node, "cy", 0), SvgNumber(node, "rx", 0),
+                SvgNumber(node, "ry", 0), fill, fixed);
+        } else if (tag == "line") {
+            Color stroke = fill;
+            const std::string strokeText = AttributeValue(node, "stroke");
+            if (!strokeText.empty()) {
+                ParseColor(strokeText, stroke);
+            }
+            StrokeLine(originX + SvgNumber(node, "x1", 0), originY + SvgNumber(node, "y1", 0), originX + SvgNumber(node, "x2", 0),
+                originY + SvgNumber(node, "y2", 0), stroke, fixed);
+        } else if (tag == "text") {
+            ResolvedStyle textStyle;
+            textStyle.color = fill;
+            textStyle.fontSizePx = std::max(1, SvgNumber(node, "font-size", DEFAULT_FONT_SIZE_PX));
+            Text(originX + SvgNumber(node, "x", 0), originY + SvgNumber(node, "y", 0) - textStyle.fontSizePx, GatherText(node), textStyle,
+                fixed);
+        }
+        if (tag == "svg" || tag == "g" || tag == "a" || node.kind == ElementKind::Svg) {
+            for (const std::unique_ptr<Node>& child : node.children) {
+                if (child->type == Node::Type::Element) {
+                    PaintSvgTree(*child, originX, originY, fixed);
+                }
+            }
+        }
+    }
+
     void PaintAtomic(Node& node, int x, int y, int width, int height, const ResolvedStyle& style, bool fixed) {
         AddBox(node, x, y, width, height, style, fixed);
+        if (node.kind == ElementKind::Svg) {
+            PaintSvgTree(node, x, y, fixed);
+            if (style.border > 0) {
+                Stroke(x, y, width, height, Color{0, 0, 0, 255}, fixed);
+            }
+            return;
+        }
         const Color face{240, 240, 240, 255};
         const Color border{118, 118, 118, 255};
         const Color focus{0, 95, 204, 255};
@@ -696,8 +802,15 @@ struct Engine {
             }
             if (type == "range") {
                 Fill(x, y + height / 2, width, 2, border, fixed);
-                Fill(x + width / 2, y, 8, height, face, fixed);
-                Stroke(x + width / 2, y, 8, height, border, fixed);
+                const double minimum = std::atof(AttributeValue(node, "min").c_str());
+                const double maximum = AttributeValue(node, "max").empty() ? 100.0 : std::atof(AttributeValue(node, "max").c_str());
+                const double span = maximum - minimum;
+                const std::string raw = node.liveValue.empty() ? AttributeValue(node, "value") : node.liveValue;
+                const double value = raw.empty() ? (minimum + maximum) / 2.0 : std::atof(raw.c_str());
+                const double ratio = span == 0 ? 0 : std::max(0.0, std::min(1.0, (value - minimum) / span));
+                const int thumb = x + static_cast<int>(ratio * std::max(0, width - 8));
+                Fill(thumb, y, 8, height, face, fixed);
+                Stroke(thumb, y, 8, height, border, fixed);
                 return;
             }
             if (type == "color") {
@@ -819,6 +932,19 @@ struct Engine {
     }
 
     void CollectInlines(Node& node, const ResolvedStyle& style, int containing, std::vector<Piece>& pieces, bool rootBlock) {
+        if (node.scriptText || HasAttribute(node, "contenteditable")) {
+            const std::string text = CollapsedText(node.liveValue.empty() && !node.scriptText ? GatherText(node) : node.liveValue, style.pre);
+            if (!text.empty()) {
+                Piece piece;
+                piece.text = text;
+                piece.style = style;
+                piece.node = &node;
+                piece.width = MeasureTextPx(text, style.fontSizePx, style.bold, style.italic, style.fontFamily);
+                piece.height = LineHeightPx(style.fontSizePx);
+                pieces.push_back(piece);
+            }
+            return;
+        }
         for (const std::unique_ptr<Node>& childPtr : node.children) {
             Node& child = *childPtr;
             if (child.type == Node::Type::Text) {
@@ -878,6 +1004,9 @@ struct Engine {
                 continue;
             }
             if (IsHidden(child)) {
+                continue;
+            }
+            if (ResolveStyle(child, style, *document).display == DisplayKind::None) {
                 continue;
             }
             if (child.kind == ElementKind::Option || child.kind == ElementKind::Optgroup) {
@@ -957,6 +1086,7 @@ struct Engine {
         };
         std::vector<Row> rows;
         Node* caption = nullptr;
+        std::vector<int> spanLeft(32, 0);
         auto addRow = [&](Node& rowNode) {
             Row row;
             row.node = &rowNode;
@@ -964,6 +1094,9 @@ struct Engine {
             for (const std::unique_ptr<Node>& child : rowNode.children) {
                 if (child->kind != ElementKind::Td && child->kind != ElementKind::Th) {
                     continue;
+                }
+                while (column < static_cast<int>(spanLeft.size()) && spanLeft[static_cast<std::size_t>(column)] > 0) {
+                    ++column;
                 }
                 Cell cell;
                 cell.node = child.get();
@@ -973,8 +1106,24 @@ struct Engine {
                 if (!spanOk || cell.columnSpan < 1) {
                     cell.columnSpan = 1;
                 }
+                bool rowOk = false;
+                int rowSpan = ParsePx(AttributeValue(*child, "rowspan"), width, rowOk);
+                if (!rowOk || rowSpan < 1) {
+                    rowSpan = 1;
+                }
+                if (column + cell.columnSpan > static_cast<int>(spanLeft.size())) {
+                    spanLeft.resize(static_cast<std::size_t>(column + cell.columnSpan), 0);
+                }
+                for (int span = 0; span < cell.columnSpan; ++span) {
+                    spanLeft[static_cast<std::size_t>(column + span)] = rowSpan;
+                }
                 column += cell.columnSpan;
                 row.cells.push_back(cell);
+            }
+            for (int& remaining : spanLeft) {
+                if (remaining > 0) {
+                    --remaining;
+                }
             }
             rows.push_back(row);
         };
@@ -993,6 +1142,16 @@ struct Engine {
                 }
             }
         }
+        bool paddingOk = false;
+        bool spacingOk = false;
+        int cellPadding = ParsePx(AttributeValue(table, "cellpadding"), width, paddingOk);
+        int spacing = ParsePx(AttributeValue(table, "cellspacing"), width, spacingOk);
+        if (!paddingOk || cellPadding < 0) {
+            cellPadding = CELL_PADDING_PX;
+        }
+        if (!spacingOk || spacing < 0) {
+            spacing = TABLE_BORDER_SPACING_PX;
+        }
         int columns = 1;
         for (const Row& row : rows) {
             int count = 0;
@@ -1008,12 +1167,11 @@ struct Engine {
                     continue;
                 }
                 const ResolvedStyle cellStyle = ResolveStyle(*cell.node, style, *document);
-                const int needed = PreferredWidth(*cell.node, cellStyle) + CELL_PADDING_PX * 2;
+                const int needed = PreferredWidth(*cell.node, cellStyle) + cellPadding * 2;
                 int& columnWidth = columnWidths[static_cast<std::size_t>(cell.column)];
                 columnWidth = std::max(columnWidth, needed);
             }
         }
-        const int spacing = TABLE_BORDER_SPACING_PX;
         bool borderOk = false;
         const int borderAttr = ParsePx(AttributeValue(table, "border"), width, borderOk);
         const int border = borderOk && borderAttr > 0 ? borderAttr : 0;
@@ -1054,7 +1212,7 @@ struct Engine {
             Stroke(x, y, tableWidth, border, Color{0, 0, 0, 255}, fixed);
         }
         for (Row& row : rows) {
-            int rowHeight = LineHeightPx(style.fontSizePx) + CELL_PADDING_PX * 2;
+            int rowHeight = LineHeightPx(style.fontSizePx) + cellPadding * 2;
             std::vector<int> contentHeights(row.cells.size(), 0);
             for (std::size_t cellIndex = 0; cellIndex < row.cells.size(); ++cellIndex) {
                 Cell& cell = row.cells[cellIndex];
@@ -1067,8 +1225,8 @@ struct Engine {
                 }
                 spanWidth += spacing * std::max(0, cell.columnSpan - 1);
                 const ResolvedStyle cellStyle = ResolveStyle(*cell.node, style, *document);
-                LayoutLines(*cell.node, 0, 0, std::max(1, spanWidth - CELL_PADDING_PX * 2), cellStyle, fixed, contentHeights[cellIndex], false);
-                rowHeight = std::max(rowHeight, contentHeights[cellIndex] + CELL_PADDING_PX * 2);
+                LayoutLines(*cell.node, 0, 0, std::max(1, spanWidth - cellPadding * 2), cellStyle, fixed, contentHeights[cellIndex], false);
+                rowHeight = std::max(rowHeight, contentHeights[cellIndex] + cellPadding * 2);
             }
             int cursorX = x + border + spacing;
             AddBox(*row.node, x, cursorY, tableWidth, rowHeight, style, fixed);
@@ -1091,10 +1249,16 @@ struct Engine {
                 }
                 AddBox(*cell.node, cursorX, cursorY, spanWidth, rowHeight, cellStyle, fixed);
                 const int contentHeight = contentHeights[cellIndex];
-                const int contentTop = cursorY + std::max(CELL_PADDING_PX, (rowHeight - contentHeight) / 2);
+                const std::string valign = ToLowerAscii(AttributeValue(*cell.node, "valign"));
+                int contentTop = cursorY + cellPadding;
+                if (valign == "bottom") {
+                    contentTop = cursorY + rowHeight - contentHeight - cellPadding;
+                } else if (valign != "top") {
+                    contentTop = cursorY + std::max(cellPadding, (rowHeight - contentHeight) / 2);
+                }
                 int used = 0;
                 LayoutLines(
-                    *cell.node, cursorX + CELL_PADDING_PX, contentTop, std::max(1, spanWidth - CELL_PADDING_PX * 2), cellStyle, fixed, used, true);
+                    *cell.node, cursorX + cellPadding, contentTop, std::max(1, spanWidth - cellPadding * 2), cellStyle, fixed, used, true);
                 cursorX += spanWidth + spacing;
             }
             cursorY += rowHeight + spacing;
@@ -1136,6 +1300,9 @@ struct Engine {
             if (IsHidden(child)) {
                 continue;
             }
+            if (ResolveStyle(child, style, *document).display == DisplayKind::None) {
+                continue;
+            }
             if (node.kind == ElementKind::Details && !node.open && child.kind != ElementKind::Summary) {
                 continue;
             }
@@ -1173,8 +1340,50 @@ struct Engine {
     }
 };
 
+std::string Roman(int number, bool upper) {
+    if (number <= 0 || number > 3999) {
+        return std::to_string(number);
+    }
+    const char* ones[] = {"", "i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix"};
+    const char* tens[] = {"", "x", "xx", "xxx", "xl", "l", "lx", "lxx", "lxxx", "xc"};
+    const char* hundreds[] = {"", "c", "cc", "ccc", "cd", "d", "dc", "dcc", "dccc", "cm"};
+    const char* thousands[] = {"", "m", "mm", "mmm"};
+    std::string text = std::string(thousands[number / 1000]) + hundreds[(number / 100) % 10] + tens[(number / 10) % 10] + ones[number % 10];
+    if (upper) {
+        for (char& character : text) {
+            if (character >= 'a' && character <= 'z') {
+                character = static_cast<char>(character - 'a' + 'A');
+            }
+        }
+    }
+    return text;
+}
+
+std::string ListMarker(int index, const std::string& type) {
+    if (type == "A" || type == "a") {
+        std::string letters;
+        int value = std::max(1, index);
+        while (value > 0) {
+            --value;
+            letters.insert(letters.begin(), static_cast<char>((type == "A" ? 'A' : 'a') + value % 26));
+            value /= 26;
+        }
+        return letters + ".";
+    }
+    if (type == "I" || type == "i") {
+        return Roman(index, type == "I") + ".";
+    }
+    return std::to_string(index) + ".";
+}
+
 int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, int width, bool fixed, bool suppressTop) {
     (void)suppressTop;
+    if (style.display == DisplayKind::None) {
+        return 0;
+    }
+    if (style.widthPx > 0) {
+        width = std::min(width, style.widthPx);
+    }
     if (node.kind == ElementKind::Table) {
         const int height = LayoutTable(node, style, x, y, width, fixed);
         return height;
@@ -1223,7 +1432,13 @@ int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, in
         background.fixed = fixed;
         result->ops.insert(result->ops.begin() + static_cast<std::ptrdiff_t>(backgroundIndex), background);
     }
-    const int borderHeight = contentHeight + style.paddingTop + style.paddingBottom + style.border * 2;
+    int borderHeight = contentHeight + style.paddingTop + style.paddingBottom + style.border * 2;
+    if (style.heightPx > borderHeight) {
+        borderHeight = style.heightPx;
+        if (style.background.alpha != 0 && backgroundIndex < result->ops.size()) {
+            result->ops[backgroundIndex].height = borderHeight;
+        }
+    }
     if (style.border > 0) {
         Stroke(x, y, width, borderHeight, Color{118, 118, 118, 255}, fixed);
     }
@@ -1233,23 +1448,32 @@ int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, in
         if (node.kind == ElementKind::Summary) {
             marker = node.parent != nullptr && node.parent->open ? "v" : ">";
         } else if (node.parent != nullptr && (node.parent->kind == ElementKind::Ol)) {
-            int index = 1;
             bool startOk = false;
             const int start = ParsePx(AttributeValue(*node.parent, "start"), width, startOk);
-            if (startOk) {
-                index = start;
-            }
-            int seen = 0;
+            const bool reversed = HasAttribute(*node.parent, "reversed");
+            int before = 0;
+            int total = 0;
+            bool reached = false;
             for (const std::unique_ptr<Node>& sibling : node.parent->children) {
-                if (sibling->kind == ElementKind::Li) {
-                    if (sibling.get() == &node) {
-                        break;
-                    }
-                    ++seen;
+                if (sibling->kind != ElementKind::Li) {
+                    continue;
                 }
+                if (sibling.get() == &node) {
+                    reached = true;
+                }
+                if (!reached) {
+                    ++before;
+                }
+                ++total;
             }
-            index += seen;
-            marker = std::to_string(index) + ".";
+            int index = startOk ? start : (reversed ? total : 1);
+            index += reversed ? -before : before;
+            bool valueOk = false;
+            const int explicitValue = ParsePx(AttributeValue(node, "value"), width, valueOk);
+            if (valueOk) {
+                index = explicitValue;
+            }
+            marker = ListMarker(index, AttributeValue(*node.parent, "type"));
         }
         Text(contentX - MeasureTextPx(marker, style.fontSizePx, style.bold, style.italic, style.fontFamily) - 6, contentY, marker, style, fixed);
     }
@@ -1335,6 +1559,8 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
     style.mark = false;
     style.background = Color{0, 0, 0, 0};
     style.border = 0;
+    style.widthPx = -1;
+    style.heightPx = -1;
     style.paddingLeft = 0;
     style.paddingRight = 0;
     style.paddingTop = 0;
@@ -1377,6 +1603,16 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
     if (node.kind == ElementKind::A && HasAttribute(node, "href")) {
         style.color = Color{0, 0, 238, 255};
         style.underline = true;
+        for (Node* ancestor = node.parent; ancestor != nullptr; ancestor = ancestor->parent) {
+            if (ancestor->kind != ElementKind::Body) {
+                continue;
+            }
+            Color link{0, 0, 0, 255};
+            if (ParseColor(AttributeValue(*ancestor, "link"), link)) {
+                style.color = link;
+            }
+            break;
+        }
     }
     if (node.kind == ElementKind::Fieldset) {
         style.border = 2;
@@ -1419,6 +1655,44 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
         const int milli[] = {0, 630, 820, 1000, 1130, 1500, 2000, 3000};
         style.fontSizePx = std::max(1, EmToPx(parent.fontSizePx, milli[step]));
     }
+    if (HasAttribute(node, "nowrap")) {
+        style.nowrap = true;
+    }
+    bool widthOk = false;
+    bool heightOk = false;
+    const int widthAttribute = ParsePx(AttributeValue(node, "width"), 0, widthOk);
+    const int heightAttribute = ParsePx(AttributeValue(node, "height"), 0, heightOk);
+    if (widthOk && widthAttribute > 0 && AttributeValue(node, "width").find('%') == std::string::npos) {
+        style.widthPx = widthAttribute;
+    }
+    if (heightOk && heightAttribute > 0 && AttributeValue(node, "height").find('%') == std::string::npos) {
+        style.heightPx = heightAttribute;
+    }
+    if (node.kind == ElementKind::Hr && HasAttribute(node, "size")) {
+        style.heightPx = std::max(1, std::atoi(AttributeValue(node, "size").c_str()));
+    }
+    const int horizontalSpace = std::atoi(AttributeValue(node, "hspace").c_str());
+    const int verticalSpace = std::atoi(AttributeValue(node, "vspace").c_str());
+    if (horizontalSpace > 0) {
+        style.marginLeft = horizontalSpace;
+        style.marginRight = horizontalSpace;
+    }
+    if (verticalSpace > 0) {
+        style.marginTop = verticalSpace;
+        style.marginBottom = verticalSpace;
+    }
+    if (HasAttribute(node, "border") && node.kind != ElementKind::Table) {
+        const int border = std::atoi(AttributeValue(node, "border").c_str());
+        if (border > 0) {
+            style.border = border;
+        }
+    }
+    if (node.kind == ElementKind::Svg) {
+        style.display = DisplayKind::Replaced;
+    }
+    if (node.tagName == "mi") {
+        style.italic = true;
+    }
     const std::string face = ToLowerAscii(AttributeValue(node, "face"));
     if (face.find("mono") != std::string::npos || face.find("courier") != std::string::npos) {
         style.monospace = true;
@@ -1447,6 +1721,70 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
         }
         if (rule.hasBackground) {
             target.background = Color{rule.backgroundRed, rule.backgroundGreen, rule.backgroundBlue, 255};
+        }
+        if (rule.displayKind == 0) {
+            target.display = DisplayKind::None;
+        } else if (rule.displayKind == 1) {
+            target.display = DisplayKind::Block;
+        } else if (rule.displayKind == 2) {
+            target.display = DisplayKind::Inline;
+        } else if (rule.displayKind == 3) {
+            target.display = DisplayKind::InlineBlock;
+        } else if (rule.displayKind == 4) {
+            target.display = DisplayKind::ListItem;
+        }
+        if (rule.widthPx >= 0) {
+            target.widthPx = rule.widthPx;
+        }
+        if (rule.heightPx >= 0) {
+            target.heightPx = rule.heightPx;
+        }
+        if (rule.marginTopPx >= 0) {
+            target.marginTop = rule.marginTopPx;
+        }
+        if (rule.marginRightPx >= 0) {
+            target.marginRight = rule.marginRightPx;
+        }
+        if (rule.marginBottomPx >= 0) {
+            target.marginBottom = rule.marginBottomPx;
+        }
+        if (rule.marginLeftPx >= 0) {
+            target.marginLeft = rule.marginLeftPx;
+        }
+        if (rule.paddingTopPx >= 0) {
+            target.paddingTop = rule.paddingTopPx;
+        }
+        if (rule.paddingRightPx >= 0) {
+            target.paddingRight = rule.paddingRightPx;
+        }
+        if (rule.paddingBottomPx >= 0) {
+            target.paddingBottom = rule.paddingBottomPx;
+        }
+        if (rule.paddingLeftPx >= 0) {
+            target.paddingLeft = rule.paddingLeftPx;
+        }
+        if (rule.textAlign >= 0) {
+            target.textAlign = rule.textAlign;
+        }
+        if (rule.decoration == 0) {
+            target.underline = false;
+            target.strike = false;
+        } else if (rule.decoration == 1) {
+            target.underline = true;
+        } else if (rule.decoration == 2) {
+            target.strike = true;
+        }
+        if (rule.whiteSpace == 0) {
+            target.nowrap = false;
+            target.pre = false;
+        } else if (rule.whiteSpace == 1) {
+            target.nowrap = true;
+        } else if (rule.whiteSpace == 2) {
+            target.pre = true;
+            target.nowrap = true;
+        }
+        if (rule.borderPx >= 0) {
+            target.border = rule.borderPx;
         }
     };
     auto matches = [](const Node& current, const std::string& selector) {
@@ -1478,59 +1816,7 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
     }
     if (HasAttribute(node, "style")) {
         ElementStyle inlineRule;
-        const std::string declarations = AttributeValue(node, "style");
-        std::size_t start = 0;
-        for (std::size_t index = 0; index <= declarations.size(); ++index) {
-            if (index != declarations.size() && declarations[index] != ';') {
-                continue;
-            }
-            const std::string piece = declarations.substr(start, index - start);
-            start = index + 1;
-            const std::size_t colon = piece.find(':');
-            if (colon == std::string::npos) {
-                continue;
-            }
-            const std::string property = ToLowerAscii(piece.substr(0, colon));
-            const std::string value = piece.substr(colon + 1);
-            if (property.find("font-family") != std::string::npos) {
-                inlineRule.fontFamily = ToLowerAscii(value);
-                const std::size_t comma = inlineRule.fontFamily.find(',');
-                if (comma != std::string::npos) {
-                    inlineRule.fontFamily = inlineRule.fontFamily.substr(0, comma);
-                }
-                while (!inlineRule.fontFamily.empty() && (inlineRule.fontFamily.front() == ' ' || inlineRule.fontFamily.front() == '\'' ||
-                                                             inlineRule.fontFamily.front() == '"')) {
-                    inlineRule.fontFamily.erase(inlineRule.fontFamily.begin());
-                }
-                while (!inlineRule.fontFamily.empty() && (inlineRule.fontFamily.back() == ' ' || inlineRule.fontFamily.back() == '\'' ||
-                                                             inlineRule.fontFamily.back() == '"')) {
-                    inlineRule.fontFamily.pop_back();
-                }
-            } else if (property.find("font-weight") != std::string::npos) {
-                const std::string weight = ToLowerAscii(value);
-                inlineRule.fontWeight = weight.find("bold") != std::string::npos || std::atoi(weight.c_str()) >= 600 ? 700 : 400;
-            } else if (property.find("font-style") != std::string::npos) {
-                inlineRule.fontStyle = ToLowerAscii(value).find("italic") != std::string::npos ? 1 : 0;
-            } else if (property.find("color") != std::string::npos && property.find("background") == std::string::npos) {
-                Color parsedColor{0, 0, 0, 255};
-                if (ParseColor(value, parsedColor)) {
-                    inlineRule.hasColor = true;
-                    inlineRule.colorRed = parsedColor.red;
-                    inlineRule.colorGreen = parsedColor.green;
-                    inlineRule.colorBlue = parsedColor.blue;
-                }
-            } else if (property.find("background") != std::string::npos) {
-                Color parsedColor{0, 0, 0, 255};
-                if (ParseColor(value, parsedColor)) {
-                    inlineRule.hasBackground = true;
-                    inlineRule.backgroundRed = parsedColor.red;
-                    inlineRule.backgroundGreen = parsedColor.green;
-                    inlineRule.backgroundBlue = parsedColor.blue;
-                }
-            } else if (property.find("font-size") != std::string::npos) {
-                inlineRule.fontSizePx = std::atoi(value.c_str());
-            }
-        }
+        ApplyStyleText(inlineRule, AttributeValue(node, "style"));
         applyRule(style, inlineRule);
     }
     return style;
@@ -1538,6 +1824,7 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
 
 LayoutResult LayoutDocument(Document& document, int viewportWidth, int viewportHeight) {
     LoadDocumentStyles(document);
+    RunDocumentScripts(document);
     LayoutResult result;
     result.viewportWidth = std::max(MIN_VIEWPORT_PX, std::min(MAX_VIEWPORT_PX, viewportWidth));
     result.viewportHeight = std::max(MIN_VIEWPORT_PX, std::min(MAX_VIEWPORT_PX, viewportHeight));

@@ -161,10 +161,61 @@ int ParseWeight(const std::string& value) {
 
 int ParseSizePx(const std::string& value) {
     const std::string text = ToLowerAscii(Trim(value));
+    if (text == "0") {
+        return 0;
+    }
     if (text.size() > 2 && text.substr(text.size() - 2) == "px") {
-        return std::max(1, std::atoi(text.c_str()));
+        return std::max(0, std::atoi(text.c_str()));
+    }
+    if (!text.empty() && text.find_first_not_of("0123456789") == std::string::npos) {
+        return std::atoi(text.c_str());
     }
     return -1;
+}
+
+void ApplyBoxEdges(ElementStyle& rule, const std::string& value, bool margin) {
+    std::vector<int> edges;
+    std::size_t index = 0;
+    const std::string text = Trim(value);
+    while (index < text.size()) {
+        while (index < text.size() && text[index] == ' ') {
+            ++index;
+        }
+        if (index >= text.size()) {
+            break;
+        }
+        const std::size_t start = index;
+        while (index < text.size() && text[index] != ' ') {
+            ++index;
+        }
+        const int parsed = ParseSizePx(text.substr(start, index - start));
+        if (parsed >= 0) {
+            edges.push_back(parsed);
+        }
+    }
+    if (edges.empty()) {
+        return;
+    }
+    if (edges.size() == 1) {
+        edges.push_back(edges[0]);
+    }
+    if (edges.size() == 2) {
+        edges.push_back(edges[0]);
+    }
+    if (edges.size() == 3) {
+        edges.push_back(edges[1]);
+    }
+    if (margin) {
+        rule.marginTopPx = edges[0];
+        rule.marginRightPx = edges[1];
+        rule.marginBottomPx = edges[2];
+        rule.marginLeftPx = edges[3];
+    } else {
+        rule.paddingTopPx = edges[0];
+        rule.paddingRightPx = edges[1];
+        rule.paddingBottomPx = edges[2];
+        rule.paddingLeftPx = edges[3];
+    }
 }
 
 void ApplyDeclaration(ElementStyle& rule, const std::string& property, const std::string& rawValue) {
@@ -190,6 +241,76 @@ void ApplyDeclaration(ElementStyle& rule, const std::string& property, const std
         rule.hasColor = ParseHexColor(value, rule.colorRed, rule.colorGreen, rule.colorBlue);
     } else if (name == "background-color" || name == "background") {
         rule.hasBackground = ParseHexColor(value, rule.backgroundRed, rule.backgroundGreen, rule.backgroundBlue);
+    } else if (name == "display") {
+        const std::string display = ToLowerAscii(value);
+        if (display == "none") {
+            rule.displayKind = 0;
+        } else if (display == "block") {
+            rule.displayKind = 1;
+        } else if (display == "inline") {
+            rule.displayKind = 2;
+        } else if (display == "inline-block") {
+            rule.displayKind = 3;
+        } else if (display == "list-item") {
+            rule.displayKind = 4;
+        }
+    } else if (name == "width") {
+        rule.widthPx = ParseSizePx(value);
+    } else if (name == "height") {
+        rule.heightPx = ParseSizePx(value);
+    } else if (name == "margin") {
+        ApplyBoxEdges(rule, value, true);
+    } else if (name == "margin-top") {
+        rule.marginTopPx = ParseSizePx(value);
+    } else if (name == "margin-right") {
+        rule.marginRightPx = ParseSizePx(value);
+    } else if (name == "margin-bottom") {
+        rule.marginBottomPx = ParseSizePx(value);
+    } else if (name == "margin-left") {
+        rule.marginLeftPx = ParseSizePx(value);
+    } else if (name == "padding") {
+        ApplyBoxEdges(rule, value, false);
+    } else if (name == "padding-top") {
+        rule.paddingTopPx = ParseSizePx(value);
+    } else if (name == "padding-right") {
+        rule.paddingRightPx = ParseSizePx(value);
+    } else if (name == "padding-bottom") {
+        rule.paddingBottomPx = ParseSizePx(value);
+    } else if (name == "padding-left") {
+        rule.paddingLeftPx = ParseSizePx(value);
+    } else if (name == "text-align") {
+        const std::string align = ToLowerAscii(value);
+        if (align == "left" || align == "start") {
+            rule.textAlign = 0;
+        } else if (align == "center") {
+            rule.textAlign = 1;
+        } else if (align == "right" || align == "end") {
+            rule.textAlign = 2;
+        }
+    } else if (name == "text-decoration" || name == "text-decoration-line") {
+        const std::string decoration = ToLowerAscii(value);
+        if (decoration == "none") {
+            rule.decoration = 0;
+        } else if (decoration.find("underline") != std::string::npos) {
+            rule.decoration = 1;
+        } else if (decoration.find("line-through") != std::string::npos) {
+            rule.decoration = 2;
+        }
+    } else if (name == "white-space") {
+        const std::string space = ToLowerAscii(value);
+        if (space == "normal") {
+            rule.whiteSpace = 0;
+        } else if (space == "nowrap") {
+            rule.whiteSpace = 1;
+        } else if (space == "pre" || space == "pre-wrap") {
+            rule.whiteSpace = 2;
+        }
+    } else if (name == "border" || name == "border-width") {
+        rule.borderPx = ParseSizePx(value);
+        if (rule.borderPx < 0) {
+            const std::size_t space = ToLowerAscii(value).find(' ');
+            rule.borderPx = ParseSizePx(space == std::string::npos ? value : value.substr(0, space));
+        }
     }
 }
 
@@ -429,7 +550,10 @@ void AddRule(Document& document, const std::string& selector, const std::string&
     rule.selector = name;
     ParseDeclarations(body, rule);
     if (!rule.fontFamily.empty() || rule.fontWeight >= 0 || rule.fontStyle >= 0 || rule.fontSizePx > 0 || rule.hasColor ||
-        rule.hasBackground) {
+        rule.hasBackground || rule.displayKind >= 0 || rule.widthPx >= 0 || rule.heightPx >= 0 || rule.marginTopPx >= 0 ||
+        rule.marginRightPx >= 0 || rule.marginBottomPx >= 0 || rule.marginLeftPx >= 0 || rule.paddingTopPx >= 0 ||
+        rule.paddingRightPx >= 0 || rule.paddingBottomPx >= 0 || rule.paddingLeftPx >= 0 || rule.textAlign >= 0 ||
+        rule.decoration >= 0 || rule.whiteSpace >= 0 || rule.borderPx >= 0) {
         document.styleRules.push_back(rule);
     }
 }
@@ -533,7 +657,15 @@ void Walk(Document& document, Node& node, StyleJob& job) {
     }
 }
 
+void ApplyStyleTextInternal(ElementStyle& rule, const std::string& declarations) {
+    ParseDeclarations(declarations, rule);
+}
+
 }  // namespace
+
+void ApplyStyleText(ElementStyle& rule, const std::string& declarations) {
+    ApplyStyleTextInternal(rule, declarations);
+}
 
 void LoadDocumentStyles(Document& document) {
     if (document.stylesLoaded || document.root == nullptr) {
