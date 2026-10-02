@@ -102,7 +102,14 @@ int main(int argc, char** argv) {
         std::cerr << "\n";
         return 1;
     }
-    const std::string generated = RoboWeb::GenerateCpp(document);
+    std::vector<RoboWeb::CompiledWebFont> fonts;
+    std::string styleError;
+    if (!RoboWeb::CompileLinkedStyles(document, fonts, styleError)) {
+        std::cerr << inputPath << ":1:1: error: " << styleError << "\n";
+        std::cerr << "RoboWebCompiler: compilation failed with 1 error\n";
+        return 1;
+    }
+    const std::string generated = RoboWeb::GenerateCpp(document, fonts);
     const std::string generatedPath = outputPath + ".cpp";
     if (!WriteFile(generatedPath, generated)) {
         std::cerr << "RoboWebCompiler: error: cannot write '" << generatedPath << "'\n";

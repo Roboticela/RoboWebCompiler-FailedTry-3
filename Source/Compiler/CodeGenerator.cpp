@@ -189,9 +189,84 @@ void WriteNode(std::ostringstream& output, const Node& node, const std::string& 
     }
 }
 
-std::string GenerateCpp(const Document& document) {
+void WriteFontBytes(std::ostringstream& output, const std::vector<unsigned char>& bytes) {
+    output << "{\n";
+    for (std::size_t index = 0; index < bytes.size(); ++index) {
+        if (index % 16 == 0) {
+            output << "    ";
+        }
+        char buffer[8];
+        std::snprintf(buffer, sizeof(buffer), "0x%02x", bytes[index]);
+        output << buffer;
+        if (index + 1 != bytes.size()) {
+            output << ",";
+        }
+        if (index % 16 == 15 || index + 1 == bytes.size()) {
+            output << "\n";
+        } else {
+            output << " ";
+        }
+    }
+    output << "}";
+}
+
+void WriteCompiledStyles(std::ostringstream& output, const Document& document, const std::vector<CompiledWebFont>& fonts) {
+    for (std::size_t index = 0; index < fonts.size(); ++index) {
+        output << "static const unsigned char kCompiledFont" << index << "[] = ";
+        WriteFontBytes(output, fonts[index].bytes);
+        output << ";\n\n";
+    }
+    output << "void InstallCompiledStyles(RoboWeb::Document& document) {\n";
+    output << "    document.stylesLoaded = true;\n";
+    for (std::size_t index = 0; index < fonts.size(); ++index) {
+        const CompiledWebFont& font = fonts[index];
+        output << "    RoboWeb::RegisterWebFont(\"" << Escape(font.family) << "\", " << font.weight << ", "
+               << (font.italic ? "true" : "false") << ", std::vector<unsigned char>(kCompiledFont" << index
+               << ", kCompiledFont" << index << " + sizeof(kCompiledFont" << index << ")));\n";
+    }
+    for (const ElementStyle& rule : document.styleRules) {
+        output << "    {\n";
+        output << "        RoboWeb::ElementStyle rule;\n";
+        output << "        rule.selector = \"" << Escape(rule.selector) << "\";\n";
+        if (!rule.fontFamily.empty()) {
+            output << "        rule.fontFamily = \"" << Escape(rule.fontFamily) << "\";\n";
+        }
+        if (rule.fontWeight >= 0) {
+            output << "        rule.fontWeight = " << rule.fontWeight << ";\n";
+        }
+        if (rule.fontStyle >= 0) {
+            output << "        rule.fontStyle = " << rule.fontStyle << ";\n";
+        }
+        if (rule.fontSizePx > 0) {
+            output << "        rule.fontSizePx = " << rule.fontSizePx << ";\n";
+        }
+        if (rule.hasColor) {
+            output << "        rule.hasColor = true;\n";
+            output << "        rule.colorRed = " << static_cast<int>(rule.colorRed) << ";\n";
+            output << "        rule.colorGreen = " << static_cast<int>(rule.colorGreen) << ";\n";
+            output << "        rule.colorBlue = " << static_cast<int>(rule.colorBlue) << ";\n";
+        }
+        if (rule.hasBackground) {
+            output << "        rule.hasBackground = true;\n";
+            output << "        rule.backgroundRed = " << static_cast<int>(rule.backgroundRed) << ";\n";
+            output << "        rule.backgroundGreen = " << static_cast<int>(rule.backgroundGreen) << ";\n";
+            output << "        rule.backgroundBlue = " << static_cast<int>(rule.backgroundBlue) << ";\n";
+        }
+        output << "        document.styleRules.push_back(rule);\n";
+        output << "    }\n";
+    }
+    if (!document.status.empty()) {
+        output << "    document.status = \"" << Escape(document.status) << "\";\n";
+    }
+    output << "}\n\n";
+}
+
+std::string GenerateCpp(const Document& document, const std::vector<CompiledWebFont>& fonts) {
     std::ostringstream output;
-    output << "#include \"Runtime/HostLoop.h\"\n\n";
+    output << "#include \"Runtime/HostLoop.h\"\n";
+    output << "#include \"Render/BitmapFont.h\"\n\n";
+    output << "#include <vector>\n\n";
+    WriteCompiledStyles(output, document, fonts);
     output << "namespace {\n\n";
     output << "std::unique_ptr<RoboWeb::Node> MakeElement(int kind, const char* tag, int line, int column) {\n";
     output << "    auto node = std::make_unique<RoboWeb::Node>();\n";
@@ -235,6 +310,7 @@ std::string GenerateCpp(const Document& document) {
     output << "        RoboWeb::InitializeControlState(*document.root);\n";
     output << "    }\n";
     output << "    RoboWeb::CollectDocumentInfo(document);\n";
+    output << "    InstallCompiledStyles(document);\n";
     output << "    return RoboWeb::RunDocument(document, argc, argv);\n}\n";
     return output.str();
 }

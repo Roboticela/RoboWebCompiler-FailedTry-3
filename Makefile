@@ -23,6 +23,7 @@ COMPILER_OBJS := \
 	$(OBJDIR)/CharacterReference.o \
 	$(OBJDIR)/HtmlParser.o \
 	$(OBJDIR)/Document.o \
+	$(OBJDIR)/StyleSheet.o \
 	$(OBJDIR)/CodeGenerator.o \
 	$(OBJDIR)/CompilerMain.o
 
@@ -54,7 +55,7 @@ test: Build/RoboWebTests.exe
 	Build\RoboWebTests.exe
 
 Build/RoboWebCompiler.exe: $(COMPILER_OBJS)
-	$(CXX) $(CXXFLAGS) $(COMPILER_OBJS) -o $@
+	$(CXX) $(CXXFLAGS) $(COMPILER_OBJS) -o $@ -lwininet
 
 Build/RoboWebTests.exe: $(TEST_OBJS)
 	$(CXX) $(CXXFLAGS) $(TEST_OBJS) -o $@ -lgdi32 -luser32 -lcomdlg32 -lwininet

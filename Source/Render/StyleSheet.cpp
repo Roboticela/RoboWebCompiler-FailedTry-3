@@ -1,7 +1,6 @@
 #include "Render/StyleSheet.h"
 
 #include "Core/Utf8.h"
-#include "Render/BitmapFont.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -292,25 +291,133 @@ std::string PreferredFontUrl(const std::string& src) {
     return fallback;
 }
 
-void LoadFontFace(const std::string& body, std::string& note) {
+struct StyleJob {
+    std::vector<CompiledWebFont>* fonts = nullptr;
+    bool downloadRemote = false;
+    std::string note;
+    std::string error;
+    bool failed = false;
+};
+
+bool LooksLikeTrueType(const std::vector<unsigned char>& bytes) {
+    if (bytes.size() < 12) {
+        return false;
+    }
+    if (bytes[0] == 0x00 && bytes[1] == 0x01 && bytes[2] == 0x00 && bytes[3] == 0x00) {
+        return true;
+    }
+    return bytes[0] == 't' && bytes[1] == 'r' && bytes[2] == 'u' && bytes[3] == 'e';
+}
+
+void RememberFamily(StyleJob& job, const std::string& family) {
+    if (job.note.find(family) != std::string::npos) {
+        return;
+    }
+    if (!job.note.empty()) {
+        job.note += ", ";
+    }
+    job.note += family;
+}
+
+int HexValue(char character) {
+    if (character >= '0' && character <= '9') {
+        return character - '0';
+    }
+    if (character >= 'a' && character <= 'f') {
+        return character - 'a' + 10;
+    }
+    if (character >= 'A' && character <= 'F') {
+        return character - 'A' + 10;
+    }
+    return -1;
+}
+
+bool CoversCodePoint(const std::string& range, unsigned long codePoint) {
+    if (Trim(range).empty()) {
+        return true;
+    }
+    const std::string text = ToLowerAscii(range);
+    std::size_t index = 0;
+    while (index < text.size()) {
+        const std::size_t mark = text.find("u+", index);
+        if (mark == std::string::npos) {
+            break;
+        }
+        index = mark + 2;
+        unsigned long start = 0;
+        int digits = 0;
+        while (index < text.size()) {
+            const int value = HexValue(text[index]);
+            if (value < 0) {
+                break;
+            }
+            start = start * 16 + static_cast<unsigned long>(value);
+            ++digits;
+            ++index;
+        }
+        if (digits == 0) {
+            continue;
+        }
+        unsigned long end = start;
+        if (index < text.size() && text[index] == '-') {
+            ++index;
+            end = 0;
+            digits = 0;
+            while (index < text.size()) {
+                const int value = HexValue(text[index]);
+                if (value < 0) {
+                    break;
+                }
+                end = end * 16 + static_cast<unsigned long>(value);
+                ++digits;
+                ++index;
+            }
+            if (digits == 0) {
+                end = start;
+            }
+        }
+        if (codePoint >= start && codePoint <= end) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void LoadFontFace(const std::string& body, StyleJob& job) {
     const std::string family = FirstFamily(DeclarationValue(body, "font-family"));
     const std::string source = DeclarationValue(body, "src");
     const std::string address = PreferredFontUrl(source);
     if (family.empty() || address.empty() || address.find("://") == std::string::npos) {
         return;
     }
+    if (!CoversCodePoint(DeclarationValue(body, "unicode-range"), 0x41)) {
+        return;
+    }
+    if (!job.downloadRemote || job.fonts == nullptr) {
+        return;
+    }
     const int weight = ParseWeight(DeclarationValue(body, "font-weight"));
     const std::string style = ToLowerAscii(DeclarationValue(body, "font-style"));
     const bool italic = style == "italic" || style == "oblique";
-    const std::vector<unsigned char> bytes = Download(address);
-    if (RegisterWebFont(family, weight > 0 ? weight : 400, italic, bytes)) {
-        if (note.find(family) == std::string::npos) {
-            if (!note.empty()) {
-                note += ", ";
-            }
-            note += family;
+    const int storedWeight = weight > 0 ? weight : 400;
+    for (const CompiledWebFont& existing : *job.fonts) {
+        if (existing.family == family && existing.weight == storedWeight && existing.italic == italic) {
+            return;
         }
     }
+    const std::vector<unsigned char> bytes = Download(address);
+    if (!LooksLikeTrueType(bytes)) {
+        job.failed = true;
+        job.error = "font file is not a TrueType font: " + address;
+        return;
+    }
+    CompiledWebFont font;
+    font.family = family;
+    font.weight = storedWeight;
+    font.italic = italic;
+    font.bytes = bytes;
+    job.fonts->push_back(std::move(font));
+    RememberFamily(job, family);
 }
 
 void AddRule(Document& document, const std::string& selector, const std::string& body) {
@@ -327,7 +434,7 @@ void AddRule(Document& document, const std::string& selector, const std::string&
     }
 }
 
-void ParseStylesheet(Document& document, const std::string& css, std::string& note) {
+void ParseStylesheet(Document& document, const std::string& css, StyleJob& job) {
     const std::string text = StripComments(css);
     std::size_t index = 0;
     while (index < text.size()) {
@@ -343,7 +450,7 @@ void ParseStylesheet(Document& document, const std::string& css, std::string& no
             if (open == std::string::npos || close == std::string::npos) {
                 break;
             }
-            LoadFontFace(text.substr(open + 1, close - open - 1), note);
+            LoadFontFace(text.substr(open + 1, close - open - 1), job);
             index = close + 1;
             continue;
         }
@@ -399,23 +506,30 @@ bool RelHas(const std::string& rel, const char* token) {
     return false;
 }
 
-void Walk(Document& document, Node& node, std::string& note, bool& failed) {
+void Walk(Document& document, Node& node, StyleJob& job) {
     if (node.kind == ElementKind::Link) {
         const std::string rel = AttributeValue(node, "rel");
         const std::string href = AttributeValue(node, "href");
-        if (RelHas(rel, "stylesheet") && href.find("://") != std::string::npos) {
+        if (job.downloadRemote && RelHas(rel, "stylesheet") && href.find("://") != std::string::npos) {
             const std::vector<unsigned char> bytes = Download(href);
             if (bytes.empty()) {
-                failed = true;
+                job.failed = true;
+                job.error = "stylesheet was not loaded: " + href;
             } else {
-                ParseStylesheet(document, std::string(bytes.begin(), bytes.end()), note);
+                ParseStylesheet(document, std::string(bytes.begin(), bytes.end()), job);
             }
         }
     } else if (node.kind == ElementKind::Style) {
-        ParseStylesheet(document, GatherText(node), note);
+        ParseStylesheet(document, GatherText(node), job);
+    }
+    if (job.failed) {
+        return;
     }
     for (const std::unique_ptr<Node>& child : node.children) {
-        Walk(document, *child, note, failed);
+        Walk(document, *child, job);
+        if (job.failed) {
+            return;
+        }
     }
 }
 
@@ -427,16 +541,29 @@ void LoadDocumentStyles(Document& document) {
         return;
     }
     document.stylesLoaded = true;
-    std::string note;
-    bool failed = false;
-    Walk(document, *document.root, note, failed);
-    if (document.status.empty()) {
-        if (!note.empty()) {
-            document.status = "font " + note;
-        } else if (failed) {
-            document.status = "stylesheet was not loaded";
-        }
+    StyleJob job;
+    Walk(document, *document.root, job);
+}
+
+bool CompileLinkedStyles(Document& document, std::vector<CompiledWebFont>& fonts, std::string& error) {
+    fonts.clear();
+    if (document.root == nullptr) {
+        document.stylesLoaded = true;
+        return true;
     }
+    StyleJob job;
+    job.fonts = &fonts;
+    job.downloadRemote = true;
+    Walk(document, *document.root, job);
+    document.stylesLoaded = true;
+    if (job.failed) {
+        error = job.error.empty() ? "stylesheet was not loaded" : job.error;
+        return false;
+    }
+    if (!job.note.empty() && document.status.empty()) {
+        document.status = "font " + job.note;
+    }
+    return true;
 }
 
 }
