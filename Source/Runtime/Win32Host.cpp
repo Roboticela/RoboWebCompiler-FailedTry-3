@@ -78,6 +78,19 @@ bool TreeHasMarquee(const Node& node) {
     return false;
 }
 
+bool TreeHasSvgAnimation(const Node& node) {
+    const std::string tag = ToLowerAscii(node.tagName);
+    if (tag == "animate" || tag == "set" || tag == "animatetransform" || tag == "animatemotion") {
+        return true;
+    }
+    for (const std::unique_ptr<Node>& child : node.children) {
+        if (TreeHasSvgAnimation(*child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool IsFileInput(const Node* node) {
     return node != nullptr && node->kind == ElementKind::Input && ToLowerAscii(AttributeValue(*node, "type")) == "file";
 }
@@ -168,9 +181,10 @@ void Refresh(App& app) {
     SetScrollInfo(app.window, SB_VERT, &info, TRUE);
     SetWindowTextW(app.window, Caption(app).c_str());
     const bool marquee = app.document->root != nullptr && TreeHasMarquee(*app.document->root);
-    if (marquee != app.hasMarquee) {
-        app.hasMarquee = marquee;
-        if (marquee) {
+    const bool animated = app.document->root != nullptr && TreeHasSvgAnimation(*app.document->root);
+    if (marquee != app.hasMarquee || animated) {
+        app.hasMarquee = marquee || animated;
+        if (marquee || animated) {
             SetTimer(app.window, 2, 33, nullptr);
         } else {
             KillTimer(app.window, 2);
@@ -447,6 +461,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             }
         } else if (app != nullptr && wParam == 2) {
             TickMarquee(*app->document);
+            SetSvgAnimationTime(SvgAnimationTime() + 0.033);
             Refresh(*app);
         }
         return 0;

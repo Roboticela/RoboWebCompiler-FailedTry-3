@@ -121,6 +121,8 @@ int EmToPx(int fontSizePx, int milli);
 ResolvedStyle DefaultStyle();
 ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const Document& document);
 LayoutResult LayoutDocument(Document& document, int viewportWidth, int viewportHeight);
+void SetSvgAnimationTime(double seconds);
+double SvgAnimationTime();
 const ElementBox* FindBox(const LayoutResult& layout, const std::string& tag);
 
 }
