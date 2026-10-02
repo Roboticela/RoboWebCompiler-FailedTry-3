@@ -447,8 +447,11 @@ void Activate(Document& document, Node& node) {
         }
         return;
     }
-    if (node.kind == ElementKind::A) {
-        const std::string href = AttributeValue(node, "href");
+    if (node.kind == ElementKind::A || ToLowerAscii(node.tagName) == "a") {
+        std::string href = AttributeValue(node, "href");
+        if (href.empty()) {
+            href = AttributeValue(node, "xlink:href");
+        }
         if (!href.empty()) {
             node.visited = true;
         }
@@ -678,7 +681,7 @@ bool DispatchClick(Document& document, const LayoutResult& layout, int x, int y)
         return false;
     }
     Node* target = hit;
-    while (target != nullptr && target->kind != ElementKind::A && target->kind != ElementKind::Button &&
+    while (target != nullptr && target->kind != ElementKind::A && ToLowerAscii(target->tagName) != "a" && target->kind != ElementKind::Button &&
            target->kind != ElementKind::Summary && target->kind != ElementKind::Label &&
            target->kind != ElementKind::Option && target->kind != ElementKind::Select &&
            target->kind != ElementKind::Input && target->kind != ElementKind::Textarea &&
@@ -728,7 +731,8 @@ PointerShape PointerAt(const LayoutResult& layout, int x, int y, int scrollY) {
         if (IsTextField(*node)) {
             return PointerShape::Text;
         }
-        if (node->kind == ElementKind::A && !AttributeValue(*node, "href").empty()) {
+        if ((node->kind == ElementKind::A || ToLowerAscii(node->tagName) == "a") &&
+            (!AttributeValue(*node, "href").empty() || !AttributeValue(*node, "xlink:href").empty())) {
             return PointerShape::Hand;
         }
     }

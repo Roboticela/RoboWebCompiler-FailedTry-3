@@ -25,9 +25,17 @@ void Blend(Framebuffer& framebuffer, int x, int y, Color color) {
         return;
     }
     const std::size_t offset = static_cast<std::size_t>((y * framebuffer.width + x) * 4);
-    framebuffer.pixels[offset] = color.red;
-    framebuffer.pixels[offset + 1] = color.green;
-    framebuffer.pixels[offset + 2] = color.blue;
+    if (color.alpha == 255) {
+        framebuffer.pixels[offset] = color.red;
+        framebuffer.pixels[offset + 1] = color.green;
+        framebuffer.pixels[offset + 2] = color.blue;
+        framebuffer.pixels[offset + 3] = 255;
+        return;
+    }
+    const int inverse = 255 - color.alpha;
+    framebuffer.pixels[offset] = static_cast<std::uint8_t>((color.red * color.alpha + framebuffer.pixels[offset] * inverse) / 255);
+    framebuffer.pixels[offset + 1] = static_cast<std::uint8_t>((color.green * color.alpha + framebuffer.pixels[offset + 1] * inverse) / 255);
+    framebuffer.pixels[offset + 2] = static_cast<std::uint8_t>((color.blue * color.alpha + framebuffer.pixels[offset + 2] * inverse) / 255);
     framebuffer.pixels[offset + 3] = 255;
 }
 

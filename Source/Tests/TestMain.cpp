@@ -511,6 +511,102 @@ void TestHtmlBehavior() {
     if (hiddenBox != nullptr) {
         EXPECT(RoboWeb::PixelGreen(hiddenFrame, hiddenBox->x + 4, hiddenBox->y + 4) == 255);
     }
+    RoboWeb::Document linked = Parse(
+        "<!DOCTYPE html><svg width='40' height='20'><a href='page.html'><rect width='20' height='20' fill='red'/></a></svg>", diagnostics);
+    RoboWeb::LayoutResult linkedLayout = RoboWeb::LayoutDocument(linked, 160, 80);
+    const RoboWeb::ElementBox* linkedBox = RoboWeb::FindBox(linkedLayout, "svg");
+    EXPECT(linkedBox != nullptr);
+    if (linkedBox != nullptr) {
+        EXPECT(RoboWeb::DispatchClick(linked, linkedLayout, linkedBox->x + 4, linkedBox->y + 4));
+        EXPECT(linked.status.find("open page.html") != std::string::npos);
+    }
+    RoboWeb::Document foreign = Parse(
+        "<!DOCTYPE html><svg width='60' height='30'><foreignObject x='0' y='0' width='60' height='30'><div style='background:red'>Hi</div></foreignObject></svg>",
+        diagnostics);
+    RoboWeb::LayoutResult foreignLayout = RoboWeb::LayoutDocument(foreign, 160, 80);
+    RoboWeb::Framebuffer foreignFrame = RoboWeb::RenderDocument(foreignLayout, 0);
+    const RoboWeb::ElementBox* foreignBox = RoboWeb::FindBox(foreignLayout, "svg");
+    EXPECT(foreignBox != nullptr);
+    if (foreignBox != nullptr) {
+        EXPECT(RoboWeb::PixelGreen(foreignFrame, foreignBox->x + 4, foreignBox->y + 4) == 0);
+    }
+    RoboWeb::Document chosen = Parse(
+        "<!DOCTYPE html><svg width='20' height='20'><switch><rect width='20' height='20' fill='blue' systemLanguage='de'/><rect width='20' height='20' fill='red'/></switch></svg>",
+        diagnostics);
+    RoboWeb::LayoutResult chosenLayout = RoboWeb::LayoutDocument(chosen, 120, 80);
+    RoboWeb::Framebuffer chosenFrame = RoboWeb::RenderDocument(chosenLayout, 0);
+    const RoboWeb::ElementBox* chosenBox = RoboWeb::FindBox(chosenLayout, "svg");
+    EXPECT(chosenBox != nullptr);
+    if (chosenBox != nullptr) {
+        EXPECT(RoboWeb::PixelRed(chosenFrame, chosenBox->x + 4, chosenBox->y + 4) == 255);
+        EXPECT(RoboWeb::PixelBlue(chosenFrame, chosenBox->x + 4, chosenBox->y + 4) == 0);
+    }
+    RoboWeb::Document faded = Parse(
+        "<!DOCTYPE html><svg width='20' height='20'><rect width='20' height='20' fill='red' opacity='0.5'/></svg>", diagnostics);
+    RoboWeb::LayoutResult fadedLayout = RoboWeb::LayoutDocument(faded, 120, 80);
+    RoboWeb::Framebuffer fadedFrame = RoboWeb::RenderDocument(fadedLayout, 0);
+    const RoboWeb::ElementBox* fadedBox = RoboWeb::FindBox(fadedLayout, "svg");
+    EXPECT(fadedBox != nullptr);
+    if (fadedBox != nullptr) {
+        const int fadedGreen = RoboWeb::PixelGreen(fadedFrame, fadedBox->x + 4, fadedBox->y + 4);
+        EXPECT(fadedGreen > 80 && fadedGreen < 200);
+    }
+    RoboWeb::Document invisible = Parse(
+        "<!DOCTYPE html><svg width='20' height='20'><rect width='20' height='20' fill='red' visibility='hidden'/></svg>", diagnostics);
+    RoboWeb::LayoutResult invisibleLayout = RoboWeb::LayoutDocument(invisible, 120, 80);
+    RoboWeb::Framebuffer invisibleFrame = RoboWeb::RenderDocument(invisibleLayout, 0);
+    const RoboWeb::ElementBox* invisibleBox = RoboWeb::FindBox(invisibleLayout, "svg");
+    EXPECT(invisibleBox != nullptr);
+    if (invisibleBox != nullptr) {
+        EXPECT(RoboWeb::PixelGreen(invisibleFrame, invisibleBox->x + 4, invisibleBox->y + 4) == 255);
+    }
+    RoboWeb::Document stroked = Parse(
+        "<!DOCTYPE html><svg width='30' height='20'><g stroke='red' fill='none'><line x1='0' y1='8' x2='30' y2='8' stroke-width='4'/></g></svg>",
+        diagnostics);
+    RoboWeb::LayoutResult strokedLayout = RoboWeb::LayoutDocument(stroked, 120, 80);
+    RoboWeb::Framebuffer strokedFrame = RoboWeb::RenderDocument(strokedLayout, 0);
+    const RoboWeb::ElementBox* strokedBox = RoboWeb::FindBox(strokedLayout, "svg");
+    EXPECT(strokedBox != nullptr);
+    if (strokedBox != nullptr) {
+        EXPECT(RoboWeb::PixelGreen(strokedFrame, strokedBox->x + 8, strokedBox->y + 8) == 0);
+    }
+    RoboWeb::Document anchored = Parse(
+        "<!DOCTYPE html><svg width='80' height='30'><text x='40' y='20' text-anchor='middle' fill='red'>MMMM</text></svg>", diagnostics);
+    RoboWeb::LayoutResult anchoredLayout = RoboWeb::LayoutDocument(anchored, 160, 80);
+    const RoboWeb::ElementBox* anchoredBox = RoboWeb::FindBox(anchoredLayout, "svg");
+    EXPECT(anchoredBox != nullptr);
+    if (anchoredBox != nullptr) {
+        bool shifted = false;
+        for (const RoboWeb::DrawOp& op : anchoredLayout.ops) {
+            if (op.kind == RoboWeb::DrawOp::Kind::Text && op.text.find("MMMM") != std::string::npos && op.x < anchoredBox->x + 40) {
+                shifted = true;
+            }
+        }
+        EXPECT(shifted);
+    }
+    const char* star = "50,0 21,90 98,35 2,35 79,90";
+    RoboWeb::Document holed = Parse(
+        std::string("<!DOCTYPE html><svg width='100' height='100'><polygon fill='red' fill-rule='evenodd' points='") + star +
+            "'/></svg>",
+        diagnostics);
+    RoboWeb::LayoutResult holedLayout = RoboWeb::LayoutDocument(holed, 140, 140);
+    RoboWeb::Framebuffer holedFrame = RoboWeb::RenderDocument(holedLayout, 0);
+    const RoboWeb::ElementBox* holedBox = RoboWeb::FindBox(holedLayout, "svg");
+    EXPECT(holedBox != nullptr);
+    if (holedBox != nullptr) {
+        EXPECT(RoboWeb::PixelGreen(holedFrame, holedBox->x + 50, holedBox->y + 45) == 255);
+    }
+    RoboWeb::Document solid = Parse(
+        std::string("<!DOCTYPE html><svg width='100' height='100'><polygon fill='red' fill-rule='nonzero' points='") + star +
+            "'/></svg>",
+        diagnostics);
+    RoboWeb::LayoutResult solidLayout = RoboWeb::LayoutDocument(solid, 140, 140);
+    RoboWeb::Framebuffer solidFrame = RoboWeb::RenderDocument(solidLayout, 0);
+    const RoboWeb::ElementBox* solidBox = RoboWeb::FindBox(solidLayout, "svg");
+    EXPECT(solidBox != nullptr);
+    if (solidBox != nullptr) {
+        EXPECT(RoboWeb::PixelGreen(solidFrame, solidBox->x + 50, solidBox->y + 45) == 0);
+    }
     RoboWeb::Document moving = Parse("<!DOCTYPE html><marquee>Move</marquee>", diagnostics);
     EXPECT(RoboWeb::FindBox(RoboWeb::LayoutDocument(moving, 200, 80), "marquee") != nullptr);
     RoboWeb::Document frames = Parse("<!DOCTYPE html><frameset cols='50%,50%'><frame src='a'><frame src='b'></frameset>", diagnostics);

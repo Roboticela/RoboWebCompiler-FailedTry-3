@@ -842,7 +842,7 @@ struct Engine {
         double y = 0;
     };
 
-    void FillPolygon(const std::vector<SvgPoint>& points, int originX, int originY, Color color, bool fixed) {
+    void FillPolygon(const std::vector<SvgPoint>& points, int originX, int originY, Color color, bool fixed, bool evenOdd = true) {
         if (points.size() < 3 || color.alpha == 0) {
             return;
         }
@@ -865,12 +865,40 @@ struct Engine {
                 crossings.push_back(static_cast<int>(start.x + distance * (end.x - start.x)));
             }
             std::sort(crossings.begin(), crossings.end());
-            for (std::size_t index = 0; index + 1 < crossings.size(); index += 2) {
-                const int left = crossings[index];
-                const int right = crossings[index + 1];
-                if (right > left) {
-                    Fill(originX + left, originY + row, right - left, 1, color, fixed);
+            if (evenOdd) {
+                for (std::size_t index = 0; index + 1 < crossings.size(); index += 2) {
+                    const int left = crossings[index];
+                    const int right = crossings[index + 1];
+                    if (right > left) {
+                        Fill(originX + left, originY + row, right - left, 1, color, fixed);
+                    }
                 }
+                continue;
+            }
+            struct Hit {
+                int x = 0;
+                int wind = 0;
+            };
+            std::vector<Hit> hits;
+            for (std::size_t index = 0; index < points.size(); ++index) {
+                const SvgPoint& start = points[index];
+                const SvgPoint& end = points[(index + 1) % points.size()];
+                const bool crosses = (start.y <= row && end.y > row) || (end.y <= row && start.y > row);
+                if (!crosses || start.y == end.y) {
+                    continue;
+                }
+                const double distance = (static_cast<double>(row) + 0.5 - start.y) / (end.y - start.y);
+                hits.push_back(Hit{static_cast<int>(start.x + distance * (end.x - start.x)), end.y > start.y ? 1 : -1});
+            }
+            std::sort(hits.begin(), hits.end(), [](const Hit& left, const Hit& right) { return left.x < right.x; });
+            int wind = 0;
+            int cursor = hits.empty() ? 0 : hits.front().x;
+            for (const Hit& hit : hits) {
+                if (wind != 0 && hit.x > cursor) {
+                    Fill(originX + cursor, originY + row, hit.x - cursor, 1, color, fixed);
+                }
+                wind += hit.wind;
+                cursor = hit.x;
             }
         }
     }
@@ -940,7 +968,7 @@ struct Engine {
     }
 
     void PaintPath(const std::string& data, int originX, int originY, Color fill, Color stroke, bool fixed, int thickness = 1,
-        double scaleX = 1, double scaleY = 1, double minX = 0, double minY = 0) {
+        double scaleX = 1, double scaleY = 1, double minX = 0, double minY = 0, bool evenOdd = false) {
         std::vector<SvgPoint> figure;
         double currentX = 0;
         double currentY = 0;
@@ -954,7 +982,7 @@ struct Engine {
                 mapped.push_back(SvgPoint{(point.x - minX) * scaleX, (point.y - minY) * scaleY});
             }
             if (fill.alpha != 0) {
-                FillPolygon(mapped, originX, originY, fill, fixed);
+                FillPolygon(mapped, originX, originY, fill, fixed, evenOdd);
             }
             if (stroke.alpha != 0) {
                 StrokePolyline(mapped, originX, originY, stroke, fixed, close, thickness);
@@ -1080,7 +1108,125 @@ struct Engine {
         double pixelWidth = 0;
         double pixelHeight = 0;
         double strokeWidth = 1;
+        double opacity = 1;
+        Color fill{0, 0, 0, 255};
+        Color stroke{0, 0, 0, 0};
+        bool hidden = false;
+        bool fillEvenOdd = false;
+        std::string textAnchor = "start";
     };
+
+    Color WithOpacity(Color color, double opacity) {
+        color.alpha = static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, static_cast<double>(color.alpha) * opacity)));
+        return color;
+    }
+
+    void ReadSvgPaint(const Node& node, SvgSpace& space) {
+        const std::string visibility = ToLowerAscii(AttributeValue(node, "visibility"));
+        if (visibility == "hidden" || visibility == "collapse") {
+            space.hidden = true;
+        } else if (visibility == "visible") {
+            space.hidden = false;
+        }
+        if (!AttributeValue(node, "opacity").empty()) {
+            space.opacity *= std::atof(AttributeValue(node, "opacity").c_str());
+        }
+        const std::string fillText = ToLowerAscii(AttributeValue(node, "fill"));
+        if (fillText == "none") {
+            space.fill.alpha = 0;
+        } else if (!fillText.empty() && fillText.find("url(") == std::string::npos) {
+            ParseColor(fillText, space.fill);
+        }
+        const std::string strokeText = ToLowerAscii(AttributeValue(node, "stroke"));
+        if (strokeText == "none") {
+            space.stroke.alpha = 0;
+        } else if (!strokeText.empty() && strokeText.find("url(") == std::string::npos) {
+            ParseColor(strokeText, space.stroke);
+        }
+        if (!AttributeValue(node, "stroke-width").empty()) {
+            space.strokeWidth = std::atof(AttributeValue(node, "stroke-width").c_str());
+        }
+        const std::string rule = ToLowerAscii(AttributeValue(node, "fill-rule"));
+        if (rule == "evenodd") {
+            space.fillEvenOdd = true;
+        } else if (rule == "nonzero") {
+            space.fillEvenOdd = false;
+        }
+        const std::string anchor = ToLowerAscii(AttributeValue(node, "text-anchor"));
+        if (anchor == "start" || anchor == "middle" || anchor == "end") {
+            space.textAnchor = anchor;
+        }
+    }
+
+    bool SvgSwitchMatches(const Node& child) {
+        if (HasAttribute(child, "requiredextensions")) {
+            return false;
+        }
+        const std::string languages = ToLowerAscii(AttributeValue(child, "systemlanguage"));
+        if (languages.empty()) {
+            return true;
+        }
+        const std::string user = "en";
+        std::size_t start = 0;
+        while (start < languages.size()) {
+            const std::size_t comma = languages.find(',', start);
+            std::string tag = languages.substr(start, comma == std::string::npos ? std::string::npos : comma - start);
+            while (!tag.empty() && tag.front() == ' ') {
+                tag.erase(tag.begin());
+            }
+            while (!tag.empty() && tag.back() == ' ') {
+                tag.pop_back();
+            }
+            if (tag == user || (tag.size() > user.size() && tag.compare(0, user.size(), user) == 0 && tag[user.size()] == '-')) {
+                return true;
+            }
+            if (comma == std::string::npos) {
+                break;
+            }
+            start = comma + 1;
+        }
+        return false;
+    }
+
+    Node* SvgLink(Node& node) {
+        for (Node* cursor = &node; cursor != nullptr; cursor = cursor->parent) {
+            if (ToLowerAscii(cursor->tagName) == "a" &&
+                (!AttributeValue(*cursor, "href").empty() || !AttributeValue(*cursor, "xlink:href").empty())) {
+                return cursor;
+            }
+            if (cursor->kind == ElementKind::Svg) {
+                break;
+            }
+        }
+        return nullptr;
+    }
+
+    void RememberSvgLink(Node& node, int x, int y, int width, int height, bool fixed) {
+        Node* link = SvgLink(node);
+        if (link == nullptr || width <= 0 || height <= 0) {
+            return;
+        }
+        ResolvedStyle style;
+        AddBox(*link, x, y, width, height, style, fixed);
+    }
+
+    void StrokeEllipse(int centerX, int centerY, int radiusX, int radiusY, int thickness, Color color, bool fixed) {
+        if (color.alpha == 0 || radiusX < 1 || radiusY < 1) {
+            return;
+        }
+        const int steps = std::max(16, radiusX + radiusY);
+        const double pi = std::acos(-1.0);
+        int previousX = centerX + radiusX;
+        int previousY = centerY;
+        for (int step = 1; step <= steps; ++step) {
+            const double angle = 2.0 * pi * static_cast<double>(step) / static_cast<double>(steps);
+            const int x = centerX + static_cast<int>(std::cos(angle) * radiusX);
+            const int y = centerY + static_cast<int>(std::sin(angle) * radiusY);
+            StrokeLine(previousX, previousY, x, y, color, fixed, thickness);
+            previousX = x;
+            previousY = y;
+        }
+    }
 
     void ApplySvgTransform(const std::string& text, SvgSpace& space) {
         const std::size_t translate = text.find("translate");
@@ -1180,56 +1326,69 @@ struct Engine {
         if (tag == "svg" || node.kind == ElementKind::Svg) {
             ApplyViewBox(node, space);
         }
-        Color fill{0, 0, 0, 255};
-        const std::string fillText = AttributeValue(node, "fill");
-        if (ToLowerAscii(fillText) == "none") {
-            fill.alpha = 0;
-        } else if (!fillText.empty()) {
-            ParseColor(fillText, fill);
-        }
-        if (!AttributeValue(node, "stroke-width").empty()) {
-            space.strokeWidth = std::atof(AttributeValue(node, "stroke-width").c_str());
-        }
+        ReadSvgPaint(node, space);
+        const Color fill = WithOpacity(space.fill, space.opacity);
+        const Color stroke = WithOpacity(space.stroke, space.opacity);
         const int thickness = std::max(1, static_cast<int>(space.strokeWidth * std::max(space.scaleX, space.scaleY) + 0.5));
-        if (tag == "rect") {
-            Fill(SvgX(space, SvgNumber(node, "x", 0)), SvgY(space, SvgNumber(node, "y", 0)), SvgLength(space, SvgNumber(node, "width", 0), true),
-                SvgLength(space, SvgNumber(node, "height", 0), false), fill, fixed);
-        } else if (tag == "circle") {
-            FillEllipse(SvgX(space, SvgNumber(node, "cx", 0)), SvgY(space, SvgNumber(node, "cy", 0)),
-                SvgLength(space, SvgNumber(node, "r", 0), true), SvgLength(space, SvgNumber(node, "r", 0), false), fill, fixed);
-        } else if (tag == "ellipse") {
-            FillEllipse(SvgX(space, SvgNumber(node, "cx", 0)), SvgY(space, SvgNumber(node, "cy", 0)),
-                SvgLength(space, SvgNumber(node, "rx", 0), true), SvgLength(space, SvgNumber(node, "ry", 0), false), fill, fixed);
-        } else if (tag == "line") {
-            Color stroke = fill;
-            const std::string strokeText = AttributeValue(node, "stroke");
-            if (!strokeText.empty()) {
-                ParseColor(strokeText, stroke);
+        if (!space.hidden && tag == "rect") {
+            const int x = SvgX(space, SvgNumber(node, "x", 0));
+            const int y = SvgY(space, SvgNumber(node, "y", 0));
+            const int width = SvgLength(space, SvgNumber(node, "width", 0), true);
+            const int height = SvgLength(space, SvgNumber(node, "height", 0), false);
+            Fill(x, y, width, height, fill, fixed);
+            if (stroke.alpha != 0 && width > 0 && height > 0) {
+                StrokeLine(x, y, x + width, y, stroke, fixed, thickness);
+                StrokeLine(x + width, y, x + width, y + height, stroke, fixed, thickness);
+                StrokeLine(x + width, y + height, x, y + height, stroke, fixed, thickness);
+                StrokeLine(x, y + height, x, y, stroke, fixed, thickness);
             }
-            StrokeLine(SvgX(space, SvgNumber(node, "x1", 0)), SvgY(space, SvgNumber(node, "y1", 0)), SvgX(space, SvgNumber(node, "x2", 0)),
-                SvgY(space, SvgNumber(node, "y2", 0)), stroke, fixed, thickness);
-        } else if (tag == "polygon" || tag == "polyline") {
+            RememberSvgLink(node, x, y, width, height, fixed);
+        } else if (!space.hidden && tag == "circle") {
+            const int cx = SvgX(space, SvgNumber(node, "cx", 0));
+            const int cy = SvgY(space, SvgNumber(node, "cy", 0));
+            const int radiusX = SvgLength(space, SvgNumber(node, "r", 0), true);
+            const int radiusY = SvgLength(space, SvgNumber(node, "r", 0), false);
+            FillEllipse(cx, cy, radiusX, radiusY, fill, fixed);
+            StrokeEllipse(cx, cy, radiusX, radiusY, thickness, stroke, fixed);
+            RememberSvgLink(node, cx - radiusX, cy - radiusY, radiusX * 2, radiusY * 2, fixed);
+        } else if (!space.hidden && tag == "ellipse") {
+            const int cx = SvgX(space, SvgNumber(node, "cx", 0));
+            const int cy = SvgY(space, SvgNumber(node, "cy", 0));
+            const int radiusX = SvgLength(space, SvgNumber(node, "rx", 0), true);
+            const int radiusY = SvgLength(space, SvgNumber(node, "ry", 0), false);
+            FillEllipse(cx, cy, radiusX, radiusY, fill, fixed);
+            StrokeEllipse(cx, cy, radiusX, radiusY, thickness, stroke, fixed);
+            RememberSvgLink(node, cx - radiusX, cy - radiusY, radiusX * 2, radiusY * 2, fixed);
+        } else if (!space.hidden && tag == "line") {
+            const int x1 = SvgX(space, SvgNumber(node, "x1", 0));
+            const int y1 = SvgY(space, SvgNumber(node, "y1", 0));
+            const int x2 = SvgX(space, SvgNumber(node, "x2", 0));
+            const int y2 = SvgY(space, SvgNumber(node, "y2", 0));
+            StrokeLine(x1, y1, x2, y2, stroke, fixed, thickness);
+            RememberSvgLink(node, std::min(x1, x2), std::min(y1, y2), std::abs(x2 - x1) + thickness, std::abs(y2 - y1) + thickness, fixed);
+        } else if (!space.hidden && (tag == "polygon" || tag == "polyline")) {
             const std::vector<SvgPoint> points = MapSvgPoints(ParsePointList(AttributeValue(node, "points")), space);
-            Color stroke{0, 0, 0, 0};
-            const std::string strokeText = AttributeValue(node, "stroke");
-            if (!strokeText.empty()) {
-                ParseColor(strokeText, stroke);
-            } else if (tag == "polyline") {
-                stroke = Color{0, 0, 0, 255};
-            }
             if (tag == "polygon") {
-                FillPolygon(points, 0, 0, fill, fixed);
+                FillPolygon(points, 0, 0, fill, fixed, space.fillEvenOdd);
             }
             StrokePolyline(points, 0, 0, stroke, fixed, tag == "polygon", thickness);
-        } else if (tag == "path") {
-            Color stroke{0, 0, 0, 0};
-            const std::string strokeText = AttributeValue(node, "stroke");
-            if (!strokeText.empty()) {
-                ParseColor(strokeText, stroke);
+            if (!points.empty()) {
+                int minX = 1000000;
+                int minY = 1000000;
+                int maxX = -1000000;
+                int maxY = -1000000;
+                for (const SvgPoint& point : points) {
+                    minX = std::min(minX, static_cast<int>(point.x));
+                    minY = std::min(minY, static_cast<int>(point.y));
+                    maxX = std::max(maxX, static_cast<int>(point.x));
+                    maxY = std::max(maxY, static_cast<int>(point.y));
+                }
+                RememberSvgLink(node, minX, minY, maxX - minX, maxY - minY, fixed);
             }
+        } else if (!space.hidden && tag == "path") {
             PaintPath(AttributeValue(node, "d"), static_cast<int>(space.originX), static_cast<int>(space.originY), fill, stroke, fixed, thickness,
-                space.scaleX, space.scaleY, space.minX, space.minY);
-        } else if (tag == "image") {
+                space.scaleX, space.scaleY, space.minX, space.minY, space.fillEvenOdd);
+        } else if (!space.hidden && tag == "image") {
             std::string href = AttributeValue(node, "href");
             if (href.empty()) {
                 href = AttributeValue(node, "xlink:href");
@@ -1244,6 +1403,22 @@ struct Engine {
             op.imagePath = path.find("://") == std::string::npos ? path : href;
             op.fixed = fixed;
             result->ops.push_back(op);
+            RememberSvgLink(node, op.x, op.y, op.width, op.height, fixed);
+        } else if (!space.hidden && tag == "foreignobject") {
+            const int x = SvgX(space, SvgNumber(node, "x", 0));
+            const int y = SvgY(space, SvgNumber(node, "y", 0));
+            const int width = std::max(1, SvgLength(space, SvgNumber(node, "width", 0), true));
+            const int height = std::max(1, SvgLength(space, SvgNumber(node, "height", 0), false));
+            ResolvedStyle host;
+            AddBox(node, x, y, width, height, host, fixed);
+            for (const std::unique_ptr<Node>& child : node.children) {
+                if (child->type != Node::Type::Element) {
+                    continue;
+                }
+                const ResolvedStyle childStyle = ResolveStyle(*child, host, *document);
+                LayoutBlock(*child, childStyle, x, y, width, fixed, true);
+            }
+            RememberSvgLink(node, x, y, width, height, fixed);
         } else if (tag == "use") {
             std::string href = AttributeValue(node, "href");
             if (href.empty()) {
@@ -1262,15 +1437,31 @@ struct Engine {
                     PaintSvgTree(*target, used, fixed, true);
                 }
             }
-        } else if (tag == "text" || tag == "tspan") {
+        } else if (!space.hidden && (tag == "text" || tag == "tspan")) {
             ResolvedStyle textStyle;
             textStyle.color = fill;
             const int fontSize = std::max(1, SvgNumber(node, "font-size", DEFAULT_FONT_SIZE_PX));
             textStyle.fontSizePx = std::max(1, SvgLength(space, fontSize, false));
-            Text(SvgX(space, SvgNumber(node, "x", 0)), SvgY(space, SvgNumber(node, "y", 0)) - textStyle.fontSizePx, GatherText(node), textStyle,
-                fixed);
+            const std::string content = GatherText(node);
+            int textX = SvgX(space, SvgNumber(node, "x", 0));
+            const int textWidth = MeasureTextPx(content, textStyle.fontSizePx, textStyle.bold, textStyle.italic, textStyle.fontFamily);
+            if (space.textAnchor == "middle") {
+                textX -= textWidth / 2;
+            } else if (space.textAnchor == "end") {
+                textX -= textWidth;
+            }
+            const int textY = SvgY(space, SvgNumber(node, "y", 0)) - textStyle.fontSizePx;
+            Text(textX, textY, content, textStyle, fixed);
+            RememberSvgLink(node, textX, textY, std::max(1, textWidth), textStyle.fontSizePx, fixed);
         }
-        if (tag == "svg" || tag == "g" || tag == "a" || tag == "switch" || tag == "symbol" || tag == "defs" || node.kind == ElementKind::Svg) {
+        if (tag == "switch") {
+            for (const std::unique_ptr<Node>& child : node.children) {
+                if (child->type == Node::Type::Element && SvgSwitchMatches(*child)) {
+                    PaintSvgTree(*child, space, fixed);
+                    break;
+                }
+            }
+        } else if (tag == "svg" || tag == "g" || tag == "a" || tag == "symbol" || tag == "defs" || node.kind == ElementKind::Svg) {
             for (const std::unique_ptr<Node>& child : node.children) {
                 if (child->type == Node::Type::Element) {
                     PaintSvgTree(*child, space, fixed);
