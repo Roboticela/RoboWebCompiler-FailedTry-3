@@ -1,6 +1,7 @@
 #include "Render/StyleSheet.h"
 
 #include "Core/Utf8.h"
+#include "Render/ImageDecoder.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -697,6 +698,61 @@ bool CompileLinkedStyles(Document& document, std::vector<CompiledWebFont>& fonts
     }
     if (!job.note.empty() && document.status.empty()) {
         document.status = "font " + job.note;
+    }
+    return true;
+}
+
+void CollectImageUrls(const Node& node, std::vector<std::string>& urls) {
+    auto add = [&](const std::string& url) {
+        if (url.find("://") == std::string::npos) {
+            return;
+        }
+        for (const std::string& existing : urls) {
+            if (existing == url) {
+                return;
+            }
+        }
+        urls.push_back(url);
+    };
+    if (node.kind == ElementKind::Img || node.kind == ElementKind::Image ||
+        (node.kind == ElementKind::Input && ToLowerAscii(AttributeValue(node, "type")) == "image")) {
+        add(AttributeValue(node, "src"));
+        std::string set = AttributeValue(node, "srcset");
+        const std::size_t space = set.find_first_of(" \t,");
+        if (space != std::string::npos) {
+            set = set.substr(0, space);
+        }
+        add(set);
+    }
+    if (node.kind == ElementKind::Video) {
+        add(AttributeValue(node, "poster"));
+    }
+    if (node.kind == ElementKind::Source && node.parent != nullptr && node.parent->kind == ElementKind::Picture) {
+        add(AttributeValue(node, "src"));
+    }
+    for (const std::unique_ptr<Node>& child : node.children) {
+        CollectImageUrls(*child, urls);
+    }
+}
+
+bool CompileRemoteImages(Document& document, std::vector<CompiledImage>& images, std::string& error) {
+    images.clear();
+    if (document.root == nullptr) {
+        return true;
+    }
+    std::vector<std::string> urls;
+    CollectImageUrls(*document.root, urls);
+    for (const std::string& url : urls) {
+        const std::vector<unsigned char> bytes = Download(url);
+        if (DecodeImageBytes(bytes).ok) {
+            CompiledImage image;
+            image.url = url;
+            image.bytes = bytes;
+            images.push_back(std::move(image));
+            continue;
+        }
+        error = "image was not loaded: " + url;
+        return false;
     }
     return true;
 }

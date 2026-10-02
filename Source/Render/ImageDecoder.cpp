@@ -1,10 +1,78 @@
 #include "Render/ImageDecoder.h"
 
+#include <cstring>
 #include <fstream>
+#include <utility>
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <gdiplus.h>
 
 namespace RoboWeb {
 
 namespace {
+
+std::vector<std::pair<std::string, std::vector<unsigned char>>> gCompiledImages;
+
+DecodedImage DecodeGdiplus(const std::vector<unsigned char>& bytes) {
+    DecodedImage image;
+    if (bytes.size() < 8) {
+        return image;
+    }
+    static ULONG_PTR token = 0;
+    if (token == 0) {
+        Gdiplus::GdiplusStartupInput input;
+        if (Gdiplus::GdiplusStartup(&token, &input, nullptr) != Gdiplus::Ok) {
+            return image;
+        }
+    }
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes.size());
+    if (memory == nullptr) {
+        return image;
+    }
+    void* destination = GlobalLock(memory);
+    if (destination == nullptr) {
+        GlobalFree(memory);
+        return image;
+    }
+    std::memcpy(destination, bytes.data(), bytes.size());
+    GlobalUnlock(memory);
+    IStream* stream = nullptr;
+    if (CreateStreamOnHGlobal(memory, TRUE, &stream) != S_OK || stream == nullptr) {
+        GlobalFree(memory);
+        return image;
+    }
+    Gdiplus::Bitmap bitmap(stream, FALSE);
+    stream->Release();
+    if (bitmap.GetLastStatus() != Gdiplus::Ok || bitmap.GetWidth() == 0 || bitmap.GetHeight() == 0) {
+        return image;
+    }
+    const int width = static_cast<int>(bitmap.GetWidth());
+    const int height = static_cast<int>(bitmap.GetHeight());
+    Gdiplus::BitmapData data;
+    Gdiplus::Rect rectangle(0, 0, width, height);
+    if (bitmap.LockBits(&rectangle, Gdiplus::ImageLockModeRead, PixelFormat32bppARGB, &data) != Gdiplus::Ok) {
+        return image;
+    }
+    image.width = width;
+    image.height = height;
+    image.rgba.assign(static_cast<std::size_t>(width * height * 4), 255);
+    for (int row = 0; row < height; ++row) {
+        const auto* source = static_cast<const unsigned char*>(data.Scan0) + static_cast<std::size_t>(row * data.Stride);
+        for (int column = 0; column < width; ++column) {
+            const std::size_t target = static_cast<std::size_t>((row * width + column) * 4);
+            image.rgba[target] = source[column * 4 + 2];
+            image.rgba[target + 1] = source[column * 4 + 1];
+            image.rgba[target + 2] = source[column * 4];
+            image.rgba[target + 3] = source[column * 4 + 3];
+        }
+    }
+    bitmap.UnlockBits(&data);
+    image.ok = true;
+    return image;
+}
 
 std::uint16_t Read16(const unsigned char* data) {
     return static_cast<std::uint16_t>(data[0] | (data[1] << 8));
@@ -114,19 +182,38 @@ DecodedImage DecodePpm(const std::vector<unsigned char>& bytes) {
 
 }  // namespace
 
-DecodedImage DecodeImageFile(const std::string& path) {
-    std::ifstream input(path, std::ios::binary);
-    if (!input) {
-        return DecodedImage();
-    }
-    std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+DecodedImage DecodeImageBytes(const std::vector<unsigned char>& bytes) {
     if (bytes.size() >= 2 && bytes[0] == 'B' && bytes[1] == 'M') {
         return DecodeBmp(bytes);
     }
     if (bytes.size() >= 2 && bytes[0] == 'P' && bytes[1] == '6') {
         return DecodePpm(bytes);
     }
-    return DecodedImage();
+    return DecodeGdiplus(bytes);
+}
+
+void RegisterCompiledImage(const std::string& url, const std::vector<unsigned char>& bytes) {
+    for (std::pair<std::string, std::vector<unsigned char>>& entry : gCompiledImages) {
+        if (entry.first == url) {
+            entry.second = bytes;
+            return;
+        }
+    }
+    gCompiledImages.push_back({url, bytes});
+}
+
+DecodedImage DecodeImageFile(const std::string& path) {
+    for (const std::pair<std::string, std::vector<unsigned char>>& entry : gCompiledImages) {
+        if (entry.first == path) {
+            return DecodeImageBytes(entry.second);
+        }
+    }
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return DecodedImage();
+    }
+    std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    return DecodeImageBytes(bytes);
 }
 
 }

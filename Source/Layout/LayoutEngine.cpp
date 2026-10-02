@@ -836,6 +836,234 @@ struct Engine {
         }
     }
 
+    struct SvgPoint {
+        double x = 0;
+        double y = 0;
+    };
+
+    void FillPolygon(const std::vector<SvgPoint>& points, int originX, int originY, Color color, bool fixed) {
+        if (points.size() < 3 || color.alpha == 0) {
+            return;
+        }
+        int minY = 1000000;
+        int maxY = -1000000;
+        for (const SvgPoint& point : points) {
+            minY = std::min(minY, static_cast<int>(std::floor(point.y)));
+            maxY = std::max(maxY, static_cast<int>(std::ceil(point.y)));
+        }
+        for (int row = minY; row <= maxY; ++row) {
+            std::vector<int> crossings;
+            for (std::size_t index = 0; index < points.size(); ++index) {
+                const SvgPoint& start = points[index];
+                const SvgPoint& end = points[(index + 1) % points.size()];
+                const bool crosses = (start.y <= row && end.y > row) || (end.y <= row && start.y > row);
+                if (!crosses || start.y == end.y) {
+                    continue;
+                }
+                const double distance = (static_cast<double>(row) + 0.5 - start.y) / (end.y - start.y);
+                crossings.push_back(static_cast<int>(start.x + distance * (end.x - start.x)));
+            }
+            std::sort(crossings.begin(), crossings.end());
+            for (std::size_t index = 0; index + 1 < crossings.size(); index += 2) {
+                const int left = crossings[index];
+                const int right = crossings[index + 1];
+                if (right > left) {
+                    Fill(originX + left, originY + row, right - left, 1, color, fixed);
+                }
+            }
+        }
+    }
+
+    void StrokePolyline(const std::vector<SvgPoint>& points, int originX, int originY, Color color, bool fixed, bool close) {
+        if (points.size() < 2 || color.alpha == 0) {
+            return;
+        }
+        for (std::size_t index = 1; index < points.size(); ++index) {
+            StrokeLine(originX + static_cast<int>(points[index - 1].x), originY + static_cast<int>(points[index - 1].y),
+                originX + static_cast<int>(points[index].x), originY + static_cast<int>(points[index].y), color, fixed);
+        }
+        if (close) {
+            StrokeLine(originX + static_cast<int>(points.back().x), originY + static_cast<int>(points.back().y),
+                originX + static_cast<int>(points.front().x), originY + static_cast<int>(points.front().y), color, fixed);
+        }
+    }
+
+    bool ReadSvgNumber(const std::string& text, std::size_t& index, double& number) {
+        while (index < text.size() && (text[index] == ' ' || text[index] == '\t' || text[index] == '\n' || text[index] == '\r' ||
+                                           text[index] == ',')) {
+            ++index;
+        }
+        if (index >= text.size()) {
+            return false;
+        }
+        const std::size_t start = index;
+        if (text[index] == '+' || text[index] == '-') {
+            ++index;
+        }
+        bool digits = false;
+        while (index < text.size() && ((text[index] >= '0' && text[index] <= '9') || text[index] == '.')) {
+            digits = true;
+            ++index;
+        }
+        if (!digits) {
+            index = start;
+            return false;
+        }
+        number = std::atof(text.c_str() + start);
+        return true;
+    }
+
+    std::vector<SvgPoint> ParsePointList(const std::string& text) {
+        std::vector<SvgPoint> points;
+        std::size_t index = 0;
+        while (index < text.size()) {
+            double x = 0;
+            double y = 0;
+            if (!ReadSvgNumber(text, index, x) || !ReadSvgNumber(text, index, y)) {
+                break;
+            }
+            points.push_back(SvgPoint{x, y});
+        }
+        return points;
+    }
+
+    void AddCurve(std::vector<SvgPoint>& points, double x0, double y0, double x1, double y1, double x2, double y2, double x3, double y3) {
+        for (int step = 1; step <= 8; ++step) {
+            const double t = static_cast<double>(step) / 8.0;
+            const double u = 1.0 - t;
+            SvgPoint point;
+            point.x = u * u * u * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x3;
+            point.y = u * u * u * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y3;
+            points.push_back(point);
+        }
+    }
+
+    void PaintPath(const std::string& data, int originX, int originY, Color fill, Color stroke, bool fixed) {
+        std::vector<SvgPoint> figure;
+        double currentX = 0;
+        double currentY = 0;
+        double startX = 0;
+        double startY = 0;
+        std::size_t index = 0;
+        char command = 0;
+        auto finish = [&](bool close) {
+            if (fill.alpha != 0) {
+                FillPolygon(figure, originX, originY, fill, fixed);
+            }
+            if (stroke.alpha != 0) {
+                StrokePolyline(figure, originX, originY, stroke, fixed, close);
+            }
+            figure.clear();
+        };
+        while (index < data.size()) {
+            while (index < data.size() && (data[index] == ' ' || data[index] == '\t' || data[index] == '\n' || data[index] == '\r' ||
+                                              data[index] == ',')) {
+                ++index;
+            }
+            if (index >= data.size()) {
+                break;
+            }
+            if ((data[index] >= 'A' && data[index] <= 'Z') || (data[index] >= 'a' && data[index] <= 'z')) {
+                command = data[index];
+                ++index;
+            }
+            if (command == 0) {
+                break;
+            }
+            const bool relative = command >= 'a' && command <= 'z';
+            const char operation = relative ? static_cast<char>(command - 'a' + 'A') : command;
+            if (operation == 'Z') {
+                if (!figure.empty()) {
+                    figure.push_back(SvgPoint{startX, startY});
+                    finish(true);
+                }
+                currentX = startX;
+                currentY = startY;
+                command = 0;
+                continue;
+            }
+            double first = 0;
+            double second = 0;
+            if (operation == 'H' || operation == 'V') {
+                if (!ReadSvgNumber(data, index, first)) {
+                    break;
+                }
+                if (operation == 'H') {
+                    currentX = relative ? currentX + first : first;
+                } else {
+                    currentY = relative ? currentY + first : first;
+                }
+                figure.push_back(SvgPoint{currentX, currentY});
+                continue;
+            }
+            if (operation == 'A') {
+                for (int skip = 0; skip < 5; ++skip) {
+                    if (!ReadSvgNumber(data, index, first)) {
+                        return;
+                    }
+                }
+                if (!ReadSvgNumber(data, index, first) || !ReadSvgNumber(data, index, second)) {
+                    return;
+                }
+                currentX = relative ? currentX + first : first;
+                currentY = relative ? currentY + second : second;
+                figure.push_back(SvgPoint{currentX, currentY});
+                continue;
+            }
+            if (!ReadSvgNumber(data, index, first) || !ReadSvgNumber(data, index, second)) {
+                break;
+            }
+            if (operation == 'M' || operation == 'L' || operation == 'T') {
+                const double x = relative ? currentX + first : first;
+                const double y = relative ? currentY + second : second;
+                if (operation == 'M') {
+                    if (figure.size() > 2) {
+                        finish(false);
+                    } else {
+                        figure.clear();
+                    }
+                    startX = x;
+                    startY = y;
+                    command = relative ? 'l' : 'L';
+                }
+                currentX = x;
+                currentY = y;
+                figure.push_back(SvgPoint{currentX, currentY});
+                continue;
+            }
+            double third = 0;
+            double fourth = 0;
+            if (!ReadSvgNumber(data, index, third) || !ReadSvgNumber(data, index, fourth)) {
+                break;
+            }
+            if (operation == 'Q' || operation == 'S') {
+                const double x = relative ? currentX + third : third;
+                const double y = relative ? currentY + fourth : fourth;
+                currentX = x;
+                currentY = y;
+                figure.push_back(SvgPoint{currentX, currentY});
+                continue;
+            }
+            double fifth = 0;
+            double sixth = 0;
+            if (!ReadSvgNumber(data, index, fifth) || !ReadSvgNumber(data, index, sixth)) {
+                break;
+            }
+            const double x1 = relative ? currentX + first : first;
+            const double y1 = relative ? currentY + second : second;
+            const double x2 = relative ? currentX + third : third;
+            const double y2 = relative ? currentY + fourth : fourth;
+            const double x = relative ? currentX + fifth : fifth;
+            const double y = relative ? currentY + sixth : sixth;
+            AddCurve(figure, currentX, currentY, x1, y1, x2, y2, x, y);
+            currentX = x;
+            currentY = y;
+        }
+        if (figure.size() > 2) {
+            finish(false);
+        }
+    }
+
     void PaintSvgTree(Node& node, int originX, int originY, bool fixed) {
         const std::string tag = ToLowerAscii(node.tagName);
         Color fill{0, 0, 0, 255};
@@ -862,6 +1090,28 @@ struct Engine {
             }
             StrokeLine(originX + SvgNumber(node, "x1", 0), originY + SvgNumber(node, "y1", 0), originX + SvgNumber(node, "x2", 0),
                 originY + SvgNumber(node, "y2", 0), stroke, fixed);
+        } else if (tag == "polygon" || tag == "polyline") {
+            const std::vector<SvgPoint> points = ParsePointList(AttributeValue(node, "points"));
+            Color stroke{0, 0, 0, 0};
+            const std::string strokeText = AttributeValue(node, "stroke");
+            if (!strokeText.empty()) {
+                ParseColor(strokeText, stroke);
+            } else if (tag == "polyline") {
+                stroke = Color{0, 0, 0, 255};
+            }
+            if (tag == "polygon" && !AttributeValue(node, "fill").empty()) {
+                FillPolygon(points, originX, originY, fill, fixed);
+            } else if (tag == "polygon" && AttributeValue(node, "fill").empty()) {
+                FillPolygon(points, originX, originY, fill, fixed);
+            }
+            StrokePolyline(points, originX, originY, stroke, fixed, tag == "polygon");
+        } else if (tag == "path") {
+            Color stroke{0, 0, 0, 0};
+            const std::string strokeText = AttributeValue(node, "stroke");
+            if (!strokeText.empty()) {
+                ParseColor(strokeText, stroke);
+            }
+            PaintPath(AttributeValue(node, "d"), originX, originY, fill, stroke, fixed);
         } else if (tag == "text") {
             ResolvedStyle textStyle;
             textStyle.color = fill;

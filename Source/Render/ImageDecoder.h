@@ -14,5 +14,7 @@ struct DecodedImage {
 };
 
 DecodedImage DecodeImageFile(const std::string& path);
+DecodedImage DecodeImageBytes(const std::vector<unsigned char>& bytes);
+void RegisterCompiledImage(const std::string& url, const std::vector<unsigned char>& bytes);
 
 }

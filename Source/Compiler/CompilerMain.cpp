@@ -110,7 +110,14 @@ int main(int argc, char** argv) {
         std::cerr << "RoboWebCompiler: compilation failed with 1 error\n";
         return 1;
     }
-    const std::string generated = RoboWeb::GenerateCpp(document, fonts);
+    std::vector<RoboWeb::CompiledImage> images;
+    std::string imageError;
+    if (!RoboWeb::CompileRemoteImages(document, images, imageError)) {
+        std::cerr << inputPath << ":1:1: error: " << imageError << "\n";
+        std::cerr << "RoboWebCompiler: compilation failed with 1 error\n";
+        return 1;
+    }
+    const std::string generated = RoboWeb::GenerateCpp(document, fonts, images);
     const std::string generatedPath = outputPath + ".cpp";
     if (!WriteFile(generatedPath, generated)) {
         std::cerr << "RoboWebCompiler: error: cannot write '" << generatedPath << "'\n";
@@ -135,7 +142,7 @@ int main(int argc, char** argv) {
     for (const char* sourceName : kRuntimeSources) {
         command += " " + Quote(sourceDir + "/" + sourceName);
     }
-    command += " " + Quote(fontObject) + " -mwindows -lgdi32 -luser32 -lcomdlg32 -lwininet -o " + Quote(outputPath);
+    command += " " + Quote(fontObject) + " -mwindows -lgdi32 -lgdiplus -lole32 -luser32 -lcomdlg32 -lwininet -o " + Quote(outputPath);
     const int status = std::system(command.c_str());
     if (status != 0) {
         std::cerr << "RoboWebCompiler: error: native compile failed for '" << generatedPath << "'\n";

@@ -210,10 +210,16 @@ void WriteFontBytes(std::ostringstream& output, const std::vector<unsigned char>
     output << "}";
 }
 
-void WriteCompiledStyles(std::ostringstream& output, const Document& document, const std::vector<CompiledWebFont>& fonts) {
+void WriteCompiledStyles(
+    std::ostringstream& output, const Document& document, const std::vector<CompiledWebFont>& fonts, const std::vector<CompiledImage>& images) {
     for (std::size_t index = 0; index < fonts.size(); ++index) {
         output << "static const unsigned char kCompiledFont" << index << "[] = ";
         WriteFontBytes(output, fonts[index].bytes);
+        output << ";\n\n";
+    }
+    for (std::size_t index = 0; index < images.size(); ++index) {
+        output << "static const unsigned char kCompiledImage" << index << "[] = ";
+        WriteFontBytes(output, images[index].bytes);
         output << ";\n\n";
     }
     output << "void InstallCompiledStyles(RoboWeb::Document& document) {\n";
@@ -223,6 +229,10 @@ void WriteCompiledStyles(std::ostringstream& output, const Document& document, c
         output << "    RoboWeb::RegisterWebFont(\"" << Escape(font.family) << "\", " << font.weight << ", "
                << (font.italic ? "true" : "false") << ", std::vector<unsigned char>(kCompiledFont" << index
                << ", kCompiledFont" << index << " + sizeof(kCompiledFont" << index << ")));\n";
+    }
+    for (std::size_t index = 0; index < images.size(); ++index) {
+        output << "    RoboWeb::RegisterCompiledImage(\"" << Escape(images[index].url) << "\", std::vector<unsigned char>(kCompiledImage"
+               << index << ", kCompiledImage" << index << " + sizeof(kCompiledImage" << index << ")));\n";
     }
     for (const ElementStyle& rule : document.styleRules) {
         output << "    {\n";
@@ -306,12 +316,13 @@ void WriteCompiledStyles(std::ostringstream& output, const Document& document, c
     output << "}\n\n";
 }
 
-std::string GenerateCpp(const Document& document, const std::vector<CompiledWebFont>& fonts) {
+std::string GenerateCpp(const Document& document, const std::vector<CompiledWebFont>& fonts, const std::vector<CompiledImage>& images) {
     std::ostringstream output;
     output << "#include \"Runtime/HostLoop.h\"\n";
-    output << "#include \"Render/BitmapFont.h\"\n\n";
+    output << "#include \"Render/BitmapFont.h\"\n";
+    output << "#include \"Render/ImageDecoder.h\"\n\n";
     output << "#include <vector>\n\n";
-    WriteCompiledStyles(output, document, fonts);
+    WriteCompiledStyles(output, document, fonts, images);
     output << "namespace {\n\n";
     output << "std::unique_ptr<RoboWeb::Node> MakeElement(int kind, const char* tag, int line, int column) {\n";
     output << "    auto node = std::make_unique<RoboWeb::Node>();\n";

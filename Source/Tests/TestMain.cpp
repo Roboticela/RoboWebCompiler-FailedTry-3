@@ -461,6 +461,15 @@ void TestHtmlBehavior() {
         EXPECT(link->node->visited);
         EXPECT(page.status.find("open page.html") != std::string::npos);
     }
+    RoboWeb::Document path = Parse(
+        "<!DOCTYPE html><svg width='30' height='30'><path d='M2 2 H20 V20 H2 Z' fill='red'/></svg>", diagnostics);
+    RoboWeb::LayoutResult pathLayout = RoboWeb::LayoutDocument(path, 120, 80);
+    RoboWeb::Framebuffer pathFrame = RoboWeb::RenderDocument(pathLayout, 0);
+    const RoboWeb::ElementBox* pathBox = RoboWeb::FindBox(pathLayout, "svg");
+    EXPECT(pathBox != nullptr);
+    if (pathBox != nullptr) {
+        EXPECT(RoboWeb::PixelRed(pathFrame, pathBox->x + 8, pathBox->y + 8) == 255);
+    }
     RoboWeb::Document moving = Parse("<!DOCTYPE html><marquee>Move</marquee>", diagnostics);
     EXPECT(RoboWeb::FindBox(RoboWeb::LayoutDocument(moving, 200, 80), "marquee") != nullptr);
     RoboWeb::Document frames = Parse("<!DOCTYPE html><frameset cols='50%,50%'><frame src='a'><frame src='b'></frameset>", diagnostics);

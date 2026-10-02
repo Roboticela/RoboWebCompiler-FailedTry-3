@@ -7,6 +7,11 @@
 
 namespace RoboWeb {
 
+struct CompiledImage {
+    std::string url;
+    std::vector<unsigned char> bytes;
+};
+
 struct CompiledWebFont {
     std::string family;
     int weight = 400;
@@ -17,5 +22,6 @@ struct CompiledWebFont {
 void LoadDocumentStyles(Document& document);
 void ApplyStyleText(ElementStyle& rule, const std::string& declarations);
 bool CompileLinkedStyles(Document& document, std::vector<CompiledWebFont>& fonts, std::string& error);
+bool CompileRemoteImages(Document& document, std::vector<CompiledImage>& images, std::string& error);
 
 }
