@@ -1111,7 +1111,13 @@ struct Engine {
         double opacity = 1;
         Color fill{0, 0, 0, 255};
         Color stroke{0, 0, 0, 0};
+        std::string fillUrl;
         bool hidden = false;
+        bool clipped = false;
+        int clipX = 0;
+        int clipY = 0;
+        int clipWidth = 0;
+        int clipHeight = 0;
         bool fillEvenOdd = false;
         std::string textAnchor = "start";
     };
@@ -1134,8 +1140,13 @@ struct Engine {
         const std::string fillText = ToLowerAscii(AttributeValue(node, "fill"));
         if (fillText == "none") {
             space.fill.alpha = 0;
-        } else if (!fillText.empty() && fillText.find("url(") == std::string::npos) {
+            space.fillUrl.clear();
+        } else if (fillText.find("url(") != std::string::npos) {
+            space.fillUrl = fillText;
+            space.fill.alpha = 0;
+        } else if (!fillText.empty()) {
             ParseColor(fillText, space.fill);
+            space.fillUrl.clear();
         }
         const std::string strokeText = ToLowerAscii(AttributeValue(node, "stroke"));
         if (strokeText == "none") {
@@ -1155,6 +1166,28 @@ struct Engine {
         const std::string anchor = ToLowerAscii(AttributeValue(node, "text-anchor"));
         if (anchor == "start" || anchor == "middle" || anchor == "end") {
             space.textAnchor = anchor;
+        }
+        const std::string clip = AttributeValue(node, "clip-path");
+        if (!clip.empty()) {
+            const std::string id = SvgPaintId(clip);
+            Node* root = const_cast<Node*>(&node);
+            while (root->parent != nullptr) {
+                root = root->parent;
+            }
+            Node* path = id.empty() ? nullptr : FindSvgById(*root, id);
+            if (path != nullptr) {
+                for (const std::unique_ptr<Node>& child : path->children) {
+                    if (ToLowerAscii(child->tagName) != "rect") {
+                        continue;
+                    }
+                    space.clipped = true;
+                    space.clipX = SvgX(space, SvgNumber(*child, "x", 0));
+                    space.clipY = SvgY(space, SvgNumber(*child, "y", 0));
+                    space.clipWidth = SvgLength(space, SvgNumber(*child, "width", 0), true);
+                    space.clipHeight = SvgLength(space, SvgNumber(*child, "height", 0), false);
+                    break;
+                }
+            }
         }
     }
 
@@ -1311,12 +1344,259 @@ struct Engine {
         return nullptr;
     }
 
+    std::string SvgPaintId(const std::string& reference) {
+        const std::size_t hash = reference.find('#');
+        if (hash == std::string::npos) {
+            return "";
+        }
+        std::string id = reference.substr(hash + 1);
+        while (!id.empty() && (id.back() == ')' || id.back() == '\'' || id.back() == '"' || id.back() == ' ')) {
+            id.pop_back();
+        }
+        return id;
+    }
+
+    double SvgOffset(const std::string& text) {
+        if (text.find('%') != std::string::npos) {
+            return std::atof(text.c_str()) / 100.0;
+        }
+        return std::atof(text.c_str());
+    }
+
+    struct SvgStop {
+        double offset = 0;
+        Color color{0, 0, 0, 255};
+    };
+
+    void CollectStops(Node& gradient, std::vector<SvgStop>& stops, int depth) {
+        if (depth > 4) {
+            return;
+        }
+        for (const std::unique_ptr<Node>& child : gradient.children) {
+            if (ToLowerAscii(child->tagName) != "stop") {
+                continue;
+            }
+            SvgStop stop;
+            stop.offset = SvgOffset(AttributeValue(*child, "offset"));
+            const std::string colorText = AttributeValue(*child, "stop-color");
+            if (!colorText.empty()) {
+                ParseColor(colorText, stop.color);
+            }
+            if (!AttributeValue(*child, "stop-opacity").empty()) {
+                stop.color.alpha = static_cast<std::uint8_t>(
+                    std::max(0.0, std::min(255.0, std::atof(AttributeValue(*child, "stop-opacity").c_str()) * 255.0)));
+            }
+            stops.push_back(stop);
+        }
+        if (!stops.empty()) {
+            std::sort(stops.begin(), stops.end(), [](const SvgStop& left, const SvgStop& right) { return left.offset < right.offset; });
+            return;
+        }
+        std::string href = AttributeValue(gradient, "href");
+        if (href.empty()) {
+            href = AttributeValue(gradient, "xlink:href");
+        }
+        const std::string id = SvgPaintId(href);
+        if (id.empty()) {
+            return;
+        }
+        Node* root = &gradient;
+        while (root->parent != nullptr) {
+            root = root->parent;
+        }
+        if (Node* next = FindSvgById(*root, id)) {
+            CollectStops(*next, stops, depth + 1);
+        }
+    }
+
+    Color SampleStops(const std::vector<SvgStop>& stops, double t) {
+        if (stops.empty()) {
+            return Color{0, 0, 0, 255};
+        }
+        if (t < 0) {
+            t = 0;
+        }
+        if (t > 1) {
+            t = 1;
+        }
+        if (t <= stops.front().offset) {
+            return stops.front().color;
+        }
+        if (t >= stops.back().offset) {
+            return stops.back().color;
+        }
+        for (std::size_t index = 1; index < stops.size(); ++index) {
+            if (t > stops[index].offset) {
+                continue;
+            }
+            const SvgStop& left = stops[index - 1];
+            const SvgStop& right = stops[index];
+            const double span = right.offset - left.offset;
+            const double mix = span <= 0 ? 0 : (t - left.offset) / span;
+            Color color;
+            color.red = static_cast<std::uint8_t>(left.color.red + (right.color.red - left.color.red) * mix);
+            color.green = static_cast<std::uint8_t>(left.color.green + (right.color.green - left.color.green) * mix);
+            color.blue = static_cast<std::uint8_t>(left.color.blue + (right.color.blue - left.color.blue) * mix);
+            color.alpha = static_cast<std::uint8_t>(left.color.alpha + (right.color.alpha - left.color.alpha) * mix);
+            return color;
+        }
+        return stops.back().color;
+    }
+
+    bool FillLinearGradient(Node& node, const SvgSpace& space, int x, int y, int width, int height, bool fixed) {
+        const std::string id = SvgPaintId(space.fillUrl);
+        if (id.empty() || width <= 0 || height <= 0) {
+            return false;
+        }
+        Node* root = &node;
+        while (root->parent != nullptr) {
+            root = root->parent;
+        }
+        Node* gradient = FindSvgById(*root, id);
+        if (gradient == nullptr || ToLowerAscii(gradient->tagName) != "lineargradient") {
+            return false;
+        }
+        std::vector<SvgStop> stops;
+        CollectStops(*gradient, stops, 0);
+        const bool objectBox = ToLowerAscii(AttributeValue(*gradient, "gradientunits")) != "userspaceonuse";
+        const double x1 = AttributeValue(*gradient, "x1").empty() ? (objectBox ? 0 : 0) : SvgOffset(AttributeValue(*gradient, "x1"));
+        const double y1 = AttributeValue(*gradient, "y1").empty() ? 0 : SvgOffset(AttributeValue(*gradient, "y1"));
+        const double x2 = AttributeValue(*gradient, "x2").empty() ? (objectBox ? 1 : static_cast<double>(width)) : SvgOffset(AttributeValue(*gradient, "x2"));
+        const double y2 = AttributeValue(*gradient, "y2").empty() ? 0 : SvgOffset(AttributeValue(*gradient, "y2"));
+        double startX = objectBox ? x + x1 * width : SvgX(space, x1);
+        double startY = objectBox ? y + y1 * height : SvgY(space, y1);
+        double endX = objectBox ? x + x2 * width : SvgX(space, x2);
+        double endY = objectBox ? y + y2 * height : SvgY(space, y2);
+        const double deltaX = endX - startX;
+        const double deltaY = endY - startY;
+        const double length = deltaX * deltaX + deltaY * deltaY;
+        for (int row = 0; row < height; ++row) {
+            for (int column = 0; column < width; ++column) {
+                double t = 0;
+                if (length > 0) {
+                    t = ((x + column - startX) * deltaX + (y + row - startY) * deltaY) / length;
+                }
+                Fill(x + column, y + row, 1, 1, WithOpacity(SampleStops(stops, t), space.opacity), fixed);
+            }
+        }
+        return true;
+    }
+
+    std::vector<SvgPoint> StraightPath(const std::string& data) {
+        std::vector<SvgPoint> points;
+        std::size_t index = 0;
+        char command = 0;
+        double x = 0;
+        double y = 0;
+        while (index < data.size()) {
+            while (index < data.size() && (data[index] == ' ' || data[index] == '\t' || data[index] == ',')) {
+                ++index;
+            }
+            if (index >= data.size()) {
+                break;
+            }
+            if ((data[index] >= 'A' && data[index] <= 'Z') || (data[index] >= 'a' && data[index] <= 'z')) {
+                command = data[index];
+                ++index;
+            }
+            if (command == 0) {
+                break;
+            }
+            const bool relative = command >= 'a' && command <= 'z';
+            const char operation = relative ? static_cast<char>(command - 'a' + 'A') : command;
+            if (operation == 'Z') {
+                command = 0;
+                continue;
+            }
+            double first = 0;
+            double second = 0;
+            if (operation == 'H' || operation == 'V') {
+                if (!ReadSvgNumber(data, index, first)) {
+                    break;
+                }
+                if (operation == 'H') {
+                    x = relative ? x + first : first;
+                } else {
+                    y = relative ? y + first : first;
+                }
+                points.push_back(SvgPoint{x, y});
+                continue;
+            }
+            if (!ReadSvgNumber(data, index, first) || !ReadSvgNumber(data, index, second)) {
+                break;
+            }
+            if (operation == 'M' || operation == 'L') {
+                x = relative ? x + first : first;
+                y = relative ? y + second : second;
+                points.push_back(SvgPoint{x, y});
+                if (operation == 'M') {
+                    command = relative ? 'l' : 'L';
+                }
+                continue;
+            }
+            break;
+        }
+        return points;
+    }
+
+    bool PointAlong(const std::vector<SvgPoint>& points, double distance, double& x, double& y) {
+        if (points.empty()) {
+            return false;
+        }
+        x = points.front().x;
+        y = points.front().y;
+        for (std::size_t index = 1; index < points.size(); ++index) {
+            const double deltaX = points[index].x - points[index - 1].x;
+            const double deltaY = points[index].y - points[index - 1].y;
+            const double length = std::sqrt(deltaX * deltaX + deltaY * deltaY);
+            if (distance <= length || index + 1 == points.size()) {
+                const double mix = length <= 0 ? 0 : std::min(1.0, distance / length);
+                x = points[index - 1].x + deltaX * mix;
+                y = points[index - 1].y + deltaY * mix;
+                return true;
+            }
+            distance -= length;
+        }
+        return true;
+    }
+
+    void PaintMarkerAt(Node& node, const std::string& reference, double pixelX, double pixelY, SvgSpace space, bool fixed) {
+        const std::string id = SvgPaintId(reference);
+        if (id.empty()) {
+            return;
+        }
+        Node* root = &node;
+        while (root->parent != nullptr) {
+            root = root->parent;
+        }
+        Node* marker = FindSvgById(*root, id);
+        if (marker == nullptr) {
+            return;
+        }
+        const double refX = std::atof(AttributeValue(*marker, "refx").c_str());
+        const double refY = std::atof(AttributeValue(*marker, "refy").c_str());
+        SvgSpace local = space;
+        local.originX = pixelX - refX * space.scaleX;
+        local.originY = pixelY - refY * space.scaleY;
+        local.minX = 0;
+        local.minY = 0;
+        PaintSvgTree(*marker, local, fixed, true);
+    }
+
+    void PaintLineMarkers(Node& node, const SvgSpace& space, int x1, int y1, int x2, int y2, bool fixed) {
+        PaintMarkerAt(node, AttributeValue(node, "marker-start"), x1, y1, space, fixed);
+        PaintMarkerAt(node, AttributeValue(node, "marker-end"), x2, y2, space, fixed);
+    }
+
     void PaintSvgTree(Node& node, SvgSpace space, bool fixed, bool referenced = false) {
         const std::string tag = ToLowerAscii(node.tagName);
         if (ToLowerAscii(AttributeValue(node, "display")) == "none") {
             return;
         }
         if (tag == "title" || tag == "desc" || tag == "metadata") {
+            return;
+        }
+        if (tag == "marker" && !referenced) {
             return;
         }
         if (!referenced && (tag == "defs" || tag == "symbol" || tag == "clippath" || tag == "mask" || tag == "filter")) {
@@ -1335,7 +1615,9 @@ struct Engine {
             const int y = SvgY(space, SvgNumber(node, "y", 0));
             const int width = SvgLength(space, SvgNumber(node, "width", 0), true);
             const int height = SvgLength(space, SvgNumber(node, "height", 0), false);
-            Fill(x, y, width, height, fill, fixed);
+            if (space.fillUrl.empty() || !FillLinearGradient(node, space, x, y, width, height, fixed)) {
+                Fill(x, y, width, height, fill, fixed);
+            }
             if (stroke.alpha != 0 && width > 0 && height > 0) {
                 StrokeLine(x, y, x + width, y, stroke, fixed, thickness);
                 StrokeLine(x + width, y, x + width, y + height, stroke, fixed, thickness);
@@ -1365,6 +1647,7 @@ struct Engine {
             const int x2 = SvgX(space, SvgNumber(node, "x2", 0));
             const int y2 = SvgY(space, SvgNumber(node, "y2", 0));
             StrokeLine(x1, y1, x2, y2, stroke, fixed, thickness);
+            PaintLineMarkers(node, space, x1, y1, x2, y2, fixed);
             RememberSvgLink(node, std::min(x1, x2), std::min(y1, y2), std::abs(x2 - x1) + thickness, std::abs(y2 - y1) + thickness, fixed);
         } else if (!space.hidden && (tag == "polygon" || tag == "polyline")) {
             const std::vector<SvgPoint> points = MapSvgPoints(ParsePointList(AttributeValue(node, "points")), space);
@@ -1437,22 +1720,69 @@ struct Engine {
                     PaintSvgTree(*target, used, fixed, true);
                 }
             }
-        } else if (!space.hidden && (tag == "text" || tag == "tspan")) {
+        } else if (!space.hidden && tag == "textpath") {
+            std::string pathData = AttributeValue(node, "path");
+            if (pathData.empty()) {
+                std::string href = AttributeValue(node, "href");
+                if (href.empty()) {
+                    href = AttributeValue(node, "xlink:href");
+                }
+                const std::string id = SvgPaintId(href);
+                Node* root = &node;
+                while (root->parent != nullptr) {
+                    root = root->parent;
+                }
+                if (!id.empty()) {
+                    if (Node* path = FindSvgById(*root, id)) {
+                        pathData = AttributeValue(*path, "d");
+                    }
+                }
+            }
+            const std::vector<SvgPoint> course = MapSvgPoints(StraightPath(pathData), space);
             ResolvedStyle textStyle;
             textStyle.color = fill;
             const int fontSize = std::max(1, SvgNumber(node, "font-size", DEFAULT_FONT_SIZE_PX));
             textStyle.fontSizePx = std::max(1, SvgLength(space, fontSize, false));
             const std::string content = GatherText(node);
-            int textX = SvgX(space, SvgNumber(node, "x", 0));
-            const int textWidth = MeasureTextPx(content, textStyle.fontSizePx, textStyle.bold, textStyle.italic, textStyle.fontFamily);
-            if (space.textAnchor == "middle") {
-                textX -= textWidth / 2;
-            } else if (space.textAnchor == "end") {
-                textX -= textWidth;
+            double traveled = std::atof(AttributeValue(node, "startoffset").c_str()) * std::max(space.scaleX, space.scaleY);
+            for (std::size_t byte = 0; byte < content.size(); ++byte) {
+                const std::string glyph(1, content[byte]);
+                if (glyph == " ") {
+                    traveled += MeasureTextPx(" ", textStyle.fontSizePx, textStyle.bold, textStyle.italic, textStyle.fontFamily);
+                    continue;
+                }
+                const int advance = std::max(1, MeasureTextPx(glyph, textStyle.fontSizePx, textStyle.bold, textStyle.italic, textStyle.fontFamily));
+                double glyphX = 0;
+                double glyphY = 0;
+                if (PointAlong(course, traveled, glyphX, glyphY)) {
+                    Text(static_cast<int>(glyphX), static_cast<int>(glyphY) - textStyle.fontSizePx, glyph, textStyle, fixed);
+                }
+                traveled += advance;
             }
-            const int textY = SvgY(space, SvgNumber(node, "y", 0)) - textStyle.fontSizePx;
-            Text(textX, textY, content, textStyle, fixed);
-            RememberSvgLink(node, textX, textY, std::max(1, textWidth), textStyle.fontSizePx, fixed);
+        } else if (!space.hidden && (tag == "text" || tag == "tspan")) {
+            bool nestedPath = false;
+            for (const std::unique_ptr<Node>& child : node.children) {
+                if (ToLowerAscii(child->tagName) == "textpath") {
+                    nestedPath = true;
+                }
+            }
+            if (!nestedPath) {
+                ResolvedStyle textStyle;
+                textStyle.color = fill;
+                const int fontSize = std::max(1, SvgNumber(node, "font-size", DEFAULT_FONT_SIZE_PX));
+                textStyle.fontSizePx = std::max(1, SvgLength(space, fontSize, false));
+                const std::string content = GatherText(node);
+                int textX = SvgX(space, SvgNumber(node, "x", 0));
+                const int textWidth = MeasureTextPx(content, textStyle.fontSizePx, textStyle.bold, textStyle.italic, textStyle.fontFamily);
+                if (space.textAnchor == "middle") {
+                    textX -= textWidth / 2;
+                } else if (space.textAnchor == "end") {
+                    textX -= textWidth;
+                }
+                const int textY = SvgY(space, SvgNumber(node, "y", 0)) - textStyle.fontSizePx;
+                Text(textX, textY, content, textStyle, fixed);
+                RememberSvgLink(node, textX, textY, std::max(1, textWidth), textStyle.fontSizePx, fixed);
+            }
         }
         if (tag == "switch") {
             for (const std::unique_ptr<Node>& child : node.children) {
@@ -1461,7 +1791,8 @@ struct Engine {
                     break;
                 }
             }
-        } else if (tag == "svg" || tag == "g" || tag == "a" || tag == "symbol" || tag == "defs" || node.kind == ElementKind::Svg) {
+        } else if (tag == "svg" || tag == "g" || tag == "a" || tag == "symbol" || tag == "defs" || tag == "marker" || tag == "text" ||
+                   node.kind == ElementKind::Svg) {
             for (const std::unique_ptr<Node>& child : node.children) {
                 if (child->type == Node::Type::Element) {
                     PaintSvgTree(*child, space, fixed);

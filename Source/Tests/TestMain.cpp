@@ -607,6 +607,45 @@ void TestHtmlBehavior() {
     if (solidBox != nullptr) {
         EXPECT(RoboWeb::PixelGreen(solidFrame, solidBox->x + 50, solidBox->y + 45) == 0);
     }
+    RoboWeb::Document gradient = Parse(
+        "<!DOCTYPE html><svg width='40' height='16'><defs><linearGradient id='g'><stop offset='0' stop-color='red'/><stop offset='1' stop-color='blue'/></linearGradient></defs><rect width='40' height='16' fill='url(#g)'/></svg>",
+        diagnostics);
+    RoboWeb::LayoutResult gradientLayout = RoboWeb::LayoutDocument(gradient, 160, 80);
+    RoboWeb::Framebuffer gradientFrame = RoboWeb::RenderDocument(gradientLayout, 0);
+    const RoboWeb::ElementBox* gradientBox = RoboWeb::FindBox(gradientLayout, "svg");
+    EXPECT(gradientBox != nullptr);
+    if (gradientBox != nullptr) {
+        EXPECT(RoboWeb::PixelRed(gradientFrame, gradientBox->x, gradientBox->y + 4) == 255);
+        EXPECT(RoboWeb::PixelBlue(gradientFrame, gradientBox->x, gradientBox->y + 4) == 0);
+        EXPECT(RoboWeb::PixelBlue(gradientFrame, gradientBox->x + 39, gradientBox->y + 4) > 240);
+        EXPECT(RoboWeb::PixelRed(gradientFrame, gradientBox->x + 39, gradientBox->y + 4) < 20);
+    }
+    RoboWeb::Document marked = Parse(
+        "<!DOCTYPE html><svg width='40' height='20'><defs><marker id='m'><rect width='8' height='8' fill='red'/></marker></defs><line x1='4' y1='4' x2='30' y2='4' stroke='black' marker-end='url(#m)'/></svg>",
+        diagnostics);
+    RoboWeb::LayoutResult markedLayout = RoboWeb::LayoutDocument(marked, 160, 80);
+    RoboWeb::Framebuffer markedFrame = RoboWeb::RenderDocument(markedLayout, 0);
+    const RoboWeb::ElementBox* markedBox = RoboWeb::FindBox(markedLayout, "svg");
+    EXPECT(markedBox != nullptr);
+    if (markedBox != nullptr) {
+        EXPECT(RoboWeb::PixelGreen(markedFrame, markedBox->x + 32, markedBox->y + 6) == 0);
+        EXPECT(RoboWeb::PixelRed(markedFrame, markedBox->x + 32, markedBox->y + 6) == 255);
+    }
+    RoboWeb::Document along = Parse(
+        "<!DOCTYPE html><svg width='80' height='40'><defs><path id='p' d='M4 24 H70'/></defs><text fill='red'><textPath href='#p'>Hi</textPath></text></svg>",
+        diagnostics);
+    RoboWeb::LayoutResult alongLayout = RoboWeb::LayoutDocument(along, 160, 80);
+    const RoboWeb::ElementBox* alongBox = RoboWeb::FindBox(alongLayout, "svg");
+    EXPECT(alongBox != nullptr);
+    if (alongBox != nullptr) {
+        bool placed = false;
+        for (const RoboWeb::DrawOp& op : alongLayout.ops) {
+            if (op.kind == RoboWeb::DrawOp::Kind::Text && op.text == "H" && op.x >= alongBox->x && op.x <= alongBox->x + 12) {
+                placed = true;
+            }
+        }
+        EXPECT(placed);
+    }
     RoboWeb::Document moving = Parse("<!DOCTYPE html><marquee>Move</marquee>", diagnostics);
     EXPECT(RoboWeb::FindBox(RoboWeb::LayoutDocument(moving, 200, 80), "marquee") != nullptr);
     RoboWeb::Document frames = Parse("<!DOCTYPE html><frameset cols='50%,50%'><frame src='a'><frame src='b'></frameset>", diagnostics);
