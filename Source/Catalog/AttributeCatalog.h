@@ -26,6 +26,7 @@ bool IsDataAttribute(const std::string& lowercaseName);
 bool IsAriaAttribute(const std::string& lowercaseName);
 bool AttributeAppliesTo(const std::string& lowercaseName, ElementKind kind);
 bool IsKnownAttribute(const std::string& lowercaseName);
+bool IsSvgAttribute(const std::string& lowercaseName);
 const char* const* EventHandlerNames();
 int EventHandlerCount();
 

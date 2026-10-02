@@ -308,6 +308,13 @@ bool IsKnownAttribute(const std::string& lowercaseName) {
     return FindAttributeRule(lowercaseName) != nullptr;
 }
 
+bool IsSvgAttribute(const std::string& lowercaseName) {
+    return ListContains(
+        "cx cy d fill filter gradientunits in offset opacity r result rx ry stddeviation stop-color stroke "
+        "stroke-miterlimit stroke-width transform viewbox x1 x2 xmlns:xlink y1 y2",
+        lowercaseName.c_str());
+}
+
 const char* const* EventHandlerNames() {
     return kEvents;
 }

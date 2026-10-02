@@ -105,6 +105,17 @@ void TestAttributes() {
     RoboWeb::Document document = Parse("<!DOCTYPE html><div id='a' zzzz='1' onclick='bad()'></div>", diagnostics);
     RoboWeb::ValidateTree(document, diagnostics);
     EXPECT(CountMessages(diagnostics, RoboWeb::Severity::Warning, "unknown attribute 'zzzz'") == 1);
+    RoboWeb::Diagnostics svgDiagnostics;
+    RoboWeb::Document svgDocument = Parse(
+        "<!DOCTYPE html><svg width='10' height='10' viewBox='0 0 10 10' xmlns='http://www.w3.org/2000/svg'>"
+        "<rect width='10' height='10' rx='1' fill='#000'/>"
+        "<?xml version='1.0'?><circle cx='1' cy='1' r='1' stroke='red' stroke-width='1'/>"
+        "</svg>",
+        svgDiagnostics);
+    RoboWeb::ValidateTree(svgDocument, svgDiagnostics);
+    EXPECT(CountMessages(svgDiagnostics, RoboWeb::Severity::Warning, "unknown attribute") == 0);
+    EXPECT(CountMessages(svgDiagnostics, RoboWeb::Severity::Warning, "not allowed") == 0);
+    EXPECT(CountMessages(svgDiagnostics, RoboWeb::Severity::Warning, "processing instruction") == 0);
     EXPECT(CountMessages(diagnostics, RoboWeb::Severity::Warning, "not executed") == 0);
     RoboWeb::Diagnostics duplicate;
     RoboWeb::Document duplicated = Parse("<!DOCTYPE html><div id='a' id='b'></div>", duplicate);
@@ -479,7 +490,8 @@ void TestHtmlBehavior() {
     const RoboWeb::ElementBox* scaledBox = RoboWeb::FindBox(scaledLayout, "svg");
     EXPECT(scaledBox != nullptr);
     if (scaledBox != nullptr) {
-        EXPECT(RoboWeb::PixelGreen(scaledFrame, scaledBox->x + 4, scaledBox->y + 4) == 0);
+        EXPECT(RoboWeb::PixelGreen(scaledFrame, scaledBox->x + 14, scaledBox->y + 4) == 0);
+        EXPECT(RoboWeb::PixelGreen(scaledFrame, scaledBox->x + 4, scaledBox->y + 4) == 255);
         EXPECT(RoboWeb::PixelGreen(scaledFrame, scaledBox->x + 30, scaledBox->y + 4) == 255);
     }
     RoboWeb::Document reused = Parse(
@@ -815,7 +827,8 @@ void TestHtmlBehavior() {
     const RoboWeb::ElementBox* viewedBox = RoboWeb::FindBox(viewedLayout, "svg");
     EXPECT(viewedBox != nullptr);
     if (viewedBox != nullptr) {
-        EXPECT(RoboWeb::PixelGreen(viewedFrame, viewedBox->x + 4, viewedBox->y + 4) == 0);
+        EXPECT(RoboWeb::PixelGreen(viewedFrame, viewedBox->x + 14, viewedBox->y + 4) == 0);
+        EXPECT(RoboWeb::PixelGreen(viewedFrame, viewedBox->x + 4, viewedBox->y + 4) == 255);
         EXPECT(RoboWeb::PixelGreen(viewedFrame, viewedBox->x + 30, viewedBox->y + 4) == 255);
     }
     RoboWeb::Document transferred = Parse(

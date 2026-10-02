@@ -76,7 +76,15 @@ public:
             return NextEndTag(tagLine, tagColumn);
         }
         if (source[index] == '?') {
-            diagnostics.Warning(path, tagLine, tagColumn, "processing instruction is ignored");
+            TakeChar(nullptr);
+            std::string target;
+            while (index < source.size() && IsNameChar(source[index])) {
+                target.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(source[index]))));
+                TakeChar(nullptr);
+            }
+            if (target != "xml") {
+                diagnostics.Warning(path, tagLine, tagColumn, "processing instruction is ignored");
+            }
             SkipUntil('>');
             Token empty;
             empty.kind = TokenKind::Comment;

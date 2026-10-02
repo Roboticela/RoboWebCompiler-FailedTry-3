@@ -1102,12 +1102,35 @@ struct Engine {
         if (text[index] == '+' || text[index] == '-') {
             ++index;
         }
-        bool digits = false;
-        while (index < text.size() && ((text[index] >= '0' && text[index] <= '9') || text[index] == '.')) {
-            digits = true;
-            ++index;
+        bool sawDigit = false;
+        bool sawDot = false;
+        while (index < text.size()) {
+            const char character = text[index];
+            if (character >= '0' && character <= '9') {
+                sawDigit = true;
+                ++index;
+                continue;
+            }
+            if (character == '.' && !sawDot) {
+                sawDot = true;
+                ++index;
+                continue;
+            }
+            break;
         }
-        if (!digits) {
+        if (index < text.size() && (text[index] == 'e' || text[index] == 'E')) {
+            std::size_t exponent = index + 1;
+            if (exponent < text.size() && (text[exponent] == '+' || text[exponent] == '-')) {
+                ++exponent;
+            }
+            if (exponent < text.size() && text[exponent] >= '0' && text[exponent] <= '9') {
+                index = exponent + 1;
+                while (index < text.size() && text[index] >= '0' && text[index] <= '9') {
+                    ++index;
+                }
+            }
+        }
+        if (!sawDigit) {
             index = start;
             return false;
         }
@@ -1140,25 +1163,67 @@ struct Engine {
         }
     }
 
+    struct SvgSpace;
+
     void PaintPath(const std::string& data, int originX, int originY, Color fill, Color stroke, bool fixed, int thickness = 1,
-        double scaleX = 1, double scaleY = 1, double minX = 0, double minY = 0, bool evenOdd = false) {
+        double scaleX = 1, double scaleY = 1, double minX = 0, double minY = 0, bool evenOdd = false, Node* gradientNode = nullptr,
+        const SvgSpace* gradientSpace = nullptr) {
         std::vector<SvgPoint> figure;
+        std::vector<std::vector<SvgPoint>> contours;
         double currentX = 0;
         double currentY = 0;
         double startX = 0;
         double startY = 0;
+        double lastControlX = 0;
+        double lastControlY = 0;
+        bool lastWasCubic = false;
         std::size_t index = 0;
         char command = 0;
+        auto mapPoint = [&](const SvgPoint& point) {
+            double px = (point.x - minX) * scaleX;
+            double py = (point.y - minY) * scaleY;
+            if (gradientSpace != nullptr && gradientSpace->rotateDeg != 0) {
+                const double radians = gradientSpace->rotateDeg * std::acos(-1.0) / 180.0;
+                const double centerX = (gradientSpace->rotateX - minX) * scaleX;
+                const double centerY = (gradientSpace->rotateY - minY) * scaleY;
+                const double dx = px - centerX;
+                const double dy = py - centerY;
+                px = centerX + dx * std::cos(radians) - dy * std::sin(radians);
+                py = centerY + dx * std::sin(radians) + dy * std::cos(radians);
+            }
+            return SvgPoint{px, py};
+        };
         auto finish = [&](bool close) {
             std::vector<SvgPoint> mapped;
             for (const SvgPoint& point : figure) {
-                mapped.push_back(SvgPoint{(point.x - minX) * scaleX, (point.y - minY) * scaleY});
+                mapped.push_back(mapPoint(point));
             }
-            if (fill.alpha != 0) {
-                FillPolygon(mapped, originX, originY, fill, fixed, evenOdd);
+            if (mapped.size() >= 3) {
+                contours.push_back(mapped);
             }
             if (stroke.alpha != 0) {
                 StrokePolyline(mapped, originX, originY, stroke, fixed, close, thickness);
+            } else if (gradientNode != nullptr && gradientSpace != nullptr && !gradientSpace->strokeUrl.empty() && mapped.size() >= 2) {
+                int left = 1000000;
+                int top = 1000000;
+                int right = -1000000;
+                int bottom = -1000000;
+                for (const SvgPoint& point : mapped) {
+                    left = std::min(left, static_cast<int>(std::floor(point.x)));
+                    top = std::min(top, static_cast<int>(std::floor(point.y)));
+                    right = std::max(right, static_cast<int>(std::ceil(point.x)));
+                    bottom = std::max(bottom, static_cast<int>(std::ceil(point.y)));
+                }
+                for (std::size_t pointIndex = 1; pointIndex < mapped.size(); ++pointIndex) {
+                    const int x0 = originX + static_cast<int>(mapped[pointIndex - 1].x);
+                    const int y0 = originY + static_cast<int>(mapped[pointIndex - 1].y);
+                    const int x1 = originX + static_cast<int>(mapped[pointIndex].x);
+                    const int y1 = originY + static_cast<int>(mapped[pointIndex].y);
+                    Color segment = stroke;
+                    if (GradientColorAt(*gradientNode, *gradientSpace, originX + left, originY + top, std::max(1, right - left), std::max(1, bottom - top), (x0 + x1) / 2, (y0 + y1) / 2, segment, gradientSpace->strokeUrl)) {
+                        StrokeLine(x0, y0, x1, y1, segment, fixed, std::max(1, thickness));
+                    }
+                }
             }
             figure.clear();
         };
@@ -1186,6 +1251,7 @@ struct Engine {
                 }
                 currentX = startX;
                 currentY = startY;
+                lastWasCubic = false;
                 command = 0;
                 continue;
             }
@@ -1201,6 +1267,7 @@ struct Engine {
                     currentY = relative ? currentY + first : first;
                 }
                 figure.push_back(SvgPoint{currentX, currentY});
+                lastWasCubic = false;
                 continue;
             }
             if (operation == 'A') {
@@ -1215,6 +1282,7 @@ struct Engine {
                 currentX = relative ? currentX + first : first;
                 currentY = relative ? currentY + second : second;
                 figure.push_back(SvgPoint{currentX, currentY});
+                lastWasCubic = false;
                 continue;
             }
             if (!ReadSvgNumber(data, index, first) || !ReadSvgNumber(data, index, second)) {
@@ -1236,6 +1304,7 @@ struct Engine {
                 currentX = x;
                 currentY = y;
                 figure.push_back(SvgPoint{currentX, currentY});
+                lastWasCubic = false;
                 continue;
             }
             double third = 0;
@@ -1243,12 +1312,28 @@ struct Engine {
             if (!ReadSvgNumber(data, index, third) || !ReadSvgNumber(data, index, fourth)) {
                 break;
             }
-            if (operation == 'Q' || operation == 'S') {
+            if (operation == 'Q') {
                 const double x = relative ? currentX + third : third;
                 const double y = relative ? currentY + fourth : fourth;
                 currentX = x;
                 currentY = y;
                 figure.push_back(SvgPoint{currentX, currentY});
+                lastWasCubic = false;
+                continue;
+            }
+            if (operation == 'S') {
+                const double controlX = relative ? currentX + first : first;
+                const double controlY = relative ? currentY + second : second;
+                const double x = relative ? currentX + third : third;
+                const double y = relative ? currentY + fourth : fourth;
+                const double reflectedX = lastWasCubic ? currentX * 2 - lastControlX : currentX;
+                const double reflectedY = lastWasCubic ? currentY * 2 - lastControlY : currentY;
+                AddCurve(figure, currentX, currentY, reflectedX, reflectedY, controlX, controlY, x, y);
+                lastControlX = controlX;
+                lastControlY = controlY;
+                lastWasCubic = true;
+                currentX = x;
+                currentY = y;
                 continue;
             }
             double fifth = 0;
@@ -1263,11 +1348,34 @@ struct Engine {
             const double x = relative ? currentX + fifth : fifth;
             const double y = relative ? currentY + sixth : sixth;
             AddCurve(figure, currentX, currentY, x1, y1, x2, y2, x, y);
+            lastControlX = x2;
+            lastControlY = y2;
+            lastWasCubic = true;
             currentX = x;
             currentY = y;
         }
         if (figure.size() > 2) {
             finish(false);
+        }
+        if (contours.empty()) {
+            return;
+        }
+        int boxLeft = 1000000;
+        int boxTop = 1000000;
+        int boxRight = -1000000;
+        int boxBottom = -1000000;
+        for (const std::vector<SvgPoint>& contour : contours) {
+            for (const SvgPoint& point : contour) {
+                boxLeft = std::min(boxLeft, static_cast<int>(std::floor(point.x)));
+                boxTop = std::min(boxTop, static_cast<int>(std::floor(point.y)));
+                boxRight = std::max(boxRight, static_cast<int>(std::ceil(point.x)));
+                boxBottom = std::max(boxBottom, static_cast<int>(std::ceil(point.y)));
+            }
+        }
+        if (fill.alpha != 0) {
+            FillContours(contours, originX, originY, fill, fixed, evenOdd);
+        } else if (gradientNode != nullptr && gradientSpace != nullptr && !gradientSpace->fillUrl.empty() && boxRight > boxLeft && boxBottom > boxTop) {
+            FillContoursGradient(contours, originX, originY, *gradientNode, *gradientSpace, originX + boxLeft, originY + boxTop, boxRight - boxLeft, boxBottom - boxTop, fixed, evenOdd);
         }
     }
 
@@ -1285,6 +1393,7 @@ struct Engine {
         Color fill{0, 0, 0, 255};
         Color stroke{0, 0, 0, 0};
         std::string fillUrl;
+        std::string strokeUrl;
         bool hidden = false;
         bool clipped = false;
         int clipX = 0;
@@ -1305,8 +1414,26 @@ struct Engine {
         int textRendering = 0;
     };
 
-    Color WithOpacity(Color color, double opacity) {
-        color.alpha = static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, static_cast<double>(color.alpha) * opacity)));
+    __attribute__((noinline, noclone, cdecl)) Color WithOpacity(Color color, double opacity) {
+        if (!(opacity > 0)) {
+            color.alpha = 0;
+            return color;
+        }
+        if (opacity >= 1) {
+            return color;
+        }
+        int thousandths = 0;
+        if (opacity > 0 && opacity < 1) {
+            thousandths = static_cast<int>(opacity * 1000.0);
+        }
+        if (thousandths < 0) {
+            thousandths = 0;
+        }
+        if (thousandths > 1000) {
+            thousandths = 1000;
+        }
+        const int alpha = static_cast<int>(color.alpha) * thousandths / 1000;
+        color.alpha = static_cast<std::uint8_t>(alpha < 0 ? 0 : (alpha > 255 ? 255 : alpha));
         return color;
     }
 
@@ -1401,10 +1528,16 @@ struct Engine {
         const std::string strokeText = ToLowerAscii(AttributeValue(node, "stroke"));
         if (strokeText == "currentcolor") {
             space.stroke = space.currentColor;
+            space.strokeUrl.clear();
         } else if (strokeText == "none") {
             space.stroke.alpha = 0;
-        } else if (!strokeText.empty() && strokeText.find("url(") == std::string::npos) {
+            space.strokeUrl.clear();
+        } else if (strokeText.find("url(") != std::string::npos) {
+            space.strokeUrl = strokeText;
+            space.stroke.alpha = 0;
+        } else if (!strokeText.empty()) {
             ParseColor(strokeText, space.stroke);
+            space.strokeUrl.clear();
         }
         if (!AttributeValue(node, "stroke-width").empty()) {
             space.strokeWidth = std::atof(AttributeValue(node, "stroke-width").c_str());
@@ -1661,8 +1794,11 @@ struct Engine {
         space.scaleY = space.pixelHeight / boxHeight;
         space.minX = minX;
         space.minY = minY;
-        const std::string aspect = ToLowerAscii(AttributeValue(node, "preserveaspectratio"));
-        if (!aspect.empty() && aspect.find("none") == std::string::npos) {
+        std::string aspect = ToLowerAscii(AttributeValue(node, "preserveaspectratio"));
+        if (aspect.empty()) {
+            aspect = "xmidymid meet";
+        }
+        if (aspect.find("none") == std::string::npos) {
             const bool slice = aspect.find("slice") != std::string::npos;
             const double uniform = slice ? std::max(space.scaleX, space.scaleY) : std::min(space.scaleX, space.scaleY);
             const double extraX = space.pixelWidth - boxWidth * uniform;
@@ -1779,17 +1915,48 @@ struct Engine {
         }
     }
 
-    Color SampleStops(const std::vector<SvgStop>& stops, double t, bool linear) {
+    int ScaleByte(double value) {
+        if (!(value > 0)) {
+            return 0;
+        }
+        if (value >= 1) {
+            return 255;
+        }
+        return static_cast<int>(value * 255.0 + 0.5);
+    }
+
+    double SrgbToLinear(int channel) {
+        const double encoded = static_cast<double>(channel) / 255.0;
+        if (encoded <= 0.04045) {
+            return encoded / 12.92;
+        }
+        return std::pow((encoded + 0.055) / 1.055, 2.4);
+    }
+
+    double LinearToSrgb(double linear) {
+        if (!(linear > 0)) {
+            return 0;
+        }
+        if (linear >= 1) {
+            return 1;
+        }
+        if (linear <= 0.0031308) {
+            return linear * 12.92;
+        }
+        return 1.055 * std::pow(linear, 1.0 / 2.4) - 0.055;
+    }
+
+    __attribute__((noinline, noclone, cdecl)) Color SampleStops(const std::vector<SvgStop>& stops, double t, bool linear) {
         if (stops.empty()) {
             return Color{0, 0, 0, 255};
         }
-        if (t < 0) {
+        if (!(t > 0)) {
             t = 0;
         }
         if (t > 1) {
             t = 1;
         }
-        if (t <= stops.front().offset) {
+        if (stops.size() == 1 || t <= stops.front().offset) {
             return stops.front().color;
         }
         if (t >= stops.back().offset) {
@@ -1802,27 +1969,319 @@ struct Engine {
             const SvgStop& left = stops[index - 1];
             const SvgStop& right = stops[index];
             const double span = right.offset - left.offset;
-            const double mix = span <= 0 ? 0 : (t - left.offset) / span;
-            auto mixChannel = [&](int start, int end) {
-                if (!linear) {
-                    return static_cast<int>(start + (end - start) * mix);
-                }
-                auto decode = [](int value) {
-                    const double encoded = value / 255.0;
-                    return encoded <= 0.04045 ? encoded / 12.92 : std::pow((encoded + 0.055) / 1.055, 2.4);
-                };
-                const double decoded = decode(start) + (decode(end) - decode(start)) * mix;
-                const double encoded = decoded <= 0.0031308 ? 12.92 * decoded : 1.055 * std::pow(decoded, 1.0 / 2.4) - 0.055;
-                return static_cast<int>(std::max(0.0, std::min(255.0, encoded * 255.0 + 0.5)));
-            };
+            double mix = span <= 0 ? 0 : (t - left.offset) / span;
+            if (!(mix > 0)) {
+                mix = 0;
+            }
+            if (mix > 1) {
+                mix = 1;
+            }
+            if (!linear) {
+                const int weight = mix <= 0 ? 0 : (mix >= 1 ? 256 : static_cast<int>(mix * 256.0));
+                Color color;
+                color.red = static_cast<std::uint8_t>(left.color.red + (static_cast<int>(right.color.red) - left.color.red) * weight / 256);
+                color.green = static_cast<std::uint8_t>(left.color.green + (static_cast<int>(right.color.green) - left.color.green) * weight / 256);
+                color.blue = static_cast<std::uint8_t>(left.color.blue + (static_cast<int>(right.color.blue) - left.color.blue) * weight / 256);
+                color.alpha = static_cast<std::uint8_t>(left.color.alpha + (static_cast<int>(right.color.alpha) - left.color.alpha) * weight / 256);
+                return color;
+            }
             Color color;
-            color.red = static_cast<std::uint8_t>(mixChannel(left.color.red, right.color.red));
-            color.green = static_cast<std::uint8_t>(mixChannel(left.color.green, right.color.green));
-            color.blue = static_cast<std::uint8_t>(mixChannel(left.color.blue, right.color.blue));
-            color.alpha = static_cast<std::uint8_t>(left.color.alpha + (right.color.alpha - left.color.alpha) * mix);
+            color.red = static_cast<std::uint8_t>(ScaleByte(LinearToSrgb(SrgbToLinear(left.color.red) * (1 - mix) + SrgbToLinear(right.color.red) * mix)));
+            color.green = static_cast<std::uint8_t>(ScaleByte(LinearToSrgb(SrgbToLinear(left.color.green) * (1 - mix) + SrgbToLinear(right.color.green) * mix)));
+            color.blue = static_cast<std::uint8_t>(ScaleByte(LinearToSrgb(SrgbToLinear(left.color.blue) * (1 - mix) + SrgbToLinear(right.color.blue) * mix)));
+            const int weight = mix <= 0 ? 0 : (mix >= 1 ? 256 : static_cast<int>(mix * 256.0));
+            color.alpha = static_cast<std::uint8_t>(left.color.alpha + (static_cast<int>(right.color.alpha) - left.color.alpha) * weight / 256);
             return color;
         }
         return stops.back().color;
+    }
+
+    struct GradientPaint {
+        bool radial = false;
+        bool linearRgb = false;
+        double opacity = 1;
+        std::string spread;
+        std::vector<SvgStop> stops;
+        double startX = 0;
+        double startY = 0;
+        double deltaX = 0;
+        double deltaY = 0;
+        double length = 0;
+        double centerX = 0;
+        double centerY = 0;
+        double radiusX = 1;
+        double radiusY = 1;
+        double focusX = 0;
+        double focusY = 0;
+        double focalRadius = 0;
+        bool adjustFocus = false;
+        bool clipped = false;
+        int clipX = 0;
+        int clipY = 0;
+        int clipWidth = 0;
+        int clipHeight = 0;
+    };
+
+    bool PrepareGradient(Node& shape, const SvgSpace& space, const std::string& paintUrl, int x, int y, int width, int height, GradientPaint& paint) {
+        const std::string id = SvgPaintId(paintUrl.empty() ? space.fillUrl : paintUrl);
+        if (id.empty() || width <= 0 || height <= 0) {
+            return false;
+        }
+        Node* root = &shape;
+        while (root->parent != nullptr) {
+            root = root->parent;
+        }
+        Node* gradient = FindSvgById(*root, id);
+        const std::string gradientTag = gradient == nullptr ? std::string() : ToLowerAscii(gradient->tagName);
+        if (gradient == nullptr || (gradientTag != "lineargradient" && gradientTag != "radialgradient")) {
+            return false;
+        }
+        CollectStops(*gradient, paint.stops, 0);
+        paint.linearRgb = ToLowerAscii(AttributeValue(*gradient, "color-interpolation")) == "linearrgb";
+        paint.opacity = space.opacity * space.fillOpacity;
+        paint.clipped = space.clipped;
+        paint.clipX = space.clipX;
+        paint.clipY = space.clipY;
+        paint.clipWidth = space.clipWidth;
+        paint.clipHeight = space.clipHeight;
+        const bool objectBox = ToLowerAscii(AttributeValue(*gradient, "gradientunits")) != "userspaceonuse";
+        if (gradientTag == "radialgradient") {
+            paint.radial = true;
+            const double cx = AttributeValue(*gradient, "cx").empty() ? 0.5 : SvgOffset(AttributeValue(*gradient, "cx"));
+            const double cy = AttributeValue(*gradient, "cy").empty() ? 0.5 : SvgOffset(AttributeValue(*gradient, "cy"));
+            const double radius = AttributeValue(*gradient, "r").empty() ? 0.5 : SvgOffset(AttributeValue(*gradient, "r"));
+            paint.centerX = objectBox ? x + cx * width : SvgX(space, cx);
+            paint.centerY = objectBox ? y + cy * height : SvgY(space, cy);
+            paint.radiusX = std::max(0.001, objectBox ? radius * width : radius * space.scaleX);
+            paint.radiusY = std::max(0.001, objectBox ? radius * height : radius * space.scaleY);
+            const double focalX = AttributeValue(*gradient, "fx").empty() ? paint.centerX : (objectBox ? x + SvgOffset(AttributeValue(*gradient, "fx")) * width : SvgX(space, SvgOffset(AttributeValue(*gradient, "fx"))));
+            const double focalY = AttributeValue(*gradient, "fy").empty() ? paint.centerY : (objectBox ? y + SvgOffset(AttributeValue(*gradient, "fy")) * height : SvgY(space, SvgOffset(AttributeValue(*gradient, "fy"))));
+            paint.focusX = (focalX - paint.centerX) / paint.radiusX;
+            paint.focusY = (focalY - paint.centerY) / paint.radiusY;
+            if (!AttributeValue(*gradient, "fr").empty() && radius > 0) {
+                paint.adjustFocus = true;
+                paint.focalRadius = SvgOffset(AttributeValue(*gradient, "fr")) / radius;
+            }
+            return true;
+        }
+        const double x1 = AttributeValue(*gradient, "x1").empty() ? 0 : SvgOffset(AttributeValue(*gradient, "x1"));
+        const double y1 = AttributeValue(*gradient, "y1").empty() ? 0 : SvgOffset(AttributeValue(*gradient, "y1"));
+        const double x2 = AttributeValue(*gradient, "x2").empty() ? (objectBox ? 1 : static_cast<double>(width)) : SvgOffset(AttributeValue(*gradient, "x2"));
+        const double y2 = AttributeValue(*gradient, "y2").empty() ? 0 : SvgOffset(AttributeValue(*gradient, "y2"));
+        paint.startX = objectBox ? x + x1 * width : SvgX(space, x1);
+        paint.startY = objectBox ? y + y1 * height : SvgY(space, y1);
+        double endX = objectBox ? x + x2 * width : SvgX(space, x2);
+        double endY = objectBox ? y + y2 * height : SvgY(space, y2);
+        const std::string gradientTransform = AttributeValue(*gradient, "gradienttransform");
+        const std::size_t gradientScale = gradientTransform.find("scale");
+        if (gradientScale != std::string::npos) {
+            std::size_t index = gradientTransform.find('(', gradientScale);
+            double scaleX = 1;
+            double scaleY = 1;
+            if (index != std::string::npos) {
+                ++index;
+                if (ReadSvgNumber(gradientTransform, index, scaleX)) {
+                    scaleY = scaleX;
+                    ReadSvgNumber(gradientTransform, index, scaleY);
+                    endX = paint.startX + (endX - paint.startX) * scaleX;
+                    endY = paint.startY + (endY - paint.startY) * scaleY;
+                }
+            }
+        }
+        paint.deltaX = endX - paint.startX;
+        paint.deltaY = endY - paint.startY;
+        paint.length = paint.deltaX * paint.deltaX + paint.deltaY * paint.deltaY;
+        paint.spread = ToLowerAscii(AttributeValue(*gradient, "spreadmethod"));
+        return true;
+    }
+
+    Color SampleGradient(const GradientPaint& paint, int pixelX, int pixelY) {
+        if (paint.clipped && (pixelX < paint.clipX || pixelY < paint.clipY || pixelX >= paint.clipX + paint.clipWidth || pixelY >= paint.clipY + paint.clipHeight)) {
+            return Color{0, 0, 0, 0};
+        }
+        double offset = 0;
+        if (paint.radial) {
+            const double pointX = (pixelX - paint.centerX) / paint.radiusX;
+            const double pointY = (pixelY - paint.centerY) / paint.radiusY;
+            const double vectorX = pointX - paint.focusX;
+            const double vectorY = pointY - paint.focusY;
+            const double quadraticA = paint.focusX * paint.focusX + paint.focusY * paint.focusY - 1;
+            const double quadraticB = 2 * (paint.focusX * vectorX + paint.focusY * vectorY);
+            const double quadraticC = vectorX * vectorX + vectorY * vectorY;
+            const double discriminant = quadraticB * quadraticB - 4 * quadraticA * quadraticC;
+            if (std::abs(quadraticA) < 0.000001) {
+                offset = std::abs(quadraticB) < 0.000001 ? 0 : -quadraticC / quadraticB;
+            } else if (discriminant >= 0) {
+                offset = (-quadraticB - std::sqrt(discriminant)) / (2 * quadraticA);
+                const double other = (-quadraticB + std::sqrt(discriminant)) / (2 * quadraticA);
+                if (offset < 0 || (other >= 0 && other < offset)) {
+                    offset = other;
+                }
+            }
+            if (paint.adjustFocus) {
+                if (paint.focalRadius >= 1) {
+                    offset = offset <= 1 ? 0 : offset;
+                } else if (paint.focalRadius > 0) {
+                    offset = (offset - paint.focalRadius) / (1 - paint.focalRadius);
+                }
+            }
+        } else if (paint.length > 0) {
+            offset = ((pixelX - paint.startX) * paint.deltaX + (pixelY - paint.startY) * paint.deltaY) / paint.length;
+            if (paint.spread == "repeat") {
+                offset -= std::floor(offset);
+            } else if (paint.spread == "reflect") {
+                if (offset < 0) {
+                    offset = -offset;
+                }
+                const double period = std::floor(offset);
+                const double fraction = offset - period;
+                int turns = 0;
+                if (period > 0 && period < 1000000) {
+                    turns = static_cast<int>(period);
+                }
+                offset = turns % 2 == 0 ? fraction : 1 - fraction;
+            }
+        }
+        if (!(offset >= 0)) {
+            offset = 0;
+        }
+        if (offset > 1) {
+            offset = 1;
+        }
+        return WithOpacity(SampleStops(paint.stops, offset, paint.linearRgb), paint.opacity);
+    }
+
+    bool GradientColorAt(Node& shape, const SvgSpace& space, int boxX, int boxY, int boxWidth, int boxHeight, int pixelX, int pixelY, Color& color, const std::string& paintUrl = "") {
+        GradientPaint paint;
+        if (!PrepareGradient(shape, space, paintUrl, boxX, boxY, boxWidth, boxHeight, paint)) {
+            return false;
+        }
+        color = SampleGradient(paint, pixelX, pixelY);
+        return color.alpha != 0;
+    }
+
+    void FillContours(const std::vector<std::vector<SvgPoint>>& contours, int originX, int originY, Color color, bool fixed, bool evenOdd) {
+        if (color.alpha == 0) {
+            return;
+        }
+        int minY = 1000000;
+        int maxY = -1000000;
+        for (const std::vector<SvgPoint>& contour : contours) {
+            for (const SvgPoint& point : contour) {
+                minY = std::min(minY, static_cast<int>(std::floor(point.y)));
+                maxY = std::max(maxY, static_cast<int>(std::ceil(point.y)));
+            }
+        }
+        for (int row = minY; row <= maxY; ++row) {
+            struct Hit {
+                int x = 0;
+                int wind = 0;
+            };
+            std::vector<Hit> hits;
+            for (const std::vector<SvgPoint>& contour : contours) {
+                if (contour.size() < 2) {
+                    continue;
+                }
+                for (std::size_t index = 0; index < contour.size(); ++index) {
+                    const SvgPoint& start = contour[index];
+                    const SvgPoint& end = contour[(index + 1) % contour.size()];
+                    const bool crosses = (start.y <= row && end.y > row) || (end.y <= row && start.y > row);
+                    if (!crosses || start.y == end.y) {
+                        continue;
+                    }
+                    const double distance = (static_cast<double>(row) + 0.5 - start.y) / (end.y - start.y);
+                    const int x = static_cast<int>(start.x + distance * (end.x - start.x));
+                    hits.push_back(Hit{x, end.y > start.y ? 1 : -1});
+                }
+            }
+            std::sort(hits.begin(), hits.end(), [](const Hit& left, const Hit& right) { return left.x < right.x; });
+            if (evenOdd) {
+                for (std::size_t index = 0; index + 1 < hits.size(); index += 2) {
+                    if (hits[index + 1].x > hits[index].x) {
+                        Fill(originX + hits[index].x, originY + row, hits[index + 1].x - hits[index].x, 1, color, fixed);
+                    }
+                }
+                continue;
+            }
+            int wind = 0;
+            int cursor = hits.empty() ? 0 : hits.front().x;
+            for (const Hit& hit : hits) {
+                if (wind != 0 && hit.x > cursor) {
+                    Fill(originX + cursor, originY + row, hit.x - cursor, 1, color, fixed);
+                }
+                wind += hit.wind;
+                cursor = hit.x;
+            }
+        }
+    }
+
+    void FillContoursGradient(const std::vector<std::vector<SvgPoint>>& contours, int originX, int originY, Node& shape, const SvgSpace& space, int boxX, int boxY, int boxWidth, int boxHeight, bool fixed, bool evenOdd) {
+        GradientPaint paint;
+        if (!PrepareGradient(shape, space, "", boxX, boxY, boxWidth, boxHeight, paint)) {
+            return;
+        }
+        int minY = 1000000;
+        int maxY = -1000000;
+        for (const std::vector<SvgPoint>& contour : contours) {
+            for (const SvgPoint& point : contour) {
+                minY = std::min(minY, static_cast<int>(std::floor(point.y)));
+                maxY = std::max(maxY, static_cast<int>(std::ceil(point.y)));
+            }
+        }
+        for (int row = minY; row <= maxY; ++row) {
+            struct Hit {
+                int x = 0;
+                int wind = 0;
+            };
+            std::vector<Hit> hits;
+            for (const std::vector<SvgPoint>& contour : contours) {
+                if (contour.size() < 2) {
+                    continue;
+                }
+                for (std::size_t index = 0; index < contour.size(); ++index) {
+                    const SvgPoint& start = contour[index];
+                    const SvgPoint& end = contour[(index + 1) % contour.size()];
+                    const bool crosses = (start.y <= row && end.y > row) || (end.y <= row && start.y > row);
+                    if (!crosses || start.y == end.y) {
+                        continue;
+                    }
+                    const double distance = (static_cast<double>(row) + 0.5 - start.y) / (end.y - start.y);
+                    hits.push_back(Hit{static_cast<int>(start.x + distance * (end.x - start.x)), end.y > start.y ? 1 : -1});
+                }
+            }
+            std::sort(hits.begin(), hits.end(), [](const Hit& left, const Hit& right) { return left.x < right.x; });
+            auto paintSpan = [&](int left, int right) {
+                int runStart = left;
+                Color run = SampleGradient(paint, originX + left, originY + row);
+                for (int column = left + 1; column <= right; ++column) {
+                    const Color next = column == right ? run : SampleGradient(paint, originX + column, originY + row);
+                    if (column == right || next.red != run.red || next.green != run.green || next.blue != run.blue || next.alpha != run.alpha) {
+                        if (run.alpha != 0) {
+                            Fill(originX + runStart, originY + row, column - runStart, 1, run, fixed);
+                        }
+                        runStart = column;
+                        run = next;
+                    }
+                }
+            };
+            if (evenOdd) {
+                for (std::size_t index = 0; index + 1 < hits.size(); index += 2) {
+                    if (hits[index + 1].x > hits[index].x) {
+                        paintSpan(hits[index].x, hits[index + 1].x);
+                    }
+                }
+                continue;
+            }
+            int wind = 0;
+            int cursor = hits.empty() ? 0 : hits.front().x;
+            for (const Hit& hit : hits) {
+                if (wind != 0 && hit.x > cursor) {
+                    paintSpan(cursor, hit.x);
+                }
+                wind += hit.wind;
+                cursor = hit.x;
+            }
+        }
     }
 
     bool FillLinearGradient(Node& node, const SvgSpace& space, int x, int y, int width, int height, bool fixed) {
@@ -3214,7 +3673,7 @@ struct Engine {
         const Color fill = WithOpacity(space.fill, space.opacity * space.fillOpacity);
         const Color stroke = WithOpacity(space.stroke, space.opacity * space.strokeOpacity);
         const bool fixedStroke = ToLowerAscii(AttributeValue(node, "vector-effect")) == "non-scaling-stroke";
-        const int thickness = std::max(1, static_cast<int>(space.strokeWidth * (fixedStroke ? 1 : std::max(space.scaleX, space.scaleY)) + 0.5));
+        const int thickness = space.strokeWidth <= 0 ? 0 : std::max(1, static_cast<int>(space.strokeWidth * (fixedStroke ? 1 : std::max(space.scaleX, space.scaleY)) + 0.5));
         if (!space.hidden && tag == "rect") {
             SvgFilter filterEffect;
             const bool filtered = ResolveFilter(node, space, filterEffect);
@@ -3636,6 +4095,26 @@ struct Engine {
             }
             RememberSvgLink(node, x, y, width, height, fixed);
             }
+        } else if (!space.hidden && (tag == "circle" || tag == "ellipse") &&
+                   (space.rotateDeg != 0 || !space.fillUrl.empty() || !space.strokeUrl.empty())) {
+            const double centerX = SvgReal(node, "cx", 0);
+            const double centerY = SvgReal(node, "cy", 0);
+            const double radiusX = tag == "circle" ? SvgReal(node, "r", 0) : SvgReal(node, "rx", 0);
+            const double radiusY = tag == "circle" ? radiusX : SvgReal(node, "ry", 0);
+            std::string outline = "M";
+            for (int step = 0; step <= 48; ++step) {
+                const double angle = step * 2.0 * std::acos(-1.0) / 48.0;
+                if (step == 1) {
+                    outline += "L";
+                }
+                outline += std::to_string(centerX + radiusX * std::cos(angle));
+                outline += ' ';
+                outline += std::to_string(centerY + radiusY * std::sin(angle));
+                outline += ' ';
+            }
+            outline += "Z";
+            PaintPath(outline, static_cast<int>(space.originX), static_cast<int>(space.originY), fill, stroke, fixed, thickness, space.scaleX, space.scaleY, space.minX, space.minY, false, &node, &space);
+            RememberSvgLink(node, SvgX(space, centerX - radiusX), SvgY(space, centerY - radiusY), SvgLength(space, radiusX * 2, true), SvgLength(space, radiusY * 2, false), fixed);
         } else if (!space.hidden && tag == "circle") {
             const double rawCx = space.originX + (SvgReal(node, "cx", 0) - space.minX) * space.scaleX;
             const double rawCy = space.originY + (SvgReal(node, "cy", 0) - space.minY) * space.scaleY;
@@ -3782,9 +4261,9 @@ struct Engine {
                 }
                 RememberSvgLink(node, minX, minY, maxX - minX, maxY - minY, fixed);
             }
-        } else if (!space.hidden && tag == "path") {
+        } else         if (!space.hidden && tag == "path") {
             PaintPath(AttributeValue(node, "d"), static_cast<int>(space.originX), static_cast<int>(space.originY), fill, stroke, fixed, thickness,
-                space.scaleX, space.scaleY, space.minX, space.minY, space.fillEvenOdd);
+                space.scaleX, space.scaleY, space.minX, space.minY, space.fillEvenOdd, &node, &space);
         } else if (!space.hidden && tag == "image") {
             std::string href = AttributeValue(node, "href");
             if (href.empty()) {
