@@ -18,6 +18,10 @@ void DrawTextPx(
     int fontSizePx,
     Color color,
     bool bold,
-    bool italic);
+    bool italic,
+    int clipLeft,
+    int clipTop,
+    int clipRight,
+    int clipBottom);
 
 }

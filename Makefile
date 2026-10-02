@@ -11,7 +11,8 @@ RUNTIME_OBJS := \
 	$(OBJDIR)/ImageDecoder.o \
 	$(OBJDIR)/Renderer.o \
 	$(OBJDIR)/Interaction.o \
-	$(OBJDIR)/HostLoop.o
+	$(OBJDIR)/HostLoop.o \
+	$(OBJDIR)/Win32Host.o
 
 COMPILER_OBJS := \
 	$(OBJDIR)/Diagnostics.o \
@@ -39,6 +40,7 @@ TEST_OBJS := \
 	$(OBJDIR)/Renderer.o \
 	$(OBJDIR)/Interaction.o \
 	$(OBJDIR)/HostLoop.o \
+	$(OBJDIR)/Win32Host.o \
 	$(OBJDIR)/CodeGenerator.o \
 	$(OBJDIR)/TestMain.o
 
@@ -53,7 +55,7 @@ Build/RoboWebCompiler.exe: $(COMPILER_OBJS)
 	$(CXX) $(CXXFLAGS) $(COMPILER_OBJS) -o $@
 
 Build/RoboWebTests.exe: $(TEST_OBJS)
-	$(CXX) $(CXXFLAGS) $(TEST_OBJS) -o $@
+	$(CXX) $(CXXFLAGS) $(TEST_OBJS) -o $@ -lgdi32 -luser32 -lcomdlg32
 
 $(OBJDIR):
 	if not exist Build\Objects mkdir Build\Objects
@@ -98,6 +100,9 @@ $(OBJDIR)/Interaction.o: Source/Runtime/Interaction.cpp | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(OBJDIR)/HostLoop.o: Source/Runtime/HostLoop.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(OBJDIR)/Win32Host.o: Source/Runtime/Win32Host.cpp | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(OBJDIR)/CodeGenerator.o: Source/Compiler/CodeGenerator.cpp | $(OBJDIR)

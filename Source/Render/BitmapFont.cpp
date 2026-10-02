@@ -146,8 +146,20 @@ int BaselineOffset(int fontSizePx, bool bold, bool italic) {
     return (line - content) / 2 + static_cast<int>(ascent * scale + 0.5f);
 }
 
-void BlendCoverage(std::uint8_t* pixels, int frameWidth, int frameHeight, int x, int y, Color color, int coverage) {
-    if (coverage <= 0 || x < 0 || y < 0 || x >= frameWidth || y >= frameHeight) {
+void BlendCoverage(
+    std::uint8_t* pixels,
+    int frameWidth,
+    int frameHeight,
+    int x,
+    int y,
+    Color color,
+    int coverage,
+    int clipLeft,
+    int clipTop,
+    int clipRight,
+    int clipBottom) {
+    if (coverage <= 0 || x < 0 || y < 0 || x >= frameWidth || y >= frameHeight || x < clipLeft || y < clipTop || x >= clipRight ||
+        y >= clipBottom) {
         return;
     }
     const std::size_t offset = static_cast<std::size_t>((y * frameWidth + x) * 4);
@@ -220,7 +232,11 @@ void DrawTextPx(
     int fontSizePx,
     Color color,
     bool bold,
-    bool italic) {
+    bool italic,
+    int clipLeft,
+    int clipTop,
+    int clipRight,
+    int clipBottom) {
     if (pixels == nullptr) {
         return;
     }
@@ -248,7 +264,8 @@ void DrawTextPx(
         for (int row = 0; row < glyph->height; ++row) {
             for (int column = 0; column < glyph->width; ++column) {
                 const int coverage = glyph->coverage[static_cast<std::size_t>(row * glyph->width + column)];
-                BlendCoverage(pixels, frameWidth, frameHeight, cursor + glyph->left + column, baseline + glyph->top + row, color, coverage);
+                BlendCoverage(pixels, frameWidth, frameHeight, cursor + glyph->left + column, baseline + glyph->top + row, color, coverage,
+                    clipLeft, clipTop, clipRight, clipBottom);
             }
         }
         cursor += glyph->advance;

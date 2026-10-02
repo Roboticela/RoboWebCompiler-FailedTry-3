@@ -130,6 +130,72 @@ std::string InputType(const Node& node) {
     return "text";
 }
 
+bool IsFieldEditor(const Node& node) {
+    if (node.kind == ElementKind::Textarea) {
+        return true;
+    }
+    if (node.kind != ElementKind::Input) {
+        return false;
+    }
+    const std::string type = InputType(node);
+    return type != "checkbox" && type != "radio" && type != "button" && type != "submit" && type != "reset" && type != "file" &&
+           type != "image" && type != "hidden" && type != "color" && type != "range";
+}
+
+std::string FieldEditedText(const Node& node) {
+    if (node.kind == ElementKind::Textarea) {
+        return node.liveValue;
+    }
+    if (node.kind == ElementKind::Input && InputType(node) == "password") {
+        return std::string(node.liveValue.size(), '*');
+    }
+    if (node.kind == ElementKind::Input) {
+        return node.liveValue;
+    }
+    return "";
+}
+
+struct FieldLine {
+    std::string text;
+    int start = 0;
+};
+
+std::vector<FieldLine> SplitFieldLines(const std::string& text) {
+    std::vector<FieldLine> lines;
+    int start = 0;
+    for (int index = 0; index <= static_cast<int>(text.size()); ++index) {
+        if (index == static_cast<int>(text.size()) || text[static_cast<std::size_t>(index)] == '\n') {
+            FieldLine line;
+            line.start = start;
+            line.text = text.substr(static_cast<std::size_t>(start), static_cast<std::size_t>(index - start));
+            lines.push_back(line);
+            start = index + 1;
+        }
+    }
+    if (lines.empty()) {
+        lines.push_back(FieldLine{});
+    }
+    return lines;
+}
+
+int NormalizeCaretByte(const std::string& text, int caretByte) {
+    if (caretByte < 0 || caretByte > static_cast<int>(text.size())) {
+        return static_cast<int>(text.size());
+    }
+    return caretByte;
+}
+
+int CaretLineIndex(const std::vector<FieldLine>& lines, int caretByte) {
+    for (int index = 0; index < static_cast<int>(lines.size()); ++index) {
+        const int end = lines[static_cast<std::size_t>(index)].start + static_cast<int>(lines[static_cast<std::size_t>(index)].text.size());
+        const bool last = index + 1 == static_cast<int>(lines.size());
+        if (last || caretByte <= end) {
+            return index;
+        }
+    }
+    return 0;
+}
+
 bool IsHidden(const Node& node) {
     if (node.type != Node::Type::Element) {
         return false;
@@ -225,15 +291,18 @@ std::string ControlLabel(Node& node) {
             return node.liveValue.empty() ? "" : node.liveValue;
         }
         if (type == "file") {
+            if (!node.liveValue.empty()) {
+                return node.liveValue;
+            }
             return "Choose file";
         }
-        if (type == "password") {
-            return std::string(node.liveValue.size(), '*');
+        if (type == "password" || IsFieldEditor(node)) {
+            return FieldEditedText(node);
         }
         return node.liveValue;
     }
     if (node.kind == ElementKind::Textarea) {
-        return node.liveValue;
+        return FieldEditedText(node);
     }
     if (node.kind == ElementKind::Button || node.kind == ElementKind::Geolocation) {
         if (node.kind == ElementKind::Geolocation) {
@@ -306,7 +375,8 @@ struct Engine {
         result->boxes.push_back(box);
     }
 
-    void Fill(int x, int y, int width, int height, Color color, bool fixed) {
+    void Fill(int x, int y, int width, int height, Color color, bool fixed, bool clipped = false, int clipX = 0, int clipY = 0,
+        int clipWidth = 0, int clipHeight = 0) {
         if (color.alpha == 0 || width <= 0 || height <= 0) {
             return;
         }
@@ -318,6 +388,11 @@ struct Engine {
         op.height = height;
         op.color = color;
         op.fixed = fixed;
+        op.clipped = clipped;
+        op.clipX = clipX;
+        op.clipY = clipY;
+        op.clipWidth = clipWidth;
+        op.clipHeight = clipHeight;
         result->ops.push_back(op);
     }
 
@@ -333,13 +408,15 @@ struct Engine {
         result->ops.push_back(op);
     }
 
-    void Text(int x, int y, const std::string& text, const ResolvedStyle& style, bool fixed) {
+    void Text(int x, int y, const std::string& text, const ResolvedStyle& style, bool fixed, bool clipped = false, int clipX = 0,
+        int clipY = 0, int clipWidth = 0, int clipHeight = 0) {
         if (text.empty()) {
             return;
         }
         if (style.mark || style.background.alpha != 0) {
             Color background = style.mark ? Color{255, 255, 0, 255} : style.background;
-            Fill(x, y, MeasureTextPx(text, style.fontSizePx, style.bold, style.italic), LineHeightPx(style.fontSizePx), background, fixed);
+            Fill(x, y, MeasureTextPx(text, style.fontSizePx, style.bold, style.italic), LineHeightPx(style.fontSizePx), background, fixed,
+                clipped, clipX, clipY, clipWidth, clipHeight);
         }
         DrawOp op;
         op.kind = DrawOp::Kind::Text;
@@ -354,7 +431,64 @@ struct Engine {
         op.underline = style.underline;
         op.strike = style.strike;
         op.fixed = fixed;
+        op.clipped = clipped;
+        op.clipX = clipX;
+        op.clipY = clipY;
+        op.clipWidth = clipWidth;
+        op.clipHeight = clipHeight;
         result->ops.push_back(op);
+    }
+
+    void PaintFieldValue(Node& node, int x, int y, int width, int height, const ResolvedStyle& style, bool fixed) {
+        const int padX = CONTROL_BORDER_PX + CONTROL_PADDING_X_PX;
+        const int padY = CONTROL_BORDER_PX + CONTROL_PADDING_Y_PX;
+        const int innerX = x + padX;
+        const int innerY = y + padY;
+        const int innerW = std::max(1, width - padX * 2);
+        const int innerH = std::max(1, height - padY * 2);
+        const bool editing = IsFieldEditor(node);
+        const std::string edited = editing ? FieldEditedText(node) : std::string();
+        bool placeholder = false;
+        std::string shown = ControlLabel(node);
+        if (editing && edited.empty() && HasAttribute(node, "placeholder")) {
+            shown = AttributeValue(node, "placeholder");
+            placeholder = true;
+        } else if (editing) {
+            shown = edited;
+        }
+        const bool focused = editing && document->focus == &node;
+        const int caretByte = focused && !placeholder ? NormalizeCaretByte(edited, document->caretOffset) : 0;
+        const int shift = editing ? TextScrollShift(placeholder ? std::string() : edited, caretByte, innerW, style.fontSizePx, style.bold, style.italic)
+                                  : 0;
+        ResolvedStyle paint = style;
+        if (placeholder) {
+            paint.color = Color{117, 117, 117, 255};
+        }
+        const std::vector<FieldLine> lines = SplitFieldLines(shown);
+        const int lineHeight = LineHeightPx(style.fontSizePx);
+        for (int index = 0; index < static_cast<int>(lines.size()); ++index) {
+            const int lineY = innerY + index * lineHeight;
+            if (lineY >= innerY + innerH) {
+                break;
+            }
+            Text(innerX - shift, lineY, lines[static_cast<std::size_t>(index)].text, paint, fixed, true, innerX, innerY, innerW, innerH);
+        }
+        if (!focused || !document->caretOn) {
+            return;
+        }
+        const std::vector<FieldLine> caretLines = SplitFieldLines(placeholder ? std::string() : edited);
+        const int lineIndex = CaretLineIndex(caretLines, caretByte);
+        const FieldLine& line = caretLines[static_cast<std::size_t>(lineIndex)];
+        int column = caretByte - line.start;
+        if (column < 0) {
+            column = 0;
+        }
+        if (column > static_cast<int>(line.text.size())) {
+            column = static_cast<int>(line.text.size());
+        }
+        const int prefix = MeasureTextPx(line.text.substr(0, static_cast<std::size_t>(column)), style.fontSizePx, style.bold, style.italic);
+        Fill(innerX - shift + prefix, innerY + lineIndex * lineHeight, 1, lineHeight, Color{0, 0, 0, 255}, fixed, true, innerX, innerY, innerW,
+            innerH);
     }
 
     int ReplacedSize(Node& node, const ResolvedStyle& style, int containing, int& width, int& height) {
@@ -573,23 +707,27 @@ struct Engine {
                 }
                 return;
             }
+            const bool hot = document->hover == &node;
+            const Color edge = document->focus == &node ? focus : (hot ? Color{0, 120, 215, 255} : border);
             Fill(x, y, width, height, Color{255, 255, 255, 255}, fixed);
-            Stroke(x, y, width, height, document->focus == &node ? focus : border, fixed);
-            const std::string shown = ControlLabel(node);
-            if (shown.empty() && HasAttribute(node, "placeholder")) {
-                ResolvedStyle placeholder = style;
-                placeholder.color = Color{117, 117, 117, 255};
-                Text(x + CONTROL_BORDER_PX + CONTROL_PADDING_X_PX, y + CONTROL_BORDER_PX + CONTROL_PADDING_Y_PX,
-                    AttributeValue(node, "placeholder"), placeholder, fixed);
-            } else {
-                Text(x + CONTROL_BORDER_PX + CONTROL_PADDING_X_PX, y + CONTROL_BORDER_PX + CONTROL_PADDING_Y_PX, shown, style, fixed);
-            }
+            Stroke(x, y, width, height, edge, fixed);
+            PaintFieldValue(node, x, y, width, height, style, fixed);
             return;
         }
-        if (node.kind == ElementKind::Textarea || node.kind == ElementKind::Select || node.kind == ElementKind::Button ||
-            node.kind == ElementKind::Geolocation) {
-            Fill(x, y, width, height, node.kind == ElementKind::Textarea ? Color{255, 255, 255, 255} : face, fixed);
-            Stroke(x, y, width, height, document->focus == &node ? focus : border, fixed);
+        if (node.kind == ElementKind::Textarea) {
+            const bool hot = document->hover == &node;
+            const Color edge = document->focus == &node ? focus : (hot ? Color{0, 120, 215, 255} : border);
+            Fill(x, y, width, height, Color{255, 255, 255, 255}, fixed);
+            Stroke(x, y, width, height, edge, fixed);
+            PaintFieldValue(node, x, y, width, height, style, fixed);
+            return;
+        }
+        if (node.kind == ElementKind::Select || node.kind == ElementKind::Button || node.kind == ElementKind::Geolocation) {
+            const bool hot = document->hover == &node;
+            const Color controlFace = hot ? Color{210, 227, 252, 255} : face;
+            const Color edge = document->focus == &node ? focus : (hot ? Color{0, 120, 215, 255} : border);
+            Fill(x, y, width, height, controlFace, fixed);
+            Stroke(x, y, width, height, edge, fixed);
             Text(x + CONTROL_BORDER_PX + CONTROL_PADDING_X_PX, y + CONTROL_BORDER_PX + CONTROL_PADDING_Y_PX, ControlLabel(node), style, fixed);
             if (node.kind == ElementKind::Select && node.selectExpanded) {
                 int optionY = y + height;
@@ -1113,6 +1251,62 @@ int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, in
 }
 
 }  // namespace
+
+std::string EditedControlText(const Node& node) {
+    return FieldEditedText(node);
+}
+
+int TextScrollShift(const std::string& text, int caretByte, int innerWidth, int fontSizePx, bool bold, bool italic) {
+    if (innerWidth < 1) {
+        innerWidth = 1;
+    }
+    const std::vector<FieldLine> lines = SplitFieldLines(text);
+    const int caret = NormalizeCaretByte(text, caretByte);
+    const int lineIndex = CaretLineIndex(lines, caret);
+    const FieldLine& line = lines[static_cast<std::size_t>(lineIndex)];
+    int column = caret - line.start;
+    if (column < 0) {
+        column = 0;
+    }
+    if (column > static_cast<int>(line.text.size())) {
+        column = static_cast<int>(line.text.size());
+    }
+    const int width = MeasureTextPx(line.text.substr(0, static_cast<std::size_t>(column)), fontSizePx, bold, italic);
+    if (width >= innerWidth) {
+        return width - innerWidth + 1;
+    }
+    return 0;
+}
+
+int HitTestTextByte(
+    const std::string& text, int localX, int localY, int innerWidth, int fontSizePx, bool bold, bool italic, int caretByte) {
+    const std::vector<FieldLine> lines = SplitFieldLines(text);
+    const int shift = TextScrollShift(text, caretByte, innerWidth, fontSizePx, bold, italic);
+    const int lineHeight = std::max(1, LineHeightPx(fontSizePx));
+    int lineIndex = localY < 0 ? 0 : localY / lineHeight;
+    if (lineIndex < 0) {
+        lineIndex = 0;
+    }
+    if (lineIndex >= static_cast<int>(lines.size())) {
+        lineIndex = static_cast<int>(lines.size()) - 1;
+    }
+    const FieldLine& line = lines[static_cast<std::size_t>(lineIndex)];
+    const int x = localX + shift;
+    int previous = 0;
+    std::size_t index = 0;
+    while (index < line.text.size()) {
+        std::size_t next = index;
+        char32_t codePoint = 0;
+        DecodeUtf8(line.text, next, codePoint);
+        const int width = MeasureTextPx(line.text.substr(0, next), fontSizePx, bold, italic);
+        if (x < (previous + width) / 2) {
+            return line.start + static_cast<int>(index);
+        }
+        previous = width;
+        index = next;
+    }
+    return line.start + static_cast<int>(line.text.size());
+}
 
 ResolvedStyle DefaultStyle() {
     ResolvedStyle style;

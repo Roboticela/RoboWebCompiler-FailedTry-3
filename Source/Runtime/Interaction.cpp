@@ -2,6 +2,7 @@
 
 #include "Core/Utf8.h"
 
+#include <algorithm>
 #include <cstdlib>
 
 namespace RoboWeb {
@@ -291,6 +292,178 @@ void Activate(Document& document, Node& node) {
     }
 }
 
+bool IsTextField(const Node& node) {
+    if (node.kind == ElementKind::Textarea) {
+        return true;
+    }
+    if (node.kind != ElementKind::Input) {
+        return false;
+    }
+    const std::string type = ToLowerAscii(AttributeValue(node, "type"));
+    const std::string effective = type.empty() ? std::string("text") : type;
+    return effective != "checkbox" && effective != "radio" && effective != "button" && effective != "submit" && effective != "reset" &&
+           effective != "file" && effective != "image" && effective != "hidden" && effective != "color" && effective != "range";
+}
+
+int PreviousBoundary(const std::string& text, int offset) {
+    if (offset <= 0) {
+        return 0;
+    }
+    int index = offset;
+    do {
+        --index;
+    } while (index > 0 && (static_cast<unsigned char>(text[static_cast<std::size_t>(index)]) & 0xC0) == 0x80);
+    return index;
+}
+
+int NextBoundary(const std::string& text, int offset) {
+    if (offset < 0) {
+        offset = 0;
+    }
+    if (offset >= static_cast<int>(text.size())) {
+        return static_cast<int>(text.size());
+    }
+    std::size_t index = static_cast<std::size_t>(offset);
+    char32_t codePoint = 0;
+    DecodeUtf8(text, index, codePoint);
+    return static_cast<int>(index);
+}
+
+int CaretIndex(const Document& document, const Node& node) {
+    if (document.caretOffset < 0 || document.caretOffset > static_cast<int>(node.liveValue.size())) {
+        return static_cast<int>(node.liveValue.size());
+    }
+    return document.caretOffset;
+}
+
+bool CanEdit(const Node& node) {
+    return !HasAttribute(node, "readonly") && !HasAttribute(node, "disabled");
+}
+
+std::string FitText(const Node& node, const std::string& extra) {
+    const std::string maximum = AttributeValue(node, "maxlength");
+    if (maximum.empty()) {
+        return extra;
+    }
+    const int room = std::atoi(maximum.c_str()) - Utf8Length(node.liveValue);
+    if (room <= 0) {
+        return "";
+    }
+    std::string fitted;
+    std::size_t index = 0;
+    int taken = 0;
+    while (index < extra.size() && taken < room) {
+        const std::size_t before = index;
+        char32_t codePoint = 0;
+        DecodeUtf8(extra, index, codePoint);
+        fitted.append(extra, before, index - before);
+        ++taken;
+    }
+    return fitted;
+}
+
+void InsertAtCaret(Document& document, Node& node, const std::string& extra) {
+    const std::string fitted = FitText(node, extra);
+    if (fitted.empty()) {
+        return;
+    }
+    const int offset = CaretIndex(document, node);
+    node.liveValue.insert(static_cast<std::size_t>(offset), fitted);
+    document.caretOffset = offset + static_cast<int>(fitted.size());
+    document.caretOn = true;
+}
+
+void PlaceCaret(Document& document, const LayoutResult& layout, Node& node, int x, int y) {
+    const ElementBox* best = nullptr;
+    int bestArea = 0;
+    for (const ElementBox& box : layout.boxes) {
+        if (box.node != &node) {
+            continue;
+        }
+        const int boxY = box.fixed ? box.y : box.y - document.scrollY;
+        if (x >= box.x && y >= boxY && x < box.x + box.width && y < boxY + box.height) {
+            const int area = box.width * box.height;
+            if (best == nullptr || area < bestArea) {
+                best = &box;
+                bestArea = area;
+            }
+        }
+    }
+    if (best == nullptr) {
+        document.caretOffset = static_cast<int>(node.liveValue.size());
+        document.caretOn = true;
+        return;
+    }
+    const int boxY = best->fixed ? best->y : best->y - document.scrollY;
+    const int padX = CONTROL_BORDER_PX + CONTROL_PADDING_X_PX;
+    const int padY = CONTROL_BORDER_PX + CONTROL_PADDING_Y_PX;
+    const int localX = x - (best->x + padX);
+    const int localY = y - (boxY + padY);
+    const int innerWidth = std::max(1, best->width - padX * 2);
+    const std::string shown = EditedControlText(node);
+    document.caretOffset =
+        HitTestTextByte(shown, localX, localY, innerWidth, best->fontSizePx, best->bold, best->italic, document.caretOffset);
+    document.caretOn = true;
+}
+
+void SubmitControl(Document& document, Node& control) {
+    Node* form = FormOwner(control);
+    if (form != nullptr) {
+        SubmitForm(document, *form);
+    }
+}
+
+bool Focusable(const Node& node) {
+    if (node.type != Node::Type::Element || HasAttribute(node, "disabled") || HasAttribute(node, "hidden") || HasAttribute(node, "inert")) {
+        return false;
+    }
+    if (node.kind == ElementKind::Input) {
+        return ToLowerAscii(AttributeValue(node, "type")) != "hidden";
+    }
+    if (node.kind == ElementKind::Textarea || node.kind == ElementKind::Select || node.kind == ElementKind::Button ||
+        node.kind == ElementKind::Summary) {
+        return true;
+    }
+    return node.kind == ElementKind::A && !AttributeValue(node, "href").empty();
+}
+
+void CollectFocusable(Node& node, std::vector<Node*>& order) {
+    if (node.type == Node::Type::Element && Focusable(node)) {
+        order.push_back(&node);
+    }
+    for (const std::unique_ptr<Node>& child : node.children) {
+        CollectFocusable(*child, order);
+    }
+}
+
+bool MoveFocus(Document& document, bool reverse) {
+    if (document.root == nullptr) {
+        return false;
+    }
+    std::vector<Node*> order;
+    CollectFocusable(*document.root, order);
+    if (order.empty()) {
+        return false;
+    }
+    int index = reverse ? static_cast<int>(order.size()) - 1 : 0;
+    for (int cursor = 0; cursor < static_cast<int>(order.size()); ++cursor) {
+        if (order[static_cast<std::size_t>(cursor)] == document.focus) {
+            index = reverse ? cursor - 1 : cursor + 1;
+            break;
+        }
+    }
+    if (index < 0) {
+        index = static_cast<int>(order.size()) - 1;
+    }
+    if (index >= static_cast<int>(order.size())) {
+        index = 0;
+    }
+    document.focus = order[static_cast<std::size_t>(index)];
+    document.caretOffset = -1;
+    document.caretOn = true;
+    return true;
+}
+
 }  // namespace
 
 bool DispatchClick(Document& document, const LayoutResult& layout, int x, int y) {
@@ -313,42 +486,184 @@ bool DispatchClick(Document& document, const LayoutResult& layout, int x, int y)
         return false;
     }
     Activate(document, *target);
+    if (IsTextField(*target)) {
+        PlaceCaret(document, layout, *target, x, y);
+    }
     return document.status != before || document.focus == target;
 }
 
+bool DispatchHover(Document& document, const LayoutResult& layout, int x, int y) {
+    Node* hit = HitTest(layout, x, y, document.scrollY);
+    if (document.hover == hit) {
+        return false;
+    }
+    document.hover = hit;
+    return true;
+}
+
+PointerShape PointerAt(const LayoutResult& layout, int x, int y, int scrollY) {
+    Node* hit = HitTest(layout, x, y, scrollY);
+    for (Node* node = hit; node != nullptr; node = node->parent) {
+        if (IsTextField(*node)) {
+            return PointerShape::Text;
+        }
+        if (node->kind == ElementKind::A && !AttributeValue(*node, "href").empty()) {
+            return PointerShape::Hand;
+        }
+    }
+    return PointerShape::Arrow;
+}
+
 bool DispatchKey(Document& document, const std::string& key) {
+    if (key == "tab" || key == "shift-tab") {
+        return MoveFocus(document, key == "shift-tab");
+    }
     Node* focus = document.focus;
     if (focus == nullptr) {
         return false;
     }
-    const bool editable = focus->kind == ElementKind::Textarea ||
-                          (focus->kind == ElementKind::Input && ToLowerAscii(AttributeValue(*focus, "type")) != "checkbox" &&
-                              ToLowerAscii(AttributeValue(*focus, "type")) != "radio") ||
-                          HasAttribute(*focus, "contenteditable");
-    if (!editable || HasAttribute(*focus, "readonly") || HasAttribute(*focus, "disabled")) {
+    const bool editable = IsTextField(*focus) || HasAttribute(*focus, "contenteditable");
+    if (!editable || !CanEdit(*focus)) {
         return false;
     }
+    int offset = CaretIndex(document, *focus);
     if (key == "backspace") {
-        if (!focus->liveValue.empty()) {
-            while (!focus->liveValue.empty() &&
-                   (static_cast<unsigned char>(focus->liveValue.back()) & 0xC0) == 0x80) {
-                focus->liveValue.pop_back();
-            }
-            if (!focus->liveValue.empty()) {
-                focus->liveValue.pop_back();
-            }
+        if (offset <= 0) {
+            document.caretOffset = 0;
+            return false;
         }
+        const int previous = PreviousBoundary(focus->liveValue, offset);
+        focus->liveValue.erase(static_cast<std::size_t>(previous), static_cast<std::size_t>(offset - previous));
+        document.caretOffset = previous;
+        document.caretOn = true;
+        return true;
+    }
+    if (key == "delete") {
+        if (offset >= static_cast<int>(focus->liveValue.size())) {
+            return false;
+        }
+        const int next = NextBoundary(focus->liveValue, offset);
+        focus->liveValue.erase(static_cast<std::size_t>(offset), static_cast<std::size_t>(next - offset));
+        document.caretOffset = offset;
+        document.caretOn = true;
+        return true;
+    }
+    if (key == "left") {
+        document.caretOffset = PreviousBoundary(focus->liveValue, offset);
+        document.caretOn = true;
+        return true;
+    }
+    if (key == "right") {
+        document.caretOffset = NextBoundary(focus->liveValue, offset);
+        document.caretOn = true;
+        return true;
+    }
+    if (key == "home") {
+        document.caretOffset = 0;
+        document.caretOn = true;
+        return true;
+    }
+    if (key == "end") {
+        document.caretOffset = static_cast<int>(focus->liveValue.size());
+        document.caretOn = true;
+        return true;
+    }
+    if (key == "enter") {
+        if (focus->kind == ElementKind::Textarea) {
+            InsertAtCaret(document, *focus, "\n");
+            return true;
+        }
+        SubmitControl(document, *focus);
         return true;
     }
     if (key.size() == 1 && key[0] >= 32) {
-        const std::string maximum = AttributeValue(*focus, "maxlength");
-        if (!maximum.empty() && Utf8Length(focus->liveValue) >= std::atoi(maximum.c_str())) {
-            return false;
-        }
-        focus->liveValue += key;
-        return true;
+        const int before = static_cast<int>(focus->liveValue.size());
+        InsertAtCaret(document, *focus, key);
+        return static_cast<int>(focus->liveValue.size()) != before;
     }
     return false;
+}
+
+bool DispatchText(Document& document, const std::string& text) {
+    Node* focus = document.focus;
+    if (focus == nullptr || text.empty()) {
+        return false;
+    }
+    const bool editable = focus->kind == ElementKind::Textarea ||
+                          (focus->kind == ElementKind::Input && IsTextField(*focus)) || HasAttribute(*focus, "contenteditable");
+    if (!editable || !CanEdit(*focus)) {
+        return false;
+    }
+    std::string filtered;
+    std::size_t index = 0;
+    while (index < text.size()) {
+        const std::size_t before = index;
+        char32_t codePoint = 0;
+        DecodeUtf8(text, index, codePoint);
+        if (codePoint == '\r') {
+            continue;
+        }
+        if (codePoint == '\n' && focus->kind != ElementKind::Textarea) {
+            continue;
+        }
+        if (codePoint < 32 && codePoint != '\n' && codePoint != '\t') {
+            continue;
+        }
+        filtered.append(text, before, index - before);
+    }
+    if (filtered.empty()) {
+        return false;
+    }
+    const int before = static_cast<int>(focus->liveValue.size());
+    InsertAtCaret(document, *focus, filtered);
+    return static_cast<int>(focus->liveValue.size()) != before;
+}
+
+void RevealFocus(Document& document, const LayoutResult& layout, int viewportHeight) {
+    if (document.focus == nullptr) {
+        DispatchScroll(document, 0, viewportHeight, layout.contentHeight);
+        return;
+    }
+    const ElementBox* best = nullptr;
+    int bestArea = 0;
+    for (const ElementBox& box : layout.boxes) {
+        if (box.node != document.focus || box.fixed) {
+            continue;
+        }
+        const int area = box.width * box.height;
+        if (best == nullptr || area < bestArea) {
+            best = &box;
+            bestArea = area;
+        }
+    }
+    if (best != nullptr) {
+        if (best->y < document.scrollY) {
+            document.scrollY = best->y;
+        } else if (best->y + best->height > document.scrollY + viewportHeight) {
+            document.scrollY = best->y + best->height - viewportHeight;
+        }
+    }
+    DispatchScroll(document, 0, viewportHeight, layout.contentHeight);
+}
+
+void ApplyAutofocus(Document& document) {
+    if (document.root == nullptr || document.focus != nullptr) {
+        return;
+    }
+    std::vector<Node*> stack{document.root.get()};
+    while (!stack.empty()) {
+        Node* current = stack.back();
+        stack.pop_back();
+        if (current->type == Node::Type::Element && HasAttribute(*current, "autofocus") && !HasAttribute(*current, "disabled")) {
+            document.focus = current;
+            document.caretOffset = -1;
+            document.caretOn = true;
+            return;
+        }
+        for (int index = static_cast<int>(current->children.size()) - 1; index >= 0; --index) {
+            stack.push_back(current->children[static_cast<std::size_t>(index)].get());
+        }
+    }
 }
 
 void DispatchScroll(Document& document, int delta, int viewportHeight, int contentHeight) {

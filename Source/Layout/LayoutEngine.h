@@ -37,6 +37,11 @@ struct DrawOp {
     bool underline = false;
     bool strike = false;
     bool fixed = false;
+    bool clipped = false;
+    int clipX = 0;
+    int clipY = 0;
+    int clipWidth = 0;
+    int clipHeight = 0;
 };
 
 struct ElementBox {
@@ -94,6 +99,10 @@ struct ResolvedStyle {
 
 int LineHeightPx(int fontSizePx);
 int CharAdvancePx(int fontSizePx);
+std::string EditedControlText(const Node& node);
+int TextScrollShift(const std::string& text, int caretByte, int innerWidth, int fontSizePx, bool bold, bool italic);
+int HitTestTextByte(
+    const std::string& text, int localX, int localY, int innerWidth, int fontSizePx, bool bold, bool italic, int caretByte);
 int EmToPx(int fontSizePx, int milli);
 ResolvedStyle DefaultStyle();
 ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const Document& document);

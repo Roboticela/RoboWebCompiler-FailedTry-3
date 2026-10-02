@@ -5,6 +5,7 @@
 #include "Dom/Document.h"
 #include "Layout/LayoutEngine.h"
 #include "Parser/HtmlParser.h"
+#include "Render/BitmapFont.h"
 #include "Render/Renderer.h"
 #include "Runtime/Interaction.h"
 #include "Validate/TreeValidator.h"
@@ -336,7 +337,38 @@ void TestPixelsAndInteraction() {
             EXPECT(textInput->liveValue == "abc");
             EXPECT(RoboWeb::DispatchKey(field, "backspace"));
             EXPECT(textInput->liveValue == "ab");
+            field.caretOffset = 1;
+            EXPECT(RoboWeb::DispatchKey(field, "Z"));
+            EXPECT(textInput->liveValue == "aZb");
+            EXPECT(field.caretOffset == 2);
+            EXPECT(RoboWeb::DispatchKey(field, "left"));
+            EXPECT(field.caretOffset == 1);
+            EXPECT(RoboWeb::DispatchKey(field, "delete"));
+            EXPECT(textInput->liveValue == "ab");
+            field.caretOffset = -1;
+            field.caretOn = true;
+            RoboWeb::LayoutResult fieldLayout = RoboWeb::LayoutDocument(field, 320, 80);
+            RoboWeb::Framebuffer fieldFrame = RoboWeb::RenderDocument(fieldLayout, 0);
+            const RoboWeb::ElementBox* fieldBox = RoboWeb::FindBox(fieldLayout, "input");
+            EXPECT(fieldBox != nullptr);
+            if (fieldBox != nullptr) {
+                const int textX = fieldBox->x + RoboWeb::CONTROL_BORDER_PX + RoboWeb::CONTROL_PADDING_X_PX;
+                const int textY = fieldBox->y + RoboWeb::CONTROL_BORDER_PX + RoboWeb::CONTROL_PADDING_Y_PX;
+                const int caretX = textX + RoboWeb::MeasureTextPx(textInput->liveValue, fieldBox->fontSizePx, fieldBox->bold, fieldBox->italic);
+                const int caretY = textY + RoboWeb::LineHeightPx(fieldBox->fontSizePx) - 1;
+                EXPECT(RoboWeb::PixelRed(fieldFrame, caretX, caretY) == 0);
+                EXPECT(RoboWeb::PixelGreen(fieldFrame, caretX, caretY) == 0);
+                EXPECT(RoboWeb::PixelBlue(fieldFrame, caretX, caretY) == 0);
+                EXPECT(RoboWeb::PointerAt(fieldLayout, textX + 2, textY + 2, 0) == RoboWeb::PointerShape::Text);
+            }
         }
+    }
+    const RoboWeb::ElementBox* link = RoboWeb::FindBox(layout, "a");
+    EXPECT(link != nullptr);
+    if (link != nullptr) {
+        EXPECT(RoboWeb::PointerAt(layout, link->x + 1, link->y + 1, 0) == RoboWeb::PointerShape::Hand);
+        EXPECT(RoboWeb::DispatchHover(document, layout, link->x + 1, link->y + 1));
+        EXPECT(document.hover == link->node);
     }
 }
 

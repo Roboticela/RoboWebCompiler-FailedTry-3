@@ -57,12 +57,16 @@ void RenderOnce(Document& document, int width, int height, const std::string& pa
 }  // namespace
 
 int RunDocument(Document& document, int argc, char** argv) {
+    AttachParentConsole();
     int width = ArgumentValue(argc, argv, "--width", DEFAULT_VIEWPORT_WIDTH_PX);
     int height = ArgumentValue(argc, argv, "--height", DEFAULT_VIEWPORT_HEIGHT_PX);
     const std::string output = ArgumentText(argc, argv, "--out");
     if (!HasFlag(argc, argv, "--interactive")) {
-        RenderOnce(document, width, height, output);
-        return 0;
+        if (!output.empty()) {
+            RenderOnce(document, width, height, output);
+            return 0;
+        }
+        return RunWindow(document, width, height);
     }
     std::string line;
     while (std::getline(std::cin, line)) {

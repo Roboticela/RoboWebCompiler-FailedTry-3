@@ -76,6 +76,9 @@ struct Document {
     std::string status;
     bool quirks = false;
     Node* focus = nullptr;
+    Node* hover = nullptr;
+    int caretOffset = -1;
+    bool caretOn = true;
     int scrollY = 0;
 };
 
