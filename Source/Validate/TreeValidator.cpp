@@ -73,10 +73,6 @@ void ValidateNode(const Document& document, Diagnostics& diagnostics, const Node
             diagnostics.Warning(
                 document.sourcePath, node.line, node.column, "script is not executed; scripting is not implemented");
         }
-        if (node.kind == ElementKind::Style) {
-            diagnostics.Warning(
-                document.sourcePath, node.line, node.column, "CSS is not implemented; the style element is ignored");
-        }
         if (node.kind == ElementKind::Noscript) {
             diagnostics.Warning(
                 document.sourcePath, node.line, node.column,
@@ -157,11 +153,6 @@ void ValidateNode(const Document& document, Diagnostics& diagnostics, const Node
         }
         for (const Attribute& attribute : node.attributes) {
             const std::string name = ToLowerAscii(attribute.name);
-            if (name == "style") {
-                diagnostics.Warning(
-                    document.sourcePath, attribute.line, attribute.column,
-                    "CSS is not implemented; the style attribute is ignored");
-            }
             if (IsEventHandlerName(name)) {
                 diagnostics.Warning(
                     document.sourcePath, attribute.line, attribute.column,

@@ -4,10 +4,13 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace RoboWeb {
 
-int MeasureTextPx(const std::string& text, int fontSizePx, bool bold = false, bool italic = false);
+int MeasureTextPx(
+    const std::string& text, int fontSizePx, bool bold = false, bool italic = false, const std::string& family = "");
+bool RegisterWebFont(const std::string& family, int weight, bool italic, const std::vector<unsigned char>& bytes);
 void DrawTextPx(
     std::uint8_t* pixels,
     int frameWidth,
@@ -22,6 +25,7 @@ void DrawTextPx(
     int clipLeft,
     int clipTop,
     int clipRight,
-    int clipBottom);
+    int clipBottom,
+    const std::string& family = "");
 
 }

@@ -10,6 +10,7 @@ RUNTIME_OBJS := \
 	$(OBJDIR)/BitmapFont.o \
 	$(OBJDIR)/ImageDecoder.o \
 	$(OBJDIR)/Renderer.o \
+	$(OBJDIR)/StyleSheet.o \
 	$(OBJDIR)/Interaction.o \
 	$(OBJDIR)/HostLoop.o \
 	$(OBJDIR)/Win32Host.o
@@ -38,6 +39,7 @@ TEST_OBJS := \
 	$(OBJDIR)/BitmapFont.o \
 	$(OBJDIR)/ImageDecoder.o \
 	$(OBJDIR)/Renderer.o \
+	$(OBJDIR)/StyleSheet.o \
 	$(OBJDIR)/Interaction.o \
 	$(OBJDIR)/HostLoop.o \
 	$(OBJDIR)/Win32Host.o \
@@ -55,7 +57,7 @@ Build/RoboWebCompiler.exe: $(COMPILER_OBJS)
 	$(CXX) $(CXXFLAGS) $(COMPILER_OBJS) -o $@
 
 Build/RoboWebTests.exe: $(TEST_OBJS)
-	$(CXX) $(CXXFLAGS) $(TEST_OBJS) -o $@ -lgdi32 -luser32 -lcomdlg32
+	$(CXX) $(CXXFLAGS) $(TEST_OBJS) -o $@ -lgdi32 -luser32 -lcomdlg32 -lwininet
 
 $(OBJDIR):
 	if not exist Build\Objects mkdir Build\Objects
@@ -94,6 +96,9 @@ $(OBJDIR)/ImageDecoder.o: Source/Render/ImageDecoder.cpp | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(OBJDIR)/Renderer.o: Source/Render/Renderer.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(OBJDIR)/StyleSheet.o: Source/Render/StyleSheet.cpp | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(OBJDIR)/Interaction.o: Source/Runtime/Interaction.cpp | $(OBJDIR)

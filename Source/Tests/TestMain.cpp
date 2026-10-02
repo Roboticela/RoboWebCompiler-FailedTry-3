@@ -400,6 +400,20 @@ void TestStaticGeneration() {
     EXPECT(bodyContainsParagraph);
 }
 
+void TestStyleRule() {
+    RoboWeb::Diagnostics diagnostics;
+    RoboWeb::Document document = Parse("<!DOCTYPE html><style>p { color: #ff0000; }</style><p>Red</p>", diagnostics);
+    RoboWeb::LayoutResult layout = RoboWeb::LayoutDocument(document, 200, 80);
+    bool red = false;
+    for (const RoboWeb::DrawOp& op : layout.ops) {
+        if (op.kind == RoboWeb::DrawOp::Kind::Text && op.color.red == 255 && op.color.green == 0 && op.color.blue == 0) {
+            red = true;
+        }
+    }
+    EXPECT(red);
+    EXPECT(CountMessages(diagnostics, RoboWeb::Severity::Warning, "CSS is not implemented") == 0);
+}
+
 void TestDiagnosticFormat() {
     RoboWeb::Diagnostics diagnostics;
     diagnostics.Error("page.html", 4, 2, "duplicate attribute 'id'");
@@ -420,6 +434,7 @@ int main() {
     TestParserRecovery();
     TestLayoutMatchesBrowserDefaults();
     TestPixelsAndInteraction();
+    TestStyleRule();
     TestStaticGeneration();
     TestDiagnosticFormat();
     if (gFailed != 0) {

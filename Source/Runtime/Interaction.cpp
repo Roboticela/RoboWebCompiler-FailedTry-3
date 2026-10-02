@@ -401,8 +401,8 @@ void PlaceCaret(Document& document, const LayoutResult& layout, Node& node, int 
     const int localY = y - (boxY + padY);
     const int innerWidth = std::max(1, best->width - padX * 2);
     const std::string shown = EditedControlText(node);
-    document.caretOffset =
-        HitTestTextByte(shown, localX, localY, innerWidth, best->fontSizePx, best->bold, best->italic, document.caretOffset);
+    document.caretOffset = HitTestTextByte(shown, localX, localY, innerWidth, best->fontSizePx, best->bold, best->italic,
+        document.caretOffset, best->fontFamily);
     document.caretOn = true;
 }
 

@@ -2,6 +2,7 @@
 
 #include "Catalog/ElementCatalog.h"
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -68,6 +69,22 @@ struct StaticDocument {
     const char* sourcePath;
 };
 
+struct ElementStyle {
+    std::string selector;
+    std::string fontFamily;
+    int fontWeight = -1;
+    int fontStyle = -1;
+    int fontSizePx = -1;
+    std::uint8_t colorRed = 0;
+    std::uint8_t colorGreen = 0;
+    std::uint8_t colorBlue = 0;
+    bool hasColor = false;
+    std::uint8_t backgroundRed = 0;
+    std::uint8_t backgroundGreen = 0;
+    std::uint8_t backgroundBlue = 0;
+    bool hasBackground = false;
+};
+
 struct Document {
     std::unique_ptr<Node> root;
     std::string sourcePath;
@@ -80,6 +97,8 @@ struct Document {
     int caretOffset = -1;
     bool caretOn = true;
     int scrollY = 0;
+    bool stylesLoaded = false;
+    std::vector<ElementStyle> styleRules;
 };
 
 const Attribute* FindAttribute(const Node& node, const char* name);

@@ -79,8 +79,8 @@ Framebuffer RenderDocument(const LayoutResult& layout, int scrollY) {
                 clipBottom = clipTop + op.clipHeight;
             }
             DrawTextPx(framebuffer.pixels.data(), framebuffer.width, framebuffer.height, x, y, op.text, op.fontSizePx, op.color,
-                op.bold, op.italic, clipLeft, clipTop, clipRight, clipBottom);
-            const int textWidth = MeasureTextPx(op.text, op.fontSizePx, op.bold, op.italic);
+                op.bold, op.italic, clipLeft, clipTop, clipRight, clipBottom, op.fontFamily);
+            const int textWidth = MeasureTextPx(op.text, op.fontSizePx, op.bold, op.italic, op.fontFamily);
             const int line = LineHeightPx(op.fontSizePx);
             if (op.underline) {
                 for (int column = 0; column < textWidth; ++column) {

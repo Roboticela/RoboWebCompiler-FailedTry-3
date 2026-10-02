@@ -4,6 +4,8 @@
 #include "Core/Utf8.h"
 #include "Render/InterFontData.h"
 
+#include <algorithm>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
@@ -26,6 +28,11 @@ namespace {
 struct Face {
     stbtt_fontinfo info;
     bool ready = false;
+    std::vector<unsigned char> owned;
+    const unsigned char* bytes = nullptr;
+    std::string family;
+    int weight = 400;
+    bool italic = false;
 };
 
 struct Glyph {
@@ -53,25 +60,75 @@ struct GlyphKeyHash {
     }
 };
 
-Face gFaces[4];
+std::vector<std::unique_ptr<Face>> gFaces;
 std::unordered_map<GlyphKey, Glyph, GlyphKeyHash> gGlyphs;
 
+void EnsureInterFaces() {
+    if (!gFaces.empty()) {
+        return;
+    }
+    const unsigned char* bytes[] = {kInterRegular, kInterBold, kInterItalic, kInterBoldItalic};
+    const int weights[] = {400, 700, 400, 700};
+    const bool italics[] = {false, false, true, true};
+    for (int index = 0; index < 4; ++index) {
+        auto face = std::make_unique<Face>();
+        face->bytes = bytes[index];
+        face->family = "inter";
+        face->weight = weights[index];
+        face->italic = italics[index];
+        gFaces.push_back(std::move(face));
+    }
+}
+
 bool EnsureFace(int faceIndex) {
-    Face& face = gFaces[faceIndex];
+    EnsureInterFaces();
+    if (faceIndex < 0 || faceIndex >= static_cast<int>(gFaces.size())) {
+        return false;
+    }
+    Face& face = *gFaces[static_cast<std::size_t>(faceIndex)];
     if (face.ready) {
         return true;
     }
-    const unsigned char* bytes = kInterRegular;
-    if (faceIndex == 1) {
-        bytes = kInterBold;
-    } else if (faceIndex == 2) {
-        bytes = kInterItalic;
-    } else if (faceIndex == 3) {
-        bytes = kInterBoldItalic;
+    if (face.bytes == nullptr) {
+        return false;
     }
-    const int offset = stbtt_GetFontOffsetForIndex(bytes, 0);
-    face.ready = stbtt_InitFont(&face.info, bytes, offset) != 0;
+    const int offset = stbtt_GetFontOffsetForIndex(face.bytes, 0);
+    if (offset < 0) {
+        return false;
+    }
+    face.ready = stbtt_InitFont(&face.info, face.bytes, offset) != 0;
     return face.ready;
+}
+
+int FaceIndex(bool bold, bool italic);
+
+int ResolveFace(const std::string& family, bool bold, bool italic) {
+    EnsureInterFaces();
+    const std::string name = ToLowerAscii(family);
+    if (name.empty() || name == "inter" || name == "sans-serif" || name == "serif" || name == "system-ui" || name == "ui-sans-serif") {
+        return FaceIndex(bold, italic);
+    }
+    int best = -1;
+    int bestScore = 100000;
+    const int wanted = bold ? 700 : 400;
+    for (int index = 0; index < static_cast<int>(gFaces.size()); ++index) {
+        const Face& face = *gFaces[static_cast<std::size_t>(index)];
+        if (face.family != name) {
+            continue;
+        }
+        int score = std::abs(face.weight - wanted);
+        if (face.italic != italic) {
+            score += 1000;
+        }
+        if (score < bestScore) {
+            bestScore = score;
+            best = index;
+        }
+    }
+    if (best >= 0) {
+        return best;
+    }
+    return FaceIndex(bold, italic);
 }
 
 int FaceIndex(bool bold, bool italic) {
@@ -87,14 +144,14 @@ int FaceIndex(bool bold, bool italic) {
     return 0;
 }
 
-const Glyph* GlyphFor(char32_t codePoint, int fontSizePx, bool bold, bool italic) {
+const Glyph* GlyphFor(char32_t codePoint, int fontSizePx, bool bold, bool italic, const std::string& family) {
     if (fontSizePx < 1) {
         fontSizePx = 1;
     }
     if (codePoint == 0xA0) {
         codePoint = ' ';
     }
-    const int faceIndex = FaceIndex(bold, italic);
+    const int faceIndex = ResolveFace(family, bold, italic);
     if (!EnsureFace(faceIndex)) {
         return nullptr;
     }
@@ -103,7 +160,7 @@ const Glyph* GlyphFor(char32_t codePoint, int fontSizePx, bool bold, bool italic
     if (found != gGlyphs.end()) {
         return &found->second;
     }
-    stbtt_fontinfo& info = gFaces[faceIndex].info;
+    stbtt_fontinfo& info = gFaces[static_cast<std::size_t>(faceIndex)]->info;
     const float scale = stbtt_ScaleForMappingEmToPixels(&info, static_cast<float>(fontSizePx));
     int advance = 0;
     int leftSide = 0;
@@ -131,16 +188,17 @@ const Glyph* GlyphFor(char32_t codePoint, int fontSizePx, bool bold, bool italic
     return &stored.first->second;
 }
 
-int BaselineOffset(int fontSizePx, bool bold, bool italic) {
-    const int faceIndex = FaceIndex(bold, italic);
+int BaselineOffset(int fontSizePx, bool bold, bool italic, const std::string& family) {
+    const int faceIndex = ResolveFace(family, bold, italic);
     if (!EnsureFace(faceIndex)) {
         return fontSizePx;
     }
     int ascent = 0;
     int descent = 0;
     int lineGap = 0;
-    stbtt_GetFontVMetrics(&gFaces[faceIndex].info, &ascent, &descent, &lineGap);
-    const float scale = stbtt_ScaleForMappingEmToPixels(&gFaces[faceIndex].info, static_cast<float>(fontSizePx));
+    stbtt_fontinfo& info = gFaces[static_cast<std::size_t>(faceIndex)]->info;
+    stbtt_GetFontVMetrics(&info, &ascent, &descent, &lineGap);
+    const float scale = stbtt_ScaleForMappingEmToPixels(&info, static_cast<float>(fontSizePx));
     const int content = static_cast<int>((ascent - descent) * scale + 0.5f);
     const int line = LineHeightPx(fontSizePx);
     return (line - content) / 2 + static_cast<int>(ascent * scale + 0.5f);
@@ -186,19 +244,19 @@ int LineHeightPx(int fontSizePx) {
     return fontSizePx * LINE_HEIGHT_NUMERATOR / LINE_HEIGHT_DENOMINATOR;
 }
 
-int CharAdvancePx(int fontSizePx) {
-    return MeasureTextPx("0", fontSizePx, false, false);
+int CharAdvancePx(int fontSizePx, const std::string& family) {
+    return MeasureTextPx("0", fontSizePx, false, false, family);
 }
 
 int EmToPx(int fontSizePx, int milli) {
     return (fontSizePx * milli + 500) / 1000;
 }
 
-int MeasureTextPx(const std::string& text, int fontSizePx, bool bold, bool italic) {
+int MeasureTextPx(const std::string& text, int fontSizePx, bool bold, bool italic, const std::string& family) {
     int width = 0;
     char32_t previous = 0;
     bool hasPrevious = false;
-    const int faceIndex = FaceIndex(bold, italic);
+    const int faceIndex = ResolveFace(family, bold, italic);
     std::size_t index = 0;
     while (index < text.size()) {
         char32_t codePoint = 0;
@@ -206,13 +264,14 @@ int MeasureTextPx(const std::string& text, int fontSizePx, bool bold, bool itali
         if (codePoint == '\n') {
             continue;
         }
-        const Glyph* glyph = GlyphFor(codePoint, fontSizePx, bold, italic);
+        const Glyph* glyph = GlyphFor(codePoint, fontSizePx, bold, italic, family);
         if (glyph == nullptr) {
             continue;
         }
         if (hasPrevious && EnsureFace(faceIndex)) {
-            const float scale = stbtt_ScaleForMappingEmToPixels(&gFaces[faceIndex].info, static_cast<float>(fontSizePx < 1 ? 1 : fontSizePx));
-            const int kern = stbtt_GetCodepointKernAdvance(&gFaces[faceIndex].info, static_cast<int>(previous), static_cast<int>(codePoint));
+            stbtt_fontinfo& info = gFaces[static_cast<std::size_t>(faceIndex)]->info;
+            const float scale = stbtt_ScaleForMappingEmToPixels(&info, static_cast<float>(fontSizePx < 1 ? 1 : fontSizePx));
+            const int kern = stbtt_GetCodepointKernAdvance(&info, static_cast<int>(previous), static_cast<int>(codePoint));
             width += static_cast<int>(kern * scale + (kern < 0 ? -0.5f : 0.5f));
         }
         width += glyph->advance;
@@ -236,15 +295,16 @@ void DrawTextPx(
     int clipLeft,
     int clipTop,
     int clipRight,
-    int clipBottom) {
+    int clipBottom,
+    const std::string& family) {
     if (pixels == nullptr) {
         return;
     }
-    const int baseline = y + BaselineOffset(fontSizePx, bold, italic);
+    const int baseline = y + BaselineOffset(fontSizePx, bold, italic, family);
     int cursor = x;
     char32_t previous = 0;
     bool hasPrevious = false;
-    const int faceIndex = FaceIndex(bold, italic);
+    const int faceIndex = ResolveFace(family, bold, italic);
     std::size_t index = 0;
     while (index < text.size()) {
         char32_t codePoint = 0;
@@ -252,13 +312,14 @@ void DrawTextPx(
         if (codePoint == '\n') {
             continue;
         }
-        const Glyph* glyph = GlyphFor(codePoint, fontSizePx, bold, italic);
+        const Glyph* glyph = GlyphFor(codePoint, fontSizePx, bold, italic, family);
         if (glyph == nullptr) {
             continue;
         }
         if (hasPrevious && EnsureFace(faceIndex)) {
-            const float scale = stbtt_ScaleForMappingEmToPixels(&gFaces[faceIndex].info, static_cast<float>(fontSizePx < 1 ? 1 : fontSizePx));
-            const int kern = stbtt_GetCodepointKernAdvance(&gFaces[faceIndex].info, static_cast<int>(previous), static_cast<int>(codePoint));
+            stbtt_fontinfo& info = gFaces[static_cast<std::size_t>(faceIndex)]->info;
+            const float scale = stbtt_ScaleForMappingEmToPixels(&info, static_cast<float>(fontSizePx < 1 ? 1 : fontSizePx));
+            const int kern = stbtt_GetCodepointKernAdvance(&info, static_cast<int>(previous), static_cast<int>(codePoint));
             cursor += static_cast<int>(kern * scale + (kern < 0 ? -0.5f : 0.5f));
         }
         for (int row = 0; row < glyph->height; ++row) {
@@ -272,6 +333,32 @@ void DrawTextPx(
         previous = codePoint;
         hasPrevious = true;
     }
+}
+
+bool RegisterWebFont(const std::string& family, int weight, bool italic, const std::vector<unsigned char>& bytes) {
+    if (bytes.size() < 12 || family.empty()) {
+        return false;
+    }
+    EnsureInterFaces();
+    const std::string name = ToLowerAscii(family);
+    for (const std::unique_ptr<Face>& existing : gFaces) {
+        if (existing->family == name && existing->weight == weight && existing->italic == italic) {
+            return true;
+        }
+    }
+    auto face = std::make_unique<Face>();
+    face->owned = bytes;
+    face->bytes = face->owned.data();
+    face->family = name;
+    face->weight = weight < 1 ? 400 : weight;
+    face->italic = italic;
+    const int offset = stbtt_GetFontOffsetForIndex(face->bytes, 0);
+    if (offset < 0 || stbtt_InitFont(&face->info, face->bytes, offset) == 0) {
+        return false;
+    }
+    face->ready = true;
+    gFaces.push_back(std::move(face));
+    return true;
 }
 
 }

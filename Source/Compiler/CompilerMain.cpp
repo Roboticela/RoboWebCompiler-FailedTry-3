@@ -41,6 +41,7 @@ const char* kRuntimeSources[] = {
     "Render/BitmapFont.cpp",
     "Render/ImageDecoder.cpp",
     "Render/Renderer.cpp",
+    "Render/StyleSheet.cpp",
     "Runtime/Interaction.cpp",
     "Runtime/HostLoop.cpp",
     "Runtime/Win32Host.cpp",
@@ -126,7 +127,7 @@ int main(int argc, char** argv) {
     for (const char* sourceName : kRuntimeSources) {
         command += " " + Quote(sourceDir + "/" + sourceName);
     }
-    command += " " + Quote(fontObject) + " -mwindows -lgdi32 -luser32 -lcomdlg32 -o " + Quote(outputPath);
+    command += " " + Quote(fontObject) + " -mwindows -lgdi32 -luser32 -lcomdlg32 -lwininet -o " + Quote(outputPath);
     const int status = std::system(command.c_str());
     if (status != 0) {
         std::cerr << "RoboWebCompiler: error: native compile failed for '" << generatedPath << "'\n";

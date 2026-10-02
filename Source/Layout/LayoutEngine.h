@@ -37,6 +37,7 @@ struct DrawOp {
     bool underline = false;
     bool strike = false;
     bool fixed = false;
+    std::string fontFamily;
     bool clipped = false;
     int clipX = 0;
     int clipY = 0;
@@ -59,6 +60,7 @@ struct ElementBox {
     bool underline = false;
     bool strike = false;
     DisplayKind display = DisplayKind::Block;
+    std::string fontFamily;
 };
 
 struct LayoutResult {
@@ -95,14 +97,24 @@ struct ResolvedStyle {
     int paddingBottom = 0;
     int border = 0;
     DisplayKind display = DisplayKind::Block;
+    std::string fontFamily;
 };
 
 int LineHeightPx(int fontSizePx);
-int CharAdvancePx(int fontSizePx);
+int CharAdvancePx(int fontSizePx, const std::string& family = "");
 std::string EditedControlText(const Node& node);
-int TextScrollShift(const std::string& text, int caretByte, int innerWidth, int fontSizePx, bool bold, bool italic);
+int TextScrollShift(
+    const std::string& text, int caretByte, int innerWidth, int fontSizePx, bool bold, bool italic, const std::string& family = "");
 int HitTestTextByte(
-    const std::string& text, int localX, int localY, int innerWidth, int fontSizePx, bool bold, bool italic, int caretByte);
+    const std::string& text,
+    int localX,
+    int localY,
+    int innerWidth,
+    int fontSizePx,
+    bool bold,
+    bool italic,
+    int caretByte,
+    const std::string& family = "");
 int EmToPx(int fontSizePx, int milli);
 ResolvedStyle DefaultStyle();
 ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const Document& document);

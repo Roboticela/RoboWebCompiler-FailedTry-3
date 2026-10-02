@@ -3,6 +3,7 @@
 #include "Core/Utf8.h"
 #include "Render/BitmapFont.h"
 #include "Render/ImageDecoder.h"
+#include "Render/StyleSheet.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -372,6 +373,7 @@ struct Engine {
         box.underline = style.underline;
         box.strike = style.strike;
         box.display = style.display;
+        box.fontFamily = style.fontFamily;
         result->boxes.push_back(box);
     }
 
@@ -415,7 +417,7 @@ struct Engine {
         }
         if (style.mark || style.background.alpha != 0) {
             Color background = style.mark ? Color{255, 255, 0, 255} : style.background;
-            Fill(x, y, MeasureTextPx(text, style.fontSizePx, style.bold, style.italic), LineHeightPx(style.fontSizePx), background, fixed,
+            Fill(x, y, MeasureTextPx(text, style.fontSizePx, style.bold, style.italic, style.fontFamily), LineHeightPx(style.fontSizePx), background, fixed,
                 clipped, clipX, clipY, clipWidth, clipHeight);
         }
         DrawOp op;
@@ -431,6 +433,7 @@ struct Engine {
         op.underline = style.underline;
         op.strike = style.strike;
         op.fixed = fixed;
+        op.fontFamily = style.fontFamily;
         op.clipped = clipped;
         op.clipX = clipX;
         op.clipY = clipY;
@@ -458,7 +461,8 @@ struct Engine {
         }
         const bool focused = editing && document->focus == &node;
         const int caretByte = focused && !placeholder ? NormalizeCaretByte(edited, document->caretOffset) : 0;
-        const int shift = editing ? TextScrollShift(placeholder ? std::string() : edited, caretByte, innerW, style.fontSizePx, style.bold, style.italic)
+        const int shift = editing ? TextScrollShift(placeholder ? std::string() : edited, caretByte, innerW, style.fontSizePx, style.bold,
+                                          style.italic, style.fontFamily)
                                   : 0;
         ResolvedStyle paint = style;
         if (placeholder) {
@@ -486,7 +490,8 @@ struct Engine {
         if (column > static_cast<int>(line.text.size())) {
             column = static_cast<int>(line.text.size());
         }
-        const int prefix = MeasureTextPx(line.text.substr(0, static_cast<std::size_t>(column)), style.fontSizePx, style.bold, style.italic);
+        const int prefix = MeasureTextPx(line.text.substr(0, static_cast<std::size_t>(column)), style.fontSizePx, style.bold, style.italic,
+            style.fontFamily);
         Fill(innerX - shift + prefix, innerY + lineIndex * lineHeight, 1, lineHeight, Color{0, 0, 0, 255}, fixed, true, innerX, innerY, innerW,
             innerH);
     }
@@ -509,7 +514,7 @@ struct Engine {
             if (!image.ok) {
                 const std::string alt = AttributeValue(node, "alt");
                 if (!alt.empty() && !widthOk && !heightOk) {
-                    width = MeasureTextPx(alt, style.fontSizePx);
+                    width = MeasureTextPx(alt, style.fontSizePx, style.bold, style.italic, style.fontFamily);
                     height = LineHeightPx(style.fontSizePx);
                 } else if (!widthOk && !heightOk && !source.empty()) {
                     width = 16;
@@ -629,7 +634,7 @@ struct Engine {
             if (!sizeOk || columns <= 0) {
                 columns = DEFAULT_INPUT_SIZE;
             }
-            width = CharAdvancePx(style.fontSizePx) * columns + CONTROL_PADDING_X_PX * 2 + CONTROL_BORDER_PX * 2;
+            width = CharAdvancePx(style.fontSizePx, style.fontFamily) * columns + CONTROL_PADDING_X_PX * 2 + CONTROL_BORDER_PX * 2;
             height = LineHeightPx(style.fontSizePx) + CONTROL_PADDING_Y_PX * 2 + CONTROL_BORDER_PX * 2;
             return;
         }
@@ -644,19 +649,20 @@ struct Engine {
             if (!rowsOk || rows <= 0) {
                 rows = DEFAULT_TEXTAREA_ROWS;
             }
-            width = CharAdvancePx(style.fontSizePx) * cols + CONTROL_PADDING_X_PX * 2 + CONTROL_BORDER_PX * 2;
+            width = CharAdvancePx(style.fontSizePx, style.fontFamily) * cols + CONTROL_PADDING_X_PX * 2 + CONTROL_BORDER_PX * 2;
             height = LineHeightPx(style.fontSizePx) * rows + CONTROL_PADDING_Y_PX * 2 + CONTROL_BORDER_PX * 2;
             return;
         }
         if (node.kind == ElementKind::Button || node.kind == ElementKind::Geolocation) {
             const std::string label = ControlLabel(node);
-            width = MeasureTextPx(label, style.fontSizePx) + CONTROL_PADDING_X_PX * 2 + CONTROL_BORDER_PX * 2 + 8;
+            width = MeasureTextPx(label, style.fontSizePx, style.bold, style.italic, style.fontFamily) + CONTROL_PADDING_X_PX * 2 +
+                    CONTROL_BORDER_PX * 2 + 8;
             height = LineHeightPx(style.fontSizePx) + CONTROL_PADDING_Y_PX * 2 + CONTROL_BORDER_PX * 2;
             return;
         }
         if (node.kind == ElementKind::Select) {
             const std::string label = ControlLabel(node);
-            width = MeasureTextPx(label, style.fontSizePx) + 28;
+            width = MeasureTextPx(label, style.fontSizePx, style.bold, style.italic, style.fontFamily) + 28;
             height = LineHeightPx(style.fontSizePx) + CONTROL_PADDING_Y_PX * 2 + CONTROL_BORDER_PX * 2;
             return;
         }
@@ -820,7 +826,7 @@ struct Engine {
                 if (text.empty() || (!style.pre && text == " ")) {
                     if (!pieces.empty() && !style.pre) {
                         pieces.back().text.push_back(' ');
-                        pieces.back().width += MeasureTextPx(" ", style.fontSizePx, style.bold, style.italic);
+                        pieces.back().width += MeasureTextPx(" ", style.fontSizePx, style.bold, style.italic, style.fontFamily);
                     }
                     continue;
                 }
@@ -831,7 +837,7 @@ struct Engine {
                             Piece piece;
                             piece.text = line;
                             piece.style = style;
-                            piece.width = MeasureTextPx(line, style.fontSizePx, style.bold, style.italic);
+                            piece.width = MeasureTextPx(line, style.fontSizePx, style.bold, style.italic, style.fontFamily);
                             piece.height = LineHeightPx(style.fontSizePx);
                             pieces.push_back(piece);
                             Piece breaker;
@@ -846,7 +852,7 @@ struct Engine {
                         Piece piece;
                         piece.text = line;
                         piece.style = style;
-                        piece.width = MeasureTextPx(line, style.fontSizePx, style.bold, style.italic);
+                        piece.width = MeasureTextPx(line, style.fontSizePx, style.bold, style.italic, style.fontFamily);
                         piece.height = LineHeightPx(style.fontSizePx);
                         pieces.push_back(piece);
                     }
@@ -855,7 +861,7 @@ struct Engine {
                     piece.text = text;
                     piece.style = style;
                     piece.node = &node;
-                    piece.width = MeasureTextPx(text, style.fontSizePx, style.bold, style.italic);
+                    piece.width = MeasureTextPx(text, style.fontSizePx, style.bold, style.italic, style.fontFamily);
                     piece.height = LineHeightPx(style.fontSizePx);
                     if (rootBlock) {
                         piece.node = nullptr;
@@ -884,7 +890,7 @@ struct Engine {
                     Piece openQuote;
                     openQuote.text = "\"";
                     openQuote.style = childStyle;
-                    openQuote.width = MeasureTextPx("\"", childStyle.fontSizePx, childStyle.bold, childStyle.italic);
+                    openQuote.width = MeasureTextPx("\"", childStyle.fontSizePx, childStyle.bold, childStyle.italic, childStyle.fontFamily);
                     openQuote.height = LineHeightPx(childStyle.fontSizePx);
                     pieces.push_back(openQuote);
                 }
@@ -905,7 +911,7 @@ struct Engine {
                     Piece closeQuote;
                     closeQuote.text = "\"";
                     closeQuote.style = childStyle;
-                    closeQuote.width = MeasureTextPx("\"", childStyle.fontSizePx, childStyle.bold, childStyle.italic);
+                    closeQuote.width = MeasureTextPx("\"", childStyle.fontSizePx, childStyle.bold, childStyle.italic, childStyle.fontFamily);
                     closeQuote.height = LineHeightPx(childStyle.fontSizePx);
                     pieces.push_back(closeQuote);
                 }
@@ -1013,7 +1019,7 @@ struct Engine {
         const int border = borderOk && borderAttr > 0 ? borderAttr : 0;
         for (int& columnWidth : columnWidths) {
             if (columnWidth < 1) {
-                columnWidth = std::max(1, CharAdvancePx(style.fontSizePx));
+                columnWidth = std::max(1, CharAdvancePx(style.fontSizePx, style.fontFamily));
             }
         }
         int contentSum = 0;
@@ -1245,7 +1251,7 @@ int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, in
             index += seen;
             marker = std::to_string(index) + ".";
         }
-        Text(contentX - MeasureTextPx(marker, style.fontSizePx, style.bold, style.italic) - 6, contentY, marker, style, fixed);
+        Text(contentX - MeasureTextPx(marker, style.fontSizePx, style.bold, style.italic, style.fontFamily) - 6, contentY, marker, style, fixed);
     }
     return borderHeight;
 }
@@ -1256,7 +1262,8 @@ std::string EditedControlText(const Node& node) {
     return FieldEditedText(node);
 }
 
-int TextScrollShift(const std::string& text, int caretByte, int innerWidth, int fontSizePx, bool bold, bool italic) {
+int TextScrollShift(
+    const std::string& text, int caretByte, int innerWidth, int fontSizePx, bool bold, bool italic, const std::string& family) {
     if (innerWidth < 1) {
         innerWidth = 1;
     }
@@ -1271,7 +1278,7 @@ int TextScrollShift(const std::string& text, int caretByte, int innerWidth, int 
     if (column > static_cast<int>(line.text.size())) {
         column = static_cast<int>(line.text.size());
     }
-    const int width = MeasureTextPx(line.text.substr(0, static_cast<std::size_t>(column)), fontSizePx, bold, italic);
+    const int width = MeasureTextPx(line.text.substr(0, static_cast<std::size_t>(column)), fontSizePx, bold, italic, family);
     if (width >= innerWidth) {
         return width - innerWidth + 1;
     }
@@ -1279,9 +1286,17 @@ int TextScrollShift(const std::string& text, int caretByte, int innerWidth, int 
 }
 
 int HitTestTextByte(
-    const std::string& text, int localX, int localY, int innerWidth, int fontSizePx, bool bold, bool italic, int caretByte) {
+    const std::string& text,
+    int localX,
+    int localY,
+    int innerWidth,
+    int fontSizePx,
+    bool bold,
+    bool italic,
+    int caretByte,
+    const std::string& family) {
     const std::vector<FieldLine> lines = SplitFieldLines(text);
-    const int shift = TextScrollShift(text, caretByte, innerWidth, fontSizePx, bold, italic);
+    const int shift = TextScrollShift(text, caretByte, innerWidth, fontSizePx, bold, italic, family);
     const int lineHeight = std::max(1, LineHeightPx(fontSizePx));
     int lineIndex = localY < 0 ? 0 : localY / lineHeight;
     if (lineIndex < 0) {
@@ -1298,7 +1313,7 @@ int HitTestTextByte(
         std::size_t next = index;
         char32_t codePoint = 0;
         DecodeUtf8(line.text, next, codePoint);
-        const int width = MeasureTextPx(line.text.substr(0, next), fontSizePx, bold, italic);
+        const int width = MeasureTextPx(line.text.substr(0, next), fontSizePx, bold, italic, family);
         if (x < (previous + width) / 2) {
             return line.start + static_cast<int>(index);
         }
@@ -1407,11 +1422,122 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
     const std::string face = ToLowerAscii(AttributeValue(node, "face"));
     if (face.find("mono") != std::string::npos || face.find("courier") != std::string::npos) {
         style.monospace = true;
+    } else if (!face.empty()) {
+        style.fontFamily = face;
+    }
+    auto applyRule = [](ResolvedStyle& target, const ElementStyle& rule) {
+        if (!rule.fontFamily.empty()) {
+            target.fontFamily = rule.fontFamily;
+        }
+        if (rule.fontWeight >= 600) {
+            target.bold = true;
+        } else if (rule.fontWeight >= 0) {
+            target.bold = false;
+        }
+        if (rule.fontStyle == 1) {
+            target.italic = true;
+        } else if (rule.fontStyle == 0) {
+            target.italic = false;
+        }
+        if (rule.fontSizePx > 0) {
+            target.fontSizePx = rule.fontSizePx;
+        }
+        if (rule.hasColor) {
+            target.color = Color{rule.colorRed, rule.colorGreen, rule.colorBlue, 255};
+        }
+        if (rule.hasBackground) {
+            target.background = Color{rule.backgroundRed, rule.backgroundGreen, rule.backgroundBlue, 255};
+        }
+    };
+    auto matches = [](const Node& current, const std::string& selector) {
+        if (selector == "*") {
+            return true;
+        }
+        if (!selector.empty() && selector[0] == '#') {
+            return AttributeValue(current, "id") == selector.substr(1);
+        }
+        if (!selector.empty() && selector[0] == '.') {
+            const std::string classes = " " + AttributeValue(current, "class") + " ";
+            return classes.find(" " + selector.substr(1) + " ") != std::string::npos;
+        }
+        const std::size_t dot = selector.find('.');
+        const std::string tag = dot == std::string::npos ? selector : selector.substr(0, dot);
+        if (tag != ToLowerAscii(current.tagName)) {
+            return false;
+        }
+        if (dot == std::string::npos) {
+            return true;
+        }
+        const std::string classes = " " + AttributeValue(current, "class") + " ";
+        return classes.find(" " + selector.substr(dot + 1) + " ") != std::string::npos;
+    };
+    for (const ElementStyle& rule : document.styleRules) {
+        if (matches(node, rule.selector)) {
+            applyRule(style, rule);
+        }
+    }
+    if (HasAttribute(node, "style")) {
+        ElementStyle inlineRule;
+        const std::string declarations = AttributeValue(node, "style");
+        std::size_t start = 0;
+        for (std::size_t index = 0; index <= declarations.size(); ++index) {
+            if (index != declarations.size() && declarations[index] != ';') {
+                continue;
+            }
+            const std::string piece = declarations.substr(start, index - start);
+            start = index + 1;
+            const std::size_t colon = piece.find(':');
+            if (colon == std::string::npos) {
+                continue;
+            }
+            const std::string property = ToLowerAscii(piece.substr(0, colon));
+            const std::string value = piece.substr(colon + 1);
+            if (property.find("font-family") != std::string::npos) {
+                inlineRule.fontFamily = ToLowerAscii(value);
+                const std::size_t comma = inlineRule.fontFamily.find(',');
+                if (comma != std::string::npos) {
+                    inlineRule.fontFamily = inlineRule.fontFamily.substr(0, comma);
+                }
+                while (!inlineRule.fontFamily.empty() && (inlineRule.fontFamily.front() == ' ' || inlineRule.fontFamily.front() == '\'' ||
+                                                             inlineRule.fontFamily.front() == '"')) {
+                    inlineRule.fontFamily.erase(inlineRule.fontFamily.begin());
+                }
+                while (!inlineRule.fontFamily.empty() && (inlineRule.fontFamily.back() == ' ' || inlineRule.fontFamily.back() == '\'' ||
+                                                             inlineRule.fontFamily.back() == '"')) {
+                    inlineRule.fontFamily.pop_back();
+                }
+            } else if (property.find("font-weight") != std::string::npos) {
+                const std::string weight = ToLowerAscii(value);
+                inlineRule.fontWeight = weight.find("bold") != std::string::npos || std::atoi(weight.c_str()) >= 600 ? 700 : 400;
+            } else if (property.find("font-style") != std::string::npos) {
+                inlineRule.fontStyle = ToLowerAscii(value).find("italic") != std::string::npos ? 1 : 0;
+            } else if (property.find("color") != std::string::npos && property.find("background") == std::string::npos) {
+                Color parsedColor{0, 0, 0, 255};
+                if (ParseColor(value, parsedColor)) {
+                    inlineRule.hasColor = true;
+                    inlineRule.colorRed = parsedColor.red;
+                    inlineRule.colorGreen = parsedColor.green;
+                    inlineRule.colorBlue = parsedColor.blue;
+                }
+            } else if (property.find("background") != std::string::npos) {
+                Color parsedColor{0, 0, 0, 255};
+                if (ParseColor(value, parsedColor)) {
+                    inlineRule.hasBackground = true;
+                    inlineRule.backgroundRed = parsedColor.red;
+                    inlineRule.backgroundGreen = parsedColor.green;
+                    inlineRule.backgroundBlue = parsedColor.blue;
+                }
+            } else if (property.find("font-size") != std::string::npos) {
+                inlineRule.fontSizePx = std::atoi(value.c_str());
+            }
+        }
+        applyRule(style, inlineRule);
     }
     return style;
 }
 
 LayoutResult LayoutDocument(Document& document, int viewportWidth, int viewportHeight) {
+    LoadDocumentStyles(document);
     LayoutResult result;
     result.viewportWidth = std::max(MIN_VIEWPORT_PX, std::min(MAX_VIEWPORT_PX, viewportWidth));
     result.viewportHeight = std::max(MIN_VIEWPORT_PX, std::min(MAX_VIEWPORT_PX, viewportHeight));
