@@ -7,7 +7,7 @@
 
 namespace RoboWeb {
 
-int MeasureTextPx(const std::string& text, int fontSizePx);
+int MeasureTextPx(const std::string& text, int fontSizePx, bool bold = false, bool italic = false);
 void DrawTextPx(
     std::uint8_t* pixels,
     int frameWidth,

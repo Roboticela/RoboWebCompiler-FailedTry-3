@@ -8,6 +8,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <sys/stat.h>
 #include <vector>
 
 namespace {
@@ -33,15 +34,15 @@ std::string Argument(int argc, char** argv, const std::string& name) {
     return "";
 }
 
-const char* kRuntimeObjects[] = {
-    "Document.o",
-    "ElementCatalog.o",
-    "LayoutEngine.o",
-    "BitmapFont.o",
-    "ImageDecoder.o",
-    "Renderer.o",
-    "Interaction.o",
-    "HostLoop.o",
+const char* kRuntimeSources[] = {
+    "Dom/Document.cpp",
+    "Catalog/ElementCatalog.cpp",
+    "Layout/LayoutEngine.cpp",
+    "Render/BitmapFont.cpp",
+    "Render/ImageDecoder.cpp",
+    "Render/Renderer.cpp",
+    "Runtime/Interaction.cpp",
+    "Runtime/HostLoop.cpp",
 };
 
 std::string ReadFile(const std::string& path, std::string& error) {
@@ -68,17 +69,18 @@ bool WriteFile(const std::string& path, const std::string& text) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "usage: RoboWebCompiler <input.html> -o <output.exe> --source-dir <Source> --object-dir <Build/Objects>\n";
+        std::cerr << "usage: RoboWebCompiler <input.html> -o <output.exe> --source-dir <Source>\n";
         return 1;
     }
     const std::string inputPath = argv[1];
     const std::string outputPath = Argument(argc, argv, "-o");
     const std::string sourceDir = Argument(argc, argv, "--source-dir");
     const std::string objectDir = Argument(argc, argv, "--object-dir");
-    if (outputPath.empty() || sourceDir.empty() || objectDir.empty()) {
-        std::cerr << "RoboWebCompiler: error: missing -o, --source-dir, or --object-dir\n";
+    if (outputPath.empty() || sourceDir.empty()) {
+        std::cerr << "RoboWebCompiler: error: missing -o or --source-dir\n";
         return 1;
     }
+    const std::string fontObject = (objectDir.empty() ? outputPath : objectDir + "/InterFontData.o");
     std::string readError;
     const std::string source = ReadFile(inputPath, readError);
     if (!readError.empty()) {
@@ -104,11 +106,26 @@ int main(int argc, char** argv) {
         std::cerr << "RoboWebCompiler: error: cannot write '" << generatedPath << "'\n";
         return 1;
     }
-    std::string command = "g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -I" + Quote(sourceDir) + " " + Quote(generatedPath);
-    for (const char* objectName : kRuntimeObjects) {
-        command += " " + Quote(objectDir + "/" + objectName);
+    const std::string fontSource = sourceDir + "/Render/InterFontData.cpp";
+    bool fontFresh = false;
+    struct stat fontObjectStat;
+    struct stat fontSourceStat;
+    if (stat(fontObject.c_str(), &fontObjectStat) == 0 && stat(fontSource.c_str(), &fontSourceStat) == 0) {
+        fontFresh = fontObjectStat.st_mtime >= fontSourceStat.st_mtime;
     }
-    command += " -o " + Quote(outputPath);
+    if (!fontFresh) {
+        const std::string fontCommand = "g++ -std=c++17 -O0 -Wall -Wextra -Wpedantic -I" + Quote(sourceDir) + " -c " +
+                                        Quote(fontSource) + " -o " + Quote(fontObject);
+        if (std::system(fontCommand.c_str()) != 0) {
+            std::cerr << "RoboWebCompiler: error: native compile failed for Inter font data\n";
+            return 1;
+        }
+    }
+    std::string command = "g++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -I" + Quote(sourceDir) + " " + Quote(generatedPath);
+    for (const char* sourceName : kRuntimeSources) {
+        command += " " + Quote(sourceDir + "/" + sourceName);
+    }
+    command += " " + Quote(fontObject) + " -o " + Quote(outputPath);
     const int status = std::system(command.c_str());
     if (status != 0) {
         std::cerr << "RoboWebCompiler: error: native compile failed for '" << generatedPath << "'\n";

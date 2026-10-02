@@ -49,7 +49,7 @@ Framebuffer RenderDocument(const LayoutResult& layout, int scrollY) {
         } else if (op.kind == DrawOp::Kind::Text) {
             DrawTextPx(framebuffer.pixels.data(), framebuffer.width, framebuffer.height, x, y, op.text, op.fontSizePx, op.color,
                 op.bold, op.italic);
-            const int textWidth = MeasureTextPx(op.text, op.fontSizePx);
+            const int textWidth = MeasureTextPx(op.text, op.fontSizePx, op.bold, op.italic);
             const int line = LineHeightPx(op.fontSizePx);
             if (op.underline) {
                 for (int column = 0; column < textWidth; ++column) {

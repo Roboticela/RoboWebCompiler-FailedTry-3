@@ -162,31 +162,80 @@ std::unique_ptr<Node> RebuildStatic(const Document& document) {
     return root;
 }
 
+void WriteNode(std::ostringstream& output, const Node& node, const std::string& variable, int indent) {
+    const std::string pad(static_cast<std::size_t>(indent), ' ');
+    if (node.type == Node::Type::Document) {
+        output << pad << "auto " << variable << " = std::make_unique<RoboWeb::Node>();\n";
+        output << pad << variable << "->type = RoboWeb::Node::Type::Document;\n";
+        output << pad << variable << "->line = " << node.line << ";\n";
+        output << pad << variable << "->column = " << node.column << ";\n";
+    } else if (node.type == Node::Type::Text) {
+        output << pad << "auto " << variable << " = MakeText(\"" << Escape(node.text) << "\", " << node.line << ", " << node.column
+               << ");\n";
+    } else {
+        output << pad << "auto " << variable << " = MakeElement(" << static_cast<int>(node.kind) << ", \"" << Escape(node.tagName)
+               << "\", " << node.line << ", " << node.column << ");\n";
+        for (const Attribute& attribute : node.attributes) {
+            output << pad << "AddAttribute(*" << variable << ", \"" << Escape(attribute.name) << "\", \"" << Escape(attribute.value)
+                   << "\");\n";
+        }
+    }
+    int childNumber = 0;
+    for (const std::unique_ptr<Node>& child : node.children) {
+        const std::string childVariable = variable + "c" + std::to_string(childNumber);
+        ++childNumber;
+        WriteNode(output, *child, childVariable, indent);
+        output << pad << "AppendChild(*" << variable << ", std::move(" << childVariable << "));\n";
+    }
+}
+
 std::string GenerateCpp(const Document& document) {
-    const FrozenDocument frozen = Freeze(document);
     std::ostringstream output;
     output << "#include \"Runtime/HostLoop.h\"\n\n";
-    output << "static const RoboWeb::StaticAttribute kAttributes[] = {\n";
-    for (const OwnedAttribute& attribute : frozen.attributes) {
-        output << "    {\"" << Escape(attribute.name) << "\", \"" << Escape(attribute.value) << "\"},\n";
+    output << "namespace {\n\n";
+    output << "std::unique_ptr<RoboWeb::Node> MakeElement(int kind, const char* tag, int line, int column) {\n";
+    output << "    auto node = std::make_unique<RoboWeb::Node>();\n";
+    output << "    node->type = RoboWeb::Node::Type::Element;\n";
+    output << "    node->kind = static_cast<RoboWeb::ElementKind>(kind);\n";
+    output << "    node->tagName = tag;\n";
+    output << "    node->line = line;\n";
+    output << "    node->column = column;\n";
+    output << "    return node;\n}\n\n";
+    output << "std::unique_ptr<RoboWeb::Node> MakeText(const char* text, int line, int column) {\n";
+    output << "    auto node = std::make_unique<RoboWeb::Node>();\n";
+    output << "    node->type = RoboWeb::Node::Type::Text;\n";
+    output << "    node->text = text;\n";
+    output << "    node->line = line;\n";
+    output << "    node->column = column;\n";
+    output << "    return node;\n}\n\n";
+    output << "void AddAttribute(RoboWeb::Node& node, const char* name, const char* value) {\n";
+    output << "    RoboWeb::Attribute attribute;\n";
+    output << "    attribute.name = name;\n";
+    output << "    attribute.value = value;\n";
+    output << "    attribute.line = node.line;\n";
+    output << "    attribute.column = node.column;\n";
+    output << "    node.attributes.push_back(attribute);\n}\n\n";
+    output << "void AppendChild(RoboWeb::Node& parent, std::unique_ptr<RoboWeb::Node> child) {\n";
+    output << "    child->parent = &parent;\n";
+    output << "    parent.children.push_back(std::move(child));\n}\n\n";
+    output << "std::unique_ptr<RoboWeb::Node> BuildCompiledDocument() {\n";
+    if (document.root != nullptr) {
+        WriteNode(output, *document.root, "root", 4);
+        output << "    return root;\n";
+    } else {
+        output << "    return std::make_unique<RoboWeb::Node>();\n";
     }
-    output << "};\n\nstatic const int kChildren[] = {\n";
-    for (int child : frozen.children) {
-        output << "    " << child << ",\n";
-    }
-    output << "};\n\nstatic const RoboWeb::StaticNode kNodes[] = {\n";
-    for (const OwnedNode& node : frozen.nodes) {
-        output << "    {" << node.type << ", " << node.elementKind << ", \"" << Escape(node.tagName) << "\", \""
-               << Escape(node.text) << "\", " << node.attributeBegin << ", " << node.attributeCount << ", "
-               << node.childBegin << ", " << node.childCount << ", " << node.line << ", " << node.column << "},\n";
-    }
-    output << "};\n\nstatic const RoboWeb::StaticDocument kDocument = {\n";
-    output << "    kNodes,\n    " << frozen.nodes.size() << ",\n";
-    output << "    kChildren,\n    " << frozen.children.size() << ",\n";
-    output << "    kAttributes,\n    " << frozen.attributes.size() << ",\n";
-    output << "    \"" << Escape(document.sourcePath) << "\",\n};\n\n";
+    output << "}\n\n}  // namespace\n\n";
     output << "int main(int argc, char** argv) {\n";
-    output << "    return RoboWeb::RunCompiledDocument(kDocument, argc, argv);\n}\n";
+    output << "    RoboWeb::Document document;\n";
+    output << "    document.sourcePath = \"" << Escape(document.sourcePath) << "\";\n";
+    output << "    document.quirks = " << (document.quirks ? "true" : "false") << ";\n";
+    output << "    document.root = BuildCompiledDocument();\n";
+    output << "    if (document.root != nullptr) {\n";
+    output << "        RoboWeb::InitializeControlState(*document.root);\n";
+    output << "    }\n";
+    output << "    RoboWeb::CollectDocumentInfo(document);\n";
+    output << "    return RoboWeb::RunDocument(document, argc, argv);\n}\n";
     return output.str();
 }
 

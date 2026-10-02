@@ -339,7 +339,7 @@ struct Engine {
         }
         if (style.mark || style.background.alpha != 0) {
             Color background = style.mark ? Color{255, 255, 0, 255} : style.background;
-            Fill(x, y, MeasureTextPx(text, style.fontSizePx), LineHeightPx(style.fontSizePx), background, fixed);
+            Fill(x, y, MeasureTextPx(text, style.fontSizePx, style.bold, style.italic), LineHeightPx(style.fontSizePx), background, fixed);
         }
         DrawOp op;
         op.kind = DrawOp::Kind::Text;
@@ -619,7 +619,7 @@ struct Engine {
         PaintReplaced(node, x, y, width, height, style, fixed);
     }
 
-    void LayoutLines(Node& block, int x, int y, int width, const ResolvedStyle& style, bool fixed, int& usedHeight) {
+    void LayoutLines(Node& block, int x, int y, int width, const ResolvedStyle& style, bool fixed, int& usedHeight, bool paint) {
         std::vector<Piece> pieces;
         CollectInlines(block, style, width, pieces, true);
         int cursorY = y;
@@ -648,9 +648,9 @@ struct Engine {
             int cursorX = x + offset;
             for (std::size_t pieceIndex = index; pieceIndex < end; ++pieceIndex) {
                 Piece& piece = pieces[pieceIndex];
-                if (piece.atomic && piece.node != nullptr) {
+                if (paint && piece.atomic && piece.node != nullptr) {
                     PaintAtomic(*piece.node, cursorX, cursorY, piece.width, piece.height, piece.style, fixed);
-                } else if (!piece.text.empty()) {
+                } else if (paint && !piece.text.empty()) {
                     Text(cursorX, cursorY, piece.text, piece.style, fixed);
                     if (piece.node != nullptr && piece.node->type == Node::Type::Element) {
                         AddBox(*piece.node, cursorX, cursorY, piece.width, lineHeight, piece.style, fixed);
@@ -682,7 +682,7 @@ struct Engine {
                 if (text.empty() || (!style.pre && text == " ")) {
                     if (!pieces.empty() && !style.pre) {
                         pieces.back().text.push_back(' ');
-                        pieces.back().width += CharAdvancePx(style.fontSizePx);
+                        pieces.back().width += MeasureTextPx(" ", style.fontSizePx, style.bold, style.italic);
                     }
                     continue;
                 }
@@ -693,7 +693,7 @@ struct Engine {
                             Piece piece;
                             piece.text = line;
                             piece.style = style;
-                            piece.width = MeasureTextPx(line, style.fontSizePx);
+                            piece.width = MeasureTextPx(line, style.fontSizePx, style.bold, style.italic);
                             piece.height = LineHeightPx(style.fontSizePx);
                             pieces.push_back(piece);
                             Piece breaker;
@@ -708,7 +708,7 @@ struct Engine {
                         Piece piece;
                         piece.text = line;
                         piece.style = style;
-                        piece.width = MeasureTextPx(line, style.fontSizePx);
+                        piece.width = MeasureTextPx(line, style.fontSizePx, style.bold, style.italic);
                         piece.height = LineHeightPx(style.fontSizePx);
                         pieces.push_back(piece);
                     }
@@ -717,7 +717,7 @@ struct Engine {
                     piece.text = text;
                     piece.style = style;
                     piece.node = &node;
-                    piece.width = MeasureTextPx(text, style.fontSizePx);
+                    piece.width = MeasureTextPx(text, style.fontSizePx, style.bold, style.italic);
                     piece.height = LineHeightPx(style.fontSizePx);
                     if (rootBlock) {
                         piece.node = nullptr;
@@ -746,7 +746,7 @@ struct Engine {
                     Piece openQuote;
                     openQuote.text = "\"";
                     openQuote.style = childStyle;
-                    openQuote.width = CharAdvancePx(childStyle.fontSizePx);
+                    openQuote.width = MeasureTextPx("\"", childStyle.fontSizePx, childStyle.bold, childStyle.italic);
                     openQuote.height = LineHeightPx(childStyle.fontSizePx);
                     pieces.push_back(openQuote);
                 }
@@ -767,7 +767,7 @@ struct Engine {
                     Piece closeQuote;
                     closeQuote.text = "\"";
                     closeQuote.style = childStyle;
-                    closeQuote.width = CharAdvancePx(childStyle.fontSizePx);
+                    closeQuote.width = MeasureTextPx("\"", childStyle.fontSizePx, childStyle.bold, childStyle.italic);
                     closeQuote.height = LineHeightPx(childStyle.fontSizePx);
                     pieces.push_back(closeQuote);
                 }
@@ -785,18 +785,34 @@ struct Engine {
 
     int LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, int width, bool fixed, bool suppressTop);
 
+    int PreferredWidth(Node& node, const ResolvedStyle& style) {
+        std::vector<Piece> pieces;
+        CollectInlines(node, style, 100000, pieces, true);
+        int line = 0;
+        int widest = 0;
+        for (const Piece& piece : pieces) {
+            if (piece.lineBreak) {
+                widest = std::max(widest, line);
+                line = 0;
+                continue;
+            }
+            line += piece.width;
+        }
+        return std::max(widest, line);
+    }
+
     int LayoutTable(Node& table, const ResolvedStyle& style, int x, int y, int width, bool fixed) {
         struct Cell {
             Node* node = nullptr;
             int column = 0;
             int columnSpan = 1;
-            int row = 0;
         };
         struct Row {
             Node* node = nullptr;
             std::vector<Cell> cells;
         };
         std::vector<Row> rows;
+        Node* caption = nullptr;
         auto addRow = [&](Node& rowNode) {
             Row row;
             row.node = &rowNode;
@@ -813,19 +829,22 @@ struct Engine {
                 if (!spanOk || cell.columnSpan < 1) {
                     cell.columnSpan = 1;
                 }
-                cell.row = static_cast<int>(rows.size());
                 column += cell.columnSpan;
                 row.cells.push_back(cell);
             }
             rows.push_back(row);
         };
         for (const std::unique_ptr<Node>& child : table.children) {
-            if (child->kind == ElementKind::Tr) {
+            if (child->kind == ElementKind::Caption && caption == nullptr) {
+                caption = child.get();
+            } else if (child->kind == ElementKind::Tr) {
                 addRow(*child);
             } else if (child->kind == ElementKind::Thead || child->kind == ElementKind::Tbody || child->kind == ElementKind::Tfoot) {
                 for (const std::unique_ptr<Node>& row : child->children) {
                     if (row->kind == ElementKind::Tr) {
                         addRow(*row);
+                    } else if (row->kind == ElementKind::Caption && caption == nullptr) {
+                        caption = row.get();
                     }
                 }
             }
@@ -838,43 +857,109 @@ struct Engine {
             }
             columns = std::max(columns, count);
         }
+        std::vector<int> columnWidths(static_cast<std::size_t>(columns), 0);
+        for (const Row& row : rows) {
+            for (const Cell& cell : row.cells) {
+                if (cell.columnSpan != 1 || cell.column < 0 || cell.column >= columns || cell.node == nullptr) {
+                    continue;
+                }
+                const ResolvedStyle cellStyle = ResolveStyle(*cell.node, style, *document);
+                const int needed = PreferredWidth(*cell.node, cellStyle) + CELL_PADDING_PX * 2;
+                int& columnWidth = columnWidths[static_cast<std::size_t>(cell.column)];
+                columnWidth = std::max(columnWidth, needed);
+            }
+        }
         const int spacing = TABLE_BORDER_SPACING_PX;
         bool borderOk = false;
         const int borderAttr = ParsePx(AttributeValue(table, "border"), width, borderOk);
         const int border = borderOk && borderAttr > 0 ? borderAttr : 0;
-        const int tableWidth = width;
-        const int cellWidth = std::max(1, (tableWidth - spacing * (columns + 1) - border * 2) / columns);
+        for (int& columnWidth : columnWidths) {
+            if (columnWidth < 1) {
+                columnWidth = std::max(1, CharAdvancePx(style.fontSizePx));
+            }
+        }
+        int contentSum = 0;
+        for (int columnWidth : columnWidths) {
+            contentSum += columnWidth;
+        }
+        const int chrome = border * 2 + spacing * (columns + 1);
+        int tableWidth = contentSum + chrome;
+        if (tableWidth > width && contentSum > 0) {
+            const int budget = std::max(columns, width - chrome);
+            int assigned = 0;
+            for (int index = 0; index < columns - 1; ++index) {
+                columnWidths[static_cast<std::size_t>(index)] =
+                    std::max(1, columnWidths[static_cast<std::size_t>(index)] * budget / contentSum);
+                assigned += columnWidths[static_cast<std::size_t>(index)];
+            }
+            columnWidths[static_cast<std::size_t>(columns - 1)] = std::max(1, budget - assigned);
+            tableWidth = width;
+        }
+        const int originY = y;
+        int captionHeight = 0;
+        if (caption != nullptr) {
+            const ResolvedStyle captionStyle = ResolveStyle(*caption, style, *document);
+            LayoutLines(*caption, x, y, tableWidth, captionStyle, fixed, captionHeight, true);
+            AddBox(*caption, x, y, tableWidth, captionHeight, captionStyle, fixed);
+            y += captionHeight;
+        }
         int cursorY = y + border;
-        AddBox(table, x, y, tableWidth, 0, style, fixed);
+        AddBox(table, x, originY, tableWidth, 0, style, fixed);
         const std::size_t tableBox = result->boxes.size() - 1;
         if (border > 0) {
-            Stroke(x, y, tableWidth, 1, Color{0, 0, 0, 255}, fixed);
+            Stroke(x, y, tableWidth, border, Color{0, 0, 0, 255}, fixed);
         }
         for (Row& row : rows) {
             int rowHeight = LineHeightPx(style.fontSizePx) + CELL_PADDING_PX * 2;
-            for (Cell& cell : row.cells) {
-                ResolvedStyle cellStyle = ResolveStyle(*cell.node, style, *document);
-                int contentHeight = 0;
-                LayoutLines(*cell.node, 0, 0, cellWidth * cell.columnSpan, cellStyle, fixed, contentHeight);
-                rowHeight = std::max(rowHeight, contentHeight + CELL_PADDING_PX * 2);
+            std::vector<int> contentHeights(row.cells.size(), 0);
+            for (std::size_t cellIndex = 0; cellIndex < row.cells.size(); ++cellIndex) {
+                Cell& cell = row.cells[cellIndex];
+                if (cell.node == nullptr) {
+                    continue;
+                }
+                int spanWidth = 0;
+                for (int span = 0; span < cell.columnSpan && cell.column + span < columns; ++span) {
+                    spanWidth += columnWidths[static_cast<std::size_t>(cell.column + span)];
+                }
+                spanWidth += spacing * std::max(0, cell.columnSpan - 1);
+                const ResolvedStyle cellStyle = ResolveStyle(*cell.node, style, *document);
+                LayoutLines(*cell.node, 0, 0, std::max(1, spanWidth - CELL_PADDING_PX * 2), cellStyle, fixed, contentHeights[cellIndex], false);
+                rowHeight = std::max(rowHeight, contentHeights[cellIndex] + CELL_PADDING_PX * 2);
             }
             int cursorX = x + border + spacing;
             AddBox(*row.node, x, cursorY, tableWidth, rowHeight, style, fixed);
-            for (Cell& cell : row.cells) {
-                const int spanWidth = cellWidth * cell.columnSpan + spacing * (cell.columnSpan - 1);
-                ResolvedStyle cellStyle = ResolveStyle(*cell.node, style, *document);
-                Fill(cursorX, cursorY, spanWidth, rowHeight, cellStyle.background.alpha ? cellStyle.background : Color{255, 255, 255, 255}, fixed);
+            for (std::size_t cellIndex = 0; cellIndex < row.cells.size(); ++cellIndex) {
+                Cell& cell = row.cells[cellIndex];
+                int spanWidth = 0;
+                for (int span = 0; span < cell.columnSpan && cell.column + span < columns; ++span) {
+                    spanWidth += columnWidths[static_cast<std::size_t>(cell.column + span)];
+                }
+                spanWidth += spacing * std::max(0, cell.columnSpan - 1);
+                if (cell.node == nullptr) {
+                    cursorX += spanWidth + spacing;
+                    continue;
+                }
+                const ResolvedStyle cellStyle = ResolveStyle(*cell.node, style, *document);
+                const Color cellBackground = cellStyle.background.alpha != 0 ? cellStyle.background : Color{255, 255, 255, 255};
+                Fill(cursorX, cursorY, spanWidth, rowHeight, cellBackground, fixed);
                 if (border > 0) {
                     Stroke(cursorX, cursorY, spanWidth, rowHeight, Color{0, 0, 0, 255}, fixed);
                 }
                 AddBox(*cell.node, cursorX, cursorY, spanWidth, rowHeight, cellStyle, fixed);
+                const int contentHeight = contentHeights[cellIndex];
+                const int contentTop = cursorY + std::max(CELL_PADDING_PX, (rowHeight - contentHeight) / 2);
                 int used = 0;
-                LayoutLines(*cell.node, cursorX + CELL_PADDING_PX, cursorY + CELL_PADDING_PX, spanWidth - CELL_PADDING_PX * 2, cellStyle, fixed, used);
+                LayoutLines(
+                    *cell.node, cursorX + CELL_PADDING_PX, contentTop, std::max(1, spanWidth - CELL_PADDING_PX * 2), cellStyle, fixed, used, true);
                 cursorX += spanWidth + spacing;
             }
             cursorY += rowHeight + spacing;
         }
-        const int tableHeight = std::max(border, cursorY - y);
+        if (border > 0) {
+            cursorY += border;
+            Stroke(x, y, tableWidth, cursorY - y, Color{0, 0, 0, 255}, fixed);
+        }
+        const int tableHeight = std::max(1, cursorY - originY);
         result->boxes[tableBox].height = tableHeight;
         return tableHeight;
     }
@@ -924,7 +1009,7 @@ struct Engine {
                 childStyle.display == DisplayKind::Replaced || childStyle.display == DisplayKind::LineBreak ||
                 childStyle.display == DisplayKind::WordBreak) {
                 int used = 0;
-                LayoutLines(node, x + style.paddingLeft, cursor, width - style.paddingLeft - style.paddingRight, style, fixed, used);
+                LayoutLines(node, x + style.paddingLeft, cursor, width - style.paddingLeft - style.paddingRight, style, fixed, used, true);
                 cursor += used;
                 break;
             }
@@ -979,7 +1064,7 @@ int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, in
         inlineFlow = false;
     }
     if (inlineFlow) {
-        LayoutLines(node, contentX, contentY, contentWidth, style, fixed, contentHeight);
+        LayoutLines(node, contentX, contentY, contentWidth, style, fixed, contentHeight, true);
     } else {
         contentHeight = LayoutFlow(node, style, contentX, contentY, contentWidth, fixed, false);
     }
@@ -1000,7 +1085,7 @@ int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, in
     }
     AddBox(node, x, y, width, borderHeight, style, fixed);
     if (node.kind == ElementKind::Li || node.kind == ElementKind::Summary) {
-        std::string marker = "*";
+        std::string marker = "\xE2\x80\xA2";
         if (node.kind == ElementKind::Summary) {
             marker = node.parent != nullptr && node.parent->open ? "v" : ">";
         } else if (node.parent != nullptr && (node.parent->kind == ElementKind::Ol)) {
@@ -1022,7 +1107,7 @@ int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, in
             index += seen;
             marker = std::to_string(index) + ".";
         }
-        Text(x - MeasureTextPx(marker, style.fontSizePx) - 6, contentY, marker, style, fixed);
+        Text(contentX - MeasureTextPx(marker, style.fontSizePx, style.bold, style.italic) - 6, contentY, marker, style, fixed);
     }
     return borderHeight;
 }
@@ -1071,6 +1156,9 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
     style.marginLeft = spec.marginLeftPx;
     style.marginRight = spec.marginRightPx;
     style.paddingLeft = spec.paddingLeftPx;
+    if (node.kind == ElementKind::Summary && style.paddingLeft < 24) {
+        style.paddingLeft = 24;
+    }
     if (node.kind == ElementKind::Body) {
         style.marginTop = BODY_MARGIN_PX;
         style.marginBottom = BODY_MARGIN_PX;

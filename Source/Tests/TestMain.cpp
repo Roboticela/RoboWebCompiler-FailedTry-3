@@ -231,6 +231,27 @@ void TestLayoutMatchesBrowserDefaults() {
         EXPECT(preBox->monospace);
         EXPECT(preBox->height == RoboWeb::LineHeightPx(16) * 2);
     }
+
+    RoboWeb::Document tableDocument = Parse(
+        "<!DOCTYPE html><table border='1'><caption>Sample</caption><tr><th>Element</th><th>Display</th></tr><tr><td>p</td><td>block</td></tr></table>",
+        diagnostics);
+    RoboWeb::LayoutResult tableLayout = RoboWeb::LayoutDocument(tableDocument, 800, 400);
+    const RoboWeb::ElementBox* table = RoboWeb::FindBox(tableLayout, "table");
+    EXPECT(table != nullptr);
+    if (table != nullptr) {
+        EXPECT(table->width < 360);
+        EXPECT(table->width > 40);
+        EXPECT(table->y >= 8);
+    }
+    const RoboWeb::ElementBox* caption = RoboWeb::FindBox(tableLayout, "caption");
+    EXPECT(caption != nullptr);
+    bool textAtOrigin = false;
+    for (const RoboWeb::DrawOp& op : tableLayout.ops) {
+        if (op.kind == RoboWeb::DrawOp::Kind::Text && op.y < 8 && op.text.find("block") != std::string::npos) {
+            textAtOrigin = true;
+        }
+    }
+    EXPECT(!textAtOrigin);
 }
 
 void TestPixelsAndInteraction() {
@@ -323,9 +344,12 @@ void TestStaticGeneration() {
     RoboWeb::Diagnostics diagnostics;
     RoboWeb::Document document = Parse("<!DOCTYPE html><div><p id='lead'>Hello</p></div>", diagnostics);
     const std::string cpp = RoboWeb::GenerateCpp(document);
-    EXPECT(cpp.find("static const RoboWeb::StaticNode kNodes[]") != std::string::npos);
+    EXPECT(cpp.find("BuildCompiledDocument") != std::string::npos);
+    EXPECT(cpp.find("MakeElement") != std::string::npos);
+    EXPECT(cpp.find("MakeText") != std::string::npos);
     EXPECT(cpp.find("Hello") != std::string::npos);
-    EXPECT(cpp.find("RunCompiledDocument") != std::string::npos);
+    EXPECT(cpp.find("RunDocument") != std::string::npos);
+    EXPECT(cpp.find("StaticNode") == std::string::npos);
     std::unique_ptr<RoboWeb::Node> rebuilt = RoboWeb::RebuildStatic(document);
     EXPECT(rebuilt != nullptr);
     EXPECT(RoboWeb::GatherText(*rebuilt).find("Hello") != std::string::npos);

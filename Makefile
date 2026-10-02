@@ -6,6 +6,7 @@ RUNTIME_OBJS := \
 	$(OBJDIR)/Document.o \
 	$(OBJDIR)/ElementCatalog.o \
 	$(OBJDIR)/LayoutEngine.o \
+	$(OBJDIR)/InterFontData.o \
 	$(OBJDIR)/BitmapFont.o \
 	$(OBJDIR)/ImageDecoder.o \
 	$(OBJDIR)/Renderer.o \
@@ -32,6 +33,7 @@ TEST_OBJS := \
 	$(OBJDIR)/HtmlParser.o \
 	$(OBJDIR)/Document.o \
 	$(OBJDIR)/LayoutEngine.o \
+	$(OBJDIR)/InterFontData.o \
 	$(OBJDIR)/BitmapFont.o \
 	$(OBJDIR)/ImageDecoder.o \
 	$(OBJDIR)/Renderer.o \
@@ -79,6 +81,9 @@ $(OBJDIR)/Document.o: Source/Dom/Document.cpp | $(OBJDIR)
 
 $(OBJDIR)/LayoutEngine.o: Source/Layout/LayoutEngine.cpp | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(OBJDIR)/InterFontData.o: Source/Render/InterFontData.cpp | $(OBJDIR)
+	$(CXX) -std=c++17 -Wall -Wextra -Wpedantic -O0 -ISource -c $< -o $@
 
 $(OBJDIR)/BitmapFont.o: Source/Render/BitmapFont.cpp | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
