@@ -192,6 +192,34 @@ DecodedImage DecodeImageBytes(const std::vector<unsigned char>& bytes) {
     return DecodeGdiplus(bytes);
 }
 
+std::vector<PlannedFetch> gFetchPlan;
+
+void ClearResourceFetchPlan() {
+    gFetchPlan.clear();
+}
+
+void NoteResourceFetch(const std::string& url, const std::string& priority, const std::string& mode) {
+    if (url.empty()) {
+        return;
+    }
+    PlannedFetch fetch;
+    fetch.url = url;
+    fetch.mode = mode;
+    fetch.rank = priority == "high" ? 0 : priority == "low" ? 2 : 1;
+    std::size_t insertAt = gFetchPlan.size();
+    for (std::size_t index = 0; index < gFetchPlan.size(); ++index) {
+        if (fetch.rank < gFetchPlan[index].rank) {
+            insertAt = index;
+            break;
+        }
+    }
+    gFetchPlan.insert(gFetchPlan.begin() + static_cast<std::ptrdiff_t>(insertAt), fetch);
+}
+
+const std::vector<PlannedFetch>& ResourceFetchPlan() {
+    return gFetchPlan;
+}
+
 void RegisterCompiledImage(const std::string& url, const std::vector<unsigned char>& bytes) {
     for (std::pair<std::string, std::vector<unsigned char>>& entry : gCompiledImages) {
         if (entry.first == url) {

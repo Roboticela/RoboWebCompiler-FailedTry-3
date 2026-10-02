@@ -287,6 +287,34 @@ void Activate(Document& document, Node& node) {
     if (ControlDisabled(node)) {
         return;
     }
+    for (Node* cursor = &node; cursor != nullptr; cursor = cursor->parent) {
+        if (ToLowerAscii(cursor->tagName) != "maction" || ToLowerAscii(AttributeValue(*cursor, "actiontype")) != "toggle") {
+            continue;
+        }
+        int count = 0;
+        for (const std::unique_ptr<Node>& child : cursor->children) {
+            if (child->type == Node::Type::Element) {
+                ++count;
+            }
+        }
+        int selection = std::max(1, std::atoi(AttributeValue(*cursor, "selection").c_str()));
+        selection = count <= 1 ? 1 : selection % count + 1;
+        bool wrote = false;
+        for (Attribute& attribute : cursor->attributes) {
+            if (EqualsAsciiIgnoreCase(attribute.name, "selection")) {
+                attribute.value = std::to_string(selection);
+                wrote = true;
+            }
+        }
+        if (!wrote) {
+            Attribute attribute;
+            attribute.name = "selection";
+            attribute.value = std::to_string(selection);
+            cursor->attributes.push_back(attribute);
+        }
+        document.status = "selection " + std::to_string(selection);
+        return;
+    }
     if (HasAttribute(node, "draggable")) {
         document.status = "dragging " + (AttributeValue(node, "id").empty() ? node.tagName : AttributeValue(node, "id"));
     }
@@ -447,7 +475,13 @@ void Activate(Document& document, Node& node) {
         }
         return;
     }
-    if (node.kind == ElementKind::A || ToLowerAscii(node.tagName) == "a") {
+    const std::string mathTag = ToLowerAscii(node.tagName);
+    const bool mathHref = HasAttribute(node, "href") && (node.kind == ElementKind::Math || (!mathTag.empty() && mathTag[0] == 'm'));
+    if (node.kind == ElementKind::A || mathTag == "a" || mathHref) {
+        const std::string linkType = ToLowerAscii(AttributeValue(node, "xlink:type"));
+        if (!linkType.empty() && linkType != "simple") {
+            return;
+        }
         std::string href = AttributeValue(node, "href");
         if (href.empty()) {
             href = AttributeValue(node, "xlink:href");
@@ -460,8 +494,15 @@ void Activate(Document& document, Node& node) {
         } else if (!href.empty() && href[0] == '#') {
             document.status = "fragment " + href.substr(1);
         } else if (!href.empty()) {
-            const std::string target = AttributeValue(node, "target");
+            std::string target = AttributeValue(node, "target");
+            if (target.empty() && ToLowerAscii(AttributeValue(node, "xlink:show")) == "new") {
+                target = "new";
+            }
             document.status = target.empty() ? "open " + href : "open " + href + " in " + target;
+        }
+        const std::string arcrole = AttributeValue(node, "xlink:arcrole");
+        if (!arcrole.empty() && !document.status.empty()) {
+            document.status += " role " + arcrole;
         }
         return;
     }
@@ -680,8 +721,17 @@ bool DispatchClick(Document& document, const LayoutResult& layout, int x, int y)
         document.focus = nullptr;
         return false;
     }
+    for (Node* cursor = hit; cursor != nullptr; cursor = cursor->parent) {
+        if (ToLowerAscii(cursor->tagName) == "maction") {
+            Activate(document, *hit);
+            return document.status != before;
+        }
+    }
     Node* target = hit;
-    while (target != nullptr && target->kind != ElementKind::A && ToLowerAscii(target->tagName) != "a" && target->kind != ElementKind::Button &&
+    while (target != nullptr && target->kind != ElementKind::A && ToLowerAscii(target->tagName) != "a" &&
+           !(HasAttribute(*target, "href") && !AttributeValue(*target, "href").empty() &&
+               (target->kind == ElementKind::Math || (!ToLowerAscii(target->tagName).empty() && ToLowerAscii(target->tagName)[0] == 'm'))) &&
+           target->kind != ElementKind::Button &&
            target->kind != ElementKind::Summary && target->kind != ElementKind::Label &&
            target->kind != ElementKind::Option && target->kind != ElementKind::Select &&
            target->kind != ElementKind::Input && target->kind != ElementKind::Textarea &&
@@ -722,12 +772,71 @@ bool DispatchHover(Document& document, const LayoutResult& layout, int x, int y)
         return false;
     }
     document.hover = hit;
+    std::string titled;
+    int titledArea = 0;
+    bool foundTitle = false;
+    for (const ElementBox& box : layout.boxes) {
+        const int boxY = box.fixed ? box.y : box.y - document.scrollY;
+        if (box.node == nullptr || x < box.x || y < boxY || x >= box.x + box.width || y >= boxY + box.height) {
+            continue;
+        }
+        const std::string title = AttributeValue(*box.node, "xlink:title");
+        if (title.empty()) {
+            continue;
+        }
+        const int area = box.width * box.height;
+        if (!foundTitle || area < titledArea) {
+            titled = title;
+            titledArea = area;
+            foundTitle = true;
+        }
+    }
+    if (!foundTitle) {
+        for (Node* node = hit; node != nullptr; node = node->parent) {
+            const std::string title = AttributeValue(*node, "xlink:title");
+            if (!title.empty()) {
+                titled = title;
+                foundTitle = true;
+                break;
+            }
+        }
+    }
+    if (!foundTitle) {
+        for (Node* node = hit; node != nullptr; node = node->parent) {
+            if (ToLowerAscii(node->tagName) != "maction" || ToLowerAscii(AttributeValue(*node, "actiontype")) != "statusline") {
+                continue;
+            }
+            int index = 0;
+            for (const std::unique_ptr<Node>& child : node->children) {
+                if (child->type != Node::Type::Element) {
+                    continue;
+                }
+                ++index;
+                if (index == 2) {
+                    titled = GatherText(*child);
+                    foundTitle = !titled.empty();
+                    break;
+                }
+            }
+            break;
+        }
+    }
+    if (foundTitle) {
+        document.status = titled;
+    }
     return true;
 }
 
 PointerShape PointerAt(const LayoutResult& layout, int x, int y, int scrollY) {
     Node* hit = HitTest(layout, x, y, scrollY);
     for (Node* node = hit; node != nullptr; node = node->parent) {
+        const std::string cursor = ToLowerAscii(AttributeValue(*node, "cursor"));
+        if (cursor == "text") {
+            return PointerShape::Text;
+        }
+        if (cursor == "pointer" || cursor == "hand") {
+            return PointerShape::Hand;
+        }
         if (IsTextField(*node)) {
             return PointerShape::Text;
         }
@@ -927,6 +1036,22 @@ void ApplyAutofocus(Document& document) {
 }
 
 void DispatchScroll(Document& document, int delta, int viewportHeight, int contentHeight) {
+    if (document.root != nullptr) {
+        std::vector<const Node*> stack{document.root.get()};
+        while (!stack.empty()) {
+            const Node* node = stack.back();
+            stack.pop_back();
+            const bool svg = node->kind == ElementKind::Svg || ToLowerAscii(node->tagName) == "svg";
+            const Node* parent = node->parent;
+            const bool outermost = parent == nullptr || parent->kind == ElementKind::Body || parent->kind == ElementKind::Html || parent->parent == nullptr;
+            if (svg && outermost && ToLowerAscii(AttributeValue(*node, "zoomandpan")) == "disable") {
+                return;
+            }
+            for (const std::unique_ptr<Node>& child : node->children) {
+                stack.push_back(child.get());
+            }
+        }
+    }
     const int maximum = contentHeight > viewportHeight ? contentHeight - viewportHeight : 0;
     document.scrollY += delta;
     if (document.scrollY < 0) {

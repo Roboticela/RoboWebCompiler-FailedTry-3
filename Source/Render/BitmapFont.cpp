@@ -252,7 +252,7 @@ int EmToPx(int fontSizePx, int milli) {
     return (fontSizePx * milli + 500) / 1000;
 }
 
-int MeasureTextPx(const std::string& text, int fontSizePx, bool bold, bool italic, const std::string& family) {
+int MeasureTextPx(const std::string& text, int fontSizePx, bool bold, bool italic, const std::string& family, int letterSpacingPx, int wordSpacingPx) {
     int width = 0;
     char32_t previous = 0;
     bool hasPrevious = false;
@@ -268,13 +268,19 @@ int MeasureTextPx(const std::string& text, int fontSizePx, bool bold, bool itali
         if (glyph == nullptr) {
             continue;
         }
-        if (hasPrevious && EnsureFace(faceIndex)) {
-            stbtt_fontinfo& info = gFaces[static_cast<std::size_t>(faceIndex)]->info;
-            const float scale = stbtt_ScaleForMappingEmToPixels(&info, static_cast<float>(fontSizePx < 1 ? 1 : fontSizePx));
-            const int kern = stbtt_GetCodepointKernAdvance(&info, static_cast<int>(previous), static_cast<int>(codePoint));
-            width += static_cast<int>(kern * scale + (kern < 0 ? -0.5f : 0.5f));
+        if (hasPrevious) {
+            width += letterSpacingPx;
+            if (EnsureFace(faceIndex)) {
+                stbtt_fontinfo& info = gFaces[static_cast<std::size_t>(faceIndex)]->info;
+                const float scale = stbtt_ScaleForMappingEmToPixels(&info, static_cast<float>(fontSizePx < 1 ? 1 : fontSizePx));
+                const int kern = stbtt_GetCodepointKernAdvance(&info, static_cast<int>(previous), static_cast<int>(codePoint));
+                width += static_cast<int>(kern * scale + (kern < 0 ? -0.5f : 0.5f));
+            }
         }
         width += glyph->advance;
+        if (codePoint == ' ') {
+            width += wordSpacingPx;
+        }
         previous = codePoint;
         hasPrevious = true;
     }
@@ -296,7 +302,9 @@ void DrawTextPx(
     int clipTop,
     int clipRight,
     int clipBottom,
-    const std::string& family) {
+    const std::string& family,
+    int letterSpacingPx,
+    int wordSpacingPx) {
     if (pixels == nullptr) {
         return;
     }
@@ -316,11 +324,14 @@ void DrawTextPx(
         if (glyph == nullptr) {
             continue;
         }
-        if (hasPrevious && EnsureFace(faceIndex)) {
-            stbtt_fontinfo& info = gFaces[static_cast<std::size_t>(faceIndex)]->info;
-            const float scale = stbtt_ScaleForMappingEmToPixels(&info, static_cast<float>(fontSizePx < 1 ? 1 : fontSizePx));
-            const int kern = stbtt_GetCodepointKernAdvance(&info, static_cast<int>(previous), static_cast<int>(codePoint));
-            cursor += static_cast<int>(kern * scale + (kern < 0 ? -0.5f : 0.5f));
+        if (hasPrevious) {
+            cursor += letterSpacingPx;
+            if (EnsureFace(faceIndex)) {
+                stbtt_fontinfo& info = gFaces[static_cast<std::size_t>(faceIndex)]->info;
+                const float scale = stbtt_ScaleForMappingEmToPixels(&info, static_cast<float>(fontSizePx < 1 ? 1 : fontSizePx));
+                const int kern = stbtt_GetCodepointKernAdvance(&info, static_cast<int>(previous), static_cast<int>(codePoint));
+                cursor += static_cast<int>(kern * scale + (kern < 0 ? -0.5f : 0.5f));
+            }
         }
         for (int row = 0; row < glyph->height; ++row) {
             for (int column = 0; column < glyph->width; ++column) {
@@ -330,6 +341,9 @@ void DrawTextPx(
             }
         }
         cursor += glyph->advance;
+        if (codePoint == ' ') {
+            cursor += wordSpacingPx;
+        }
         previous = codePoint;
         hasPrevious = true;
     }

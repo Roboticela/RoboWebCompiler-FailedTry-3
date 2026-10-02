@@ -35,6 +35,7 @@ struct App {
     int mouseY = 0;
     bool refreshing = false;
     bool hasMarquee = false;
+    bool imagesSettled = false;
     LayoutResult layout;
     Framebuffer frame;
     std::wstring pending;
@@ -169,7 +170,24 @@ void Refresh(App& app) {
     app.height = std::max(MIN_VIEWPORT_PX, static_cast<int>(client.bottom - client.top));
     app.layout = LayoutDocument(*app.document, app.width, app.height);
     DispatchScroll(*app.document, 0, app.height, app.layout.contentHeight);
-    app.frame = RenderDocument(app.layout, app.document->scrollY);
+    bool waitingImage = false;
+    for (const DrawOp& op : app.layout.ops) {
+        if (op.deferImage) {
+            waitingImage = true;
+            break;
+        }
+    }
+    if (waitingImage && !app.imagesSettled) {
+        app.frame = RenderDocument(app.layout, app.document->scrollY, false);
+        if (app.window != nullptr) {
+            SetTimer(app.window, 3, 33, nullptr);
+        }
+    } else {
+        app.frame = RenderDocument(app.layout, app.document->scrollY, true);
+        if (app.window != nullptr) {
+            KillTimer(app.window, 3);
+        }
+    }
     SCROLLINFO info;
     ZeroMemory(&info, sizeof(info));
     info.cbSize = sizeof(info);
@@ -462,6 +480,10 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         } else if (app != nullptr && wParam == 2) {
             TickMarquee(*app->document);
             SetSvgAnimationTime(SvgAnimationTime() + 0.033);
+            Refresh(*app);
+        } else if (app != nullptr && wParam == 3) {
+            app->imagesSettled = true;
+            KillTimer(window, 3);
             Refresh(*app);
         }
         return 0;

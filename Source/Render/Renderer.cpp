@@ -3,6 +3,7 @@
 #include "Render/BitmapFont.h"
 #include "Render/ImageDecoder.h"
 
+#include <cmath>
 #include <fstream>
 
 namespace RoboWeb {
@@ -41,7 +42,7 @@ void Blend(Framebuffer& framebuffer, int x, int y, Color color) {
 
 }  // namespace
 
-Framebuffer RenderDocument(const LayoutResult& layout, int scrollY) {
+Framebuffer RenderDocument(const LayoutResult& layout, int scrollY, bool settled) {
     Framebuffer framebuffer;
     framebuffer.width = layout.viewportWidth;
     framebuffer.height = layout.viewportHeight;
@@ -87,34 +88,52 @@ Framebuffer RenderDocument(const LayoutResult& layout, int scrollY) {
                 clipBottom = clipTop + op.clipHeight;
             }
             DrawTextPx(framebuffer.pixels.data(), framebuffer.width, framebuffer.height, x, y, op.text, op.fontSizePx, op.color,
-                op.bold, op.italic, clipLeft, clipTop, clipRight, clipBottom, op.fontFamily);
-            const int textWidth = MeasureTextPx(op.text, op.fontSizePx, op.bold, op.italic, op.fontFamily);
+                op.bold, op.italic, clipLeft, clipTop, clipRight, clipBottom, op.fontFamily, op.letterSpacingPx, op.wordSpacingPx);
+            const int textWidth = MeasureTextPx(op.text, op.fontSizePx, op.bold, op.italic, op.fontFamily, op.letterSpacingPx, op.wordSpacingPx);
             const int line = LineHeightPx(op.fontSizePx);
+            const Color lineColor = op.hasDecorationColor ? op.decorationColor : op.color;
             if (op.underline) {
                 for (int column = 0; column < textWidth; ++column) {
-                    if (InsideClip(op, originY, x + column, y + line - 2, framebuffer.width, framebuffer.height)) {
-                        Blend(framebuffer, x + column, y + line - 2, op.color);
+                    if (InsideClip(op, originY, x + column, y + line - 2 + op.underlineOffsetPx, framebuffer.width, framebuffer.height)) {
+                        Blend(framebuffer, x + column, y + line - 2 + op.underlineOffsetPx, lineColor);
                     }
                 }
             }
             if (op.strike) {
                 for (int column = 0; column < textWidth; ++column) {
                     if (InsideClip(op, originY, x + column, y + line / 2, framebuffer.width, framebuffer.height)) {
-                        Blend(framebuffer, x + column, y + line / 2, op.color);
+                        Blend(framebuffer, x + column, y + line / 2, lineColor);
                     }
                 }
             }
         } else if (op.kind == DrawOp::Kind::Image) {
+            if (op.deferImage && !settled) {
+                continue;
+            }
             DecodedImage image = DecodeImageFile(op.imagePath);
             if (!image.ok || image.width <= 0 || image.height <= 0) {
                 continue;
             }
             for (int row = 0; row < op.height; ++row) {
                 for (int column = 0; column < op.width; ++column) {
-                    const int sourceX = column * image.width / op.width;
-                    const int sourceY = row * image.height / op.height;
-                    const std::size_t source = static_cast<std::size_t>((sourceY * image.width + sourceX) * 4);
-                    Color color{image.rgba[source], image.rgba[source + 1], image.rgba[source + 2], 255};
+                    const int sourceY = row * image.height / std::max(1, op.height);
+                    Color color{0, 0, 0, 255};
+                    if (!op.smoothImage) {
+                        const int sourceX = column * image.width / std::max(1, op.width);
+                        const std::size_t source = static_cast<std::size_t>((sourceY * image.width + sourceX) * 4);
+                        color = Color{image.rgba[source], image.rgba[source + 1], image.rgba[source + 2], 255};
+                    } else {
+                        const double sourceX = (static_cast<double>(column) + 0.5) * image.width / std::max(1, op.width) - 0.5;
+                        const int left = std::max(0, std::min(image.width - 1, static_cast<int>(std::floor(sourceX))));
+                        const int right = std::min(image.width - 1, left + 1);
+                        const double mix = std::max(0.0, std::min(1.0, sourceX - left));
+                        const std::size_t leftIndex = static_cast<std::size_t>((sourceY * image.width + left) * 4);
+                        const std::size_t rightIndex = static_cast<std::size_t>((sourceY * image.width + right) * 4);
+                        auto mixChannel = [&](int offset) {
+                            return static_cast<std::uint8_t>(image.rgba[leftIndex + offset] + (image.rgba[rightIndex + offset] - image.rgba[leftIndex + offset]) * mix);
+                        };
+                        color = Color{mixChannel(0), mixChannel(1), mixChannel(2), 255};
+                    }
                     if (InsideClip(op, originY, x + column, y + row, framebuffer.width, framebuffer.height)) {
                         Blend(framebuffer, x + column, y + row, color);
                     }

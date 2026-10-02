@@ -634,17 +634,17 @@ Document HtmlParser::Parse(const std::string& sourceText, const std::string& pat
     };
 
     auto handleStart = [&](Token token) {
-        if (token.name == "image") {
-            diagnostics.Warning(path, token.line, token.column, "element 'image' is an obsolete alias for 'img'");
-            token.name = "img";
-        }
-        ElementKind kind = FindElement(token.name);
         bool foreign = false;
         for (Node* frame : stack) {
             if (frame->kind == ElementKind::Svg || frame->kind == ElementKind::Math) {
                 foreign = true;
             }
         }
+        if (token.name == "image" && !foreign) {
+            diagnostics.Warning(path, token.line, token.column, "element 'image' is an obsolete alias for 'img'");
+            token.name = "img";
+        }
+        ElementKind kind = FindElement(token.name);
         const bool foreignChild = foreign && kind == ElementKind::Unknown;
         if (kind == ElementKind::Unknown && !foreignChild) {
             if (IsCustomElementName(token.name)) {

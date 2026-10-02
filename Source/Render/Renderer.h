@@ -14,7 +14,7 @@ struct Framebuffer {
     std::vector<std::uint8_t> pixels;
 };
 
-Framebuffer RenderDocument(const LayoutResult& layout, int scrollY);
+Framebuffer RenderDocument(const LayoutResult& layout, int scrollY, bool settled = true);
 bool WritePpm(const Framebuffer& framebuffer, const std::string& path);
 std::uint8_t PixelRed(const Framebuffer& framebuffer, int x, int y);
 std::uint8_t PixelGreen(const Framebuffer& framebuffer, int x, int y);

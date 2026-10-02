@@ -238,6 +238,112 @@ void ApplyDeclaration(ElementStyle& rule, const std::string& property, const std
         }
     } else if (name == "font-size") {
         rule.fontSizePx = ParseSizePx(value);
+    } else if (name == "line-height") {
+        const std::string spacing = ToLowerAscii(value);
+        if (spacing == "normal") {
+            rule.hasLineHeight = true;
+            rule.lineHeightPx = 0;
+            rule.lineHeightMilli = -1;
+        } else if (spacing.find('%') != std::string::npos) {
+            rule.hasLineHeight = true;
+            rule.lineHeightMilli = static_cast<int>(std::strtod(spacing.c_str(), nullptr) * 10.0 + 0.5);
+            rule.lineHeightPx = -1;
+        } else if (spacing.size() > 2 && spacing.compare(spacing.size() - 2, 2, "em") == 0) {
+            rule.hasLineHeight = true;
+            rule.lineHeightMilli = static_cast<int>(std::strtod(spacing.c_str(), nullptr) * 1000.0 + 0.5);
+            rule.lineHeightPx = -1;
+        } else if (spacing.find("px") != std::string::npos) {
+            rule.hasLineHeight = true;
+            rule.lineHeightPx = std::atoi(spacing.c_str());
+            rule.lineHeightMilli = -1;
+        } else if (!spacing.empty()) {
+            const double multiplier = std::strtod(spacing.c_str(), nullptr);
+            if (multiplier > 0) {
+                rule.hasLineHeight = true;
+                rule.lineHeightMilli = static_cast<int>(multiplier * 1000.0 + 0.5);
+                rule.lineHeightPx = -1;
+            }
+        }
+    } else if (name == "word-spacing") {
+        const std::string spacing = ToLowerAscii(value);
+        if (spacing == "normal") {
+            rule.wordSpacingPx = 0;
+            rule.wordSpacingMilli = -1;
+            rule.hasWordSpacing = true;
+        } else if (spacing.find('%') != std::string::npos) {
+            rule.wordSpacingMilli = static_cast<int>(std::strtod(spacing.c_str(), nullptr) * 10.0 + (std::strtod(spacing.c_str(), nullptr) < 0 ? -0.5 : 0.5));
+            rule.wordSpacingPx = 0;
+            rule.hasWordSpacing = true;
+        } else if (spacing.size() > 2 && spacing.compare(spacing.size() - 2, 2, "em") == 0) {
+            rule.wordSpacingMilli = static_cast<int>(std::strtod(spacing.c_str(), nullptr) * 1000.0 + (std::strtod(spacing.c_str(), nullptr) < 0 ? -0.5 : 0.5));
+            rule.wordSpacingPx = 0;
+            rule.hasWordSpacing = true;
+        } else if (!spacing.empty()) {
+            rule.wordSpacingPx = std::atoi(spacing.c_str());
+            rule.wordSpacingMilli = -1;
+            rule.hasWordSpacing = true;
+        }
+    } else if (name == "text-transform") {
+        const std::string transform = ToLowerAscii(value);
+        if (transform == "uppercase") {
+            rule.textTransform = 1;
+            rule.hasTextTransform = true;
+        } else if (transform == "lowercase") {
+            rule.textTransform = 2;
+            rule.hasTextTransform = true;
+        } else if (transform == "capitalize") {
+            rule.textTransform = 3;
+            rule.hasTextTransform = true;
+        } else if (transform == "none") {
+            rule.textTransform = 0;
+            rule.hasTextTransform = true;
+        }
+    } else if (name == "text-indent") {
+        std::string token;
+        bool lengthSet = false;
+        const std::string lower = ToLowerAscii(value);
+        for (std::size_t index = 0; index <= lower.size(); ++index) {
+            const char letter = index < lower.size() ? lower[index] : ' ';
+            if (letter == ' ' || letter == '\t') {
+                if (!token.empty()) {
+                    if (token == "hanging") {
+                        rule.textIndentHanging = true;
+                    } else if (token == "each-line") {
+                        rule.textIndentEachLine = true;
+                    } else if (!lengthSet) {
+                        if (token.find('%') != std::string::npos) {
+                            rule.textIndentMilli = static_cast<int>(std::strtod(token.c_str(), nullptr) * 10.0 + (std::strtod(token.c_str(), nullptr) < 0 ? -0.5 : 0.5));
+                            rule.textIndentPx = 0;
+                        } else if (token.size() > 2 && token.compare(token.size() - 2, 2, "em") == 0) {
+                            const double ems = std::strtod(token.c_str(), nullptr);
+                            rule.textIndentFromEm = true;
+                            rule.textIndentEmMilli = static_cast<int>(ems * 1000.0 + (ems < 0 ? -0.5 : 0.5));
+                            rule.textIndentMilli = -1;
+                            rule.textIndentPx = 0;
+                        } else {
+                            rule.textIndentPx = std::atoi(token.c_str());
+                            rule.textIndentMilli = -1;
+                        }
+                        lengthSet = true;
+                    }
+                }
+                token.clear();
+            } else {
+                token.push_back(letter);
+            }
+        }
+        if (lengthSet) {
+            rule.hasTextIndent = true;
+        }
+    } else if (name == "letter-spacing") {
+        const std::string spacing = ToLowerAscii(value);
+        if (spacing == "normal") {
+            rule.letterSpacingPx = 0;
+            rule.hasLetterSpacing = true;
+        } else if (!spacing.empty()) {
+            rule.letterSpacingPx = std::atoi(spacing.c_str());
+            rule.hasLetterSpacing = true;
+        }
     } else if (name == "color") {
         rule.hasColor = ParseHexColor(value, rule.colorRed, rule.colorGreen, rule.colorBlue);
     } else if (name == "background-color" || name == "background") {
@@ -287,6 +393,44 @@ void ApplyDeclaration(ElementStyle& rule, const std::string& property, const std
             rule.textAlign = 1;
         } else if (align == "right" || align == "end") {
             rule.textAlign = 2;
+        }
+    } else if (name == "text-underline-offset") {
+        const std::string offset = ToLowerAscii(Trim(value));
+        if (offset == "auto") {
+            rule.underlineOffsetPx = 0;
+            rule.underlineOffsetRelative = false;
+            rule.hasUnderlineOffset = true;
+        } else if (offset.find('%') != std::string::npos) {
+            const double percent = std::strtod(offset.c_str(), nullptr);
+            rule.underlineOffsetMilli = static_cast<int>(percent * 10.0 + (percent < 0 ? -0.5 : 0.5));
+            rule.underlineOffsetRelative = true;
+            rule.hasUnderlineOffset = true;
+        } else if (offset.size() > 2 && offset.compare(offset.size() - 2, 2, "em") == 0) {
+            const double ems = std::strtod(offset.c_str(), nullptr);
+            rule.underlineOffsetMilli = static_cast<int>(ems * 1000.0 + (ems < 0 ? -0.5 : 0.5));
+            rule.underlineOffsetRelative = true;
+            rule.hasUnderlineOffset = true;
+        } else if (!offset.empty()) {
+            rule.underlineOffsetPx = std::atoi(offset.c_str());
+            rule.underlineOffsetRelative = false;
+            rule.hasUnderlineOffset = true;
+        }
+    } else if (name == "text-decoration-color") {
+        const std::string color = ToLowerAscii(Trim(value));
+        if (color == "currentcolor") {
+            rule.hasDecorationColor = true;
+            rule.decorationUsesText = true;
+        } else if (color == "transparent") {
+            rule.decorationRed = 0;
+            rule.decorationGreen = 0;
+            rule.decorationBlue = 0;
+            rule.decorationAlpha = 0;
+            rule.decorationUsesText = false;
+            rule.hasDecorationColor = true;
+        } else if (ParseHexColor(value, rule.decorationRed, rule.decorationGreen, rule.decorationBlue)) {
+            rule.decorationAlpha = 255;
+            rule.decorationUsesText = false;
+            rule.hasDecorationColor = true;
         }
     } else if (name == "text-decoration" || name == "text-decoration-line") {
         const std::string decoration = ToLowerAscii(value);
@@ -554,7 +698,8 @@ void AddRule(Document& document, const std::string& selector, const std::string&
         rule.hasBackground || rule.displayKind >= 0 || rule.widthPx >= 0 || rule.heightPx >= 0 || rule.marginTopPx >= 0 ||
         rule.marginRightPx >= 0 || rule.marginBottomPx >= 0 || rule.marginLeftPx >= 0 || rule.paddingTopPx >= 0 ||
         rule.paddingRightPx >= 0 || rule.paddingBottomPx >= 0 || rule.paddingLeftPx >= 0 || rule.textAlign >= 0 ||
-        rule.decoration >= 0 || rule.whiteSpace >= 0 || rule.borderPx >= 0) {
+        rule.decoration >= 0 || rule.whiteSpace >= 0 || rule.borderPx >= 0 || rule.hasLetterSpacing || rule.hasWordSpacing || rule.hasLineHeight ||
+            rule.hasTextIndent || rule.hasTextTransform || rule.hasDecorationColor || rule.hasUnderlineOffset) {
         document.styleRules.push_back(rule);
     }
 }
@@ -646,7 +791,9 @@ void Walk(Document& document, Node& node, StyleJob& job) {
         }
     } else if (node.kind == ElementKind::Style) {
         const std::string media = ToLowerAscii(AttributeValue(node, "media"));
-        if (media.find("print") == std::string::npos && media.find("speech") == std::string::npos) {
+        const std::string styleType = ToLowerAscii(AttributeValue(node, "type"));
+        const bool cssType = styleType.empty() || styleType.find("css") != std::string::npos;
+        if (cssType && media.find("print") == std::string::npos && media.find("speech") == std::string::npos) {
             ParseStylesheet(document, GatherText(node), job);
         }
     }

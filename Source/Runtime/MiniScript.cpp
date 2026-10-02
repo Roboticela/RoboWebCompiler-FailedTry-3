@@ -66,11 +66,59 @@ void SetHidden(Node& node, bool hidden) {
     }
 }
 
+bool ReadDataset(const Node& node, const std::string& expression, std::string& value) {
+    std::string text = Trim(expression);
+    if (text.rfind("this.", 0) == 0) {
+        text = text.substr(5);
+    }
+    if (text.rfind("dataset.", 0) != 0) {
+        return false;
+    }
+    const std::string key = text.substr(std::string("dataset.").size());
+    if (key.empty()) {
+        return false;
+    }
+    for (const Attribute& attribute : node.attributes) {
+        const std::string attributeName = ToLowerAscii(attribute.name);
+        if (attributeName.rfind("data-", 0) != 0 || attributeName.size() < 6) {
+            continue;
+        }
+        const std::string suffix = attributeName.substr(5);
+        if (suffix.rfind("xml", 0) == 0) {
+            continue;
+        }
+        std::string camel;
+        bool capitalize = false;
+        for (char character : suffix) {
+            if (character == '-') {
+                capitalize = true;
+                continue;
+            }
+            if (capitalize && character >= 'a' && character <= 'z') {
+                camel.push_back(static_cast<char>(character - 'a' + 'A'));
+                capitalize = false;
+            } else {
+                camel.push_back(character);
+                capitalize = false;
+            }
+        }
+        if (camel == key) {
+            value = attribute.value;
+            return true;
+        }
+    }
+    return false;
+}
+
 bool AssignProperty(Document& document, Node& node, const std::string& property, const std::string& rawValue) {
     (void)document;
     const std::string name = ToLowerAscii(Trim(property));
     std::size_t index = 0;
-    const std::string valueText = Trim(rawValue);
+    std::string valueText = Trim(rawValue);
+    std::string datasetValue;
+    if (ReadDataset(node, valueText, datasetValue)) {
+        valueText = "\"" + datasetValue + "\"";
+    }
     if (name == "textcontent" || name == "innertext") {
         std::string value;
         std::size_t cursor = 0;

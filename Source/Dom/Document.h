@@ -101,6 +101,33 @@ struct ElementStyle {
     int decoration = -1;
     int whiteSpace = -1;
     int borderPx = -1;
+    int letterSpacingPx = 0;
+    bool hasLetterSpacing = false;
+    int wordSpacingPx = 0;
+    int wordSpacingMilli = -1;
+    bool hasWordSpacing = false;
+    int lineHeightPx = -1;
+    int lineHeightMilli = -1;
+    bool hasLineHeight = false;
+    int textIndentPx = 0;
+    int textIndentMilli = -1;
+    int textIndentEmMilli = 0;
+    bool textIndentFromEm = false;
+    bool textIndentHanging = false;
+    bool textIndentEachLine = false;
+    bool hasTextIndent = false;
+    int textTransform = 0;
+    bool hasTextTransform = false;
+    std::uint8_t decorationRed = 0;
+    std::uint8_t decorationGreen = 0;
+    std::uint8_t decorationBlue = 0;
+    std::uint8_t decorationAlpha = 255;
+    bool decorationUsesText = false;
+    bool hasDecorationColor = false;
+    int underlineOffsetPx = 0;
+    int underlineOffsetMilli = 0;
+    bool underlineOffsetRelative = false;
+    bool hasUnderlineOffset = false;
 };
 
 struct Document {

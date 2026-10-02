@@ -11,6 +11,15 @@ namespace RoboWeb {
 
 namespace {
 
+bool NestedSvg(const Node& node) {
+    for (const Node* parent = node.parent; parent != nullptr; parent = parent->parent) {
+        if (parent->kind == ElementKind::Svg || ToLowerAscii(parent->tagName) == "svg") {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool ContainsToken(const char* list, const std::string& value) {
     std::stringstream stream(list);
     std::string token;
@@ -174,6 +183,24 @@ void ValidateNode(const Document& document, Diagnostics& diagnostics, const Node
                 } else if (!ids.insert(attribute.value).second) {
                     diagnostics.Warning(
                         document.sourcePath, attribute.line, attribute.column, "duplicate id '" + attribute.value + "'");
+                }
+            }
+            if (name == "version" && (node.kind == ElementKind::Svg || ToLowerAscii(node.tagName) == "svg")) {
+                if (NestedSvg(node)) {
+                    diagnostics.Warning(
+                        document.sourcePath, attribute.line, attribute.column, "version is only allowed on the root svg element");
+                } else if (attribute.value != "1.0" && attribute.value != "1.1") {
+                    diagnostics.Warning(
+                        document.sourcePath, attribute.line, attribute.column,
+                        "svg version '" + attribute.value + "' is advisory and is not 1.0 or 1.1");
+                }
+            }
+            if (name == "baseprofile" && (node.kind == ElementKind::Svg || ToLowerAscii(node.tagName) == "svg")) {
+                const std::string profile = ToLowerAscii(attribute.value);
+                if (profile != "none" && profile != "full" && profile != "basic" && profile != "tiny") {
+                    diagnostics.Warning(
+                        document.sourcePath, attribute.line, attribute.column,
+                        "svg baseProfile '" + attribute.value + "' is metadata and is not a known profile");
                 }
             }
             if (name == "dir") {

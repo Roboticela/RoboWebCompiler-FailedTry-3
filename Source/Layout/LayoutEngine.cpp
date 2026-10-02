@@ -263,6 +263,32 @@ std::string CollapsedText(const std::string& text, bool pre) {
     return collapsed;
 }
 
+std::string ApplyTextTransform(const std::string& text, int transform) {
+    if (transform == 0 || text.empty()) {
+        return text;
+    }
+    std::string result;
+    bool wordStart = true;
+    for (unsigned char character : text) {
+        char letter = static_cast<char>(character);
+        if (letter == ' ' || letter == '\n' || letter == '\t') {
+            wordStart = true;
+        } else if (transform == 3) {
+            if (wordStart && letter >= 'a' && letter <= 'z') {
+                letter = static_cast<char>(letter - 'a' + 'A');
+            }
+            wordStart = false;
+        }
+        if (transform == 1 && letter >= 'a' && letter <= 'z') {
+            letter = static_cast<char>(letter - 'a' + 'A');
+        } else if (transform == 2 && letter >= 'A' && letter <= 'Z') {
+            letter = static_cast<char>(letter - 'A' + 'a');
+        }
+        result.push_back(letter);
+    }
+    return result;
+}
+
 Node* SelectedOption(Node& selectNode) {
     Node* first = nullptr;
     std::vector<Node*> stack{&selectNode};
@@ -426,6 +452,32 @@ struct Engine {
         result->ops.push_back(op);
     }
 
+    void FillCoverage(double x, double y, double width, double height, Color color, bool fixed) {
+        if (color.alpha == 0 || width <= 0 || height <= 0) {
+            return;
+        }
+        const int left = static_cast<int>(std::floor(x));
+        const int top = static_cast<int>(std::floor(y));
+        const int right = static_cast<int>(std::ceil(x + width));
+        const int bottom = static_cast<int>(std::ceil(y + height));
+        for (int row = top; row < bottom; ++row) {
+            const double rowTop = std::max(y, static_cast<double>(row));
+            const double rowBottom = std::min(y + height, static_cast<double>(row + 1));
+            const double rowCover = std::max(0.0, rowBottom - rowTop);
+            for (int column = left; column < right; ++column) {
+                const double columnLeft = std::max(x, static_cast<double>(column));
+                const double columnRight = std::min(x + width, static_cast<double>(column + 1));
+                const double cover = rowCover * std::max(0.0, columnRight - columnLeft);
+                if (cover <= 0.001) {
+                    continue;
+                }
+                Color pixel = color;
+                pixel.alpha = static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, static_cast<double>(color.alpha) * cover)));
+                Fill(column, row, 1, 1, pixel, fixed);
+            }
+        }
+    }
+
     void Stroke(int x, int y, int width, int height, Color color, bool fixed) {
         DrawOp op;
         op.kind = DrawOp::Kind::Stroke;
@@ -443,23 +495,29 @@ struct Engine {
         if (text.empty()) {
             return;
         }
+        const std::string shown = ApplyTextTransform(text, style.textTransform);
         if (style.mark || style.background.alpha != 0) {
             Color background = style.mark ? Color{255, 255, 0, 255} : style.background;
-            Fill(x, y, MeasureTextPx(text, style.fontSizePx, style.bold, style.italic, style.fontFamily), LineHeightPx(style.fontSizePx), background, fixed,
+            Fill(x, y, MeasureTextPx(shown, style.fontSizePx, style.bold, style.italic, style.fontFamily, style.letterSpacingPx, style.wordSpacingPx), LineHeightPx(style.fontSizePx), background, fixed,
                 clipped, clipX, clipY, clipWidth, clipHeight);
         }
         DrawOp op;
         op.kind = DrawOp::Kind::Text;
         op.x = x;
         op.y = y + style.baselineShift;
-        op.text = text;
+        op.text = shown;
         op.fontSizePx = style.fontSizePx;
+        op.letterSpacingPx = style.letterSpacingPx;
+        op.wordSpacingPx = style.wordSpacingPx;
         op.color = style.color;
         op.bold = style.bold;
         op.italic = style.italic;
         op.monospace = style.monospace;
         op.underline = style.underline;
         op.strike = style.strike;
+        op.decorationColor = style.decorationColor;
+        op.hasDecorationColor = style.hasDecorationColor;
+        op.underlineOffsetPx = style.underlineOffsetPx;
         op.fixed = fixed;
         op.fontFamily = style.fontFamily;
         op.clipped = clipped;
@@ -620,8 +678,14 @@ struct Engine {
                 op.width = width;
                 op.height = height;
                 op.imagePath = path;
+                op.deferImage = ToLowerAscii(AttributeValue(node, "decoding")) == "async";
                 op.fixed = fixed;
                 result->ops.push_back(op);
+                std::string fetchMode = "omit";
+                if (HasAttribute(node, "crossorigin")) {
+                    fetchMode = ToLowerAscii(AttributeValue(node, "crossorigin")) == "use-credentials" ? "include" : "anonymous";
+                }
+                NoteResourceFetch(source, ToLowerAscii(AttributeValue(node, "fetchpriority")), fetchMode);
                 if (style.border > 0) {
                     Stroke(x, y, width, height, Color{0, 0, 0, 255}, fixed);
                 }
@@ -802,6 +866,14 @@ struct Engine {
         return std::atoi(text.c_str());
     }
 
+    double SvgReal(const Node& node, const char* name, double fallback) {
+        const std::string text = AttributeValue(node, name);
+        if (text.empty()) {
+            return fallback;
+        }
+        return std::strtod(text.c_str(), nullptr);
+    }
+
     void FillEllipse(int centerX, int centerY, int radiusX, int radiusY, Color color, bool fixed) {
         if (radiusX < 1 || radiusY < 1 || color.alpha == 0) {
             return;
@@ -937,6 +1009,66 @@ struct Engine {
             for (const Hit& hit : hits) {
                 if (wind != 0 && hit.x > cursor) {
                     Fill(originX + cursor, originY + row, hit.x - cursor, 1, color, fixed);
+                }
+                wind += hit.wind;
+                cursor = hit.x;
+            }
+        }
+    }
+
+    void FillPolygonInRect(const std::vector<SvgPoint>& points, int clipX, int clipY, int clipWidth, int clipHeight, Color color, bool fixed, bool evenOdd) {
+        if (points.size() < 3 || color.alpha == 0 || clipWidth <= 0 || clipHeight <= 0) {
+            return;
+        }
+        const int clipRight = clipX + clipWidth;
+        const int clipBottom = clipY + clipHeight;
+        auto span = [&](int left, int right, int row) {
+            const int start = std::max(left, clipX);
+            const int end = std::min(right, clipRight);
+            if (end > start && row >= clipY && row < clipBottom) {
+                Fill(start, row, end - start, 1, color, fixed);
+            }
+        };
+        for (int row = clipY; row < clipBottom; ++row) {
+            if (evenOdd) {
+                std::vector<int> crossings;
+                for (std::size_t index = 0; index < points.size(); ++index) {
+                    const SvgPoint& start = points[index];
+                    const SvgPoint& end = points[(index + 1) % points.size()];
+                    const bool crosses = (start.y <= row && end.y > row) || (end.y <= row && start.y > row);
+                    if (!crosses || start.y == end.y) {
+                        continue;
+                    }
+                    const double distance = (static_cast<double>(row) + 0.5 - start.y) / (end.y - start.y);
+                    crossings.push_back(static_cast<int>(start.x + distance * (end.x - start.x)));
+                }
+                std::sort(crossings.begin(), crossings.end());
+                for (std::size_t index = 0; index + 1 < crossings.size(); index += 2) {
+                    span(crossings[index], crossings[index + 1], row);
+                }
+                continue;
+            }
+            struct Hit {
+                int x = 0;
+                int wind = 0;
+            };
+            std::vector<Hit> hits;
+            for (std::size_t index = 0; index < points.size(); ++index) {
+                const SvgPoint& start = points[index];
+                const SvgPoint& end = points[(index + 1) % points.size()];
+                const bool crosses = (start.y <= row && end.y > row) || (end.y <= row && start.y > row);
+                if (!crosses || start.y == end.y) {
+                    continue;
+                }
+                const double distance = (static_cast<double>(row) + 0.5 - start.y) / (end.y - start.y);
+                hits.push_back(Hit{static_cast<int>(start.x + distance * (end.x - start.x)), end.y > start.y ? 1 : -1});
+            }
+            std::sort(hits.begin(), hits.end(), [](const Hit& left, const Hit& right) { return left.x < right.x; });
+            int wind = 0;
+            int cursor = hits.empty() ? 0 : hits.front().x;
+            for (const Hit& hit : hits) {
+                if (wind != 0 && hit.x > cursor) {
+                    span(cursor, hit.x, row);
                 }
                 wind += hit.wind;
                 cursor = hit.x;
@@ -1159,6 +1291,8 @@ struct Engine {
         int clipY = 0;
         int clipWidth = 0;
         int clipHeight = 0;
+        std::vector<SvgPoint> clipPoints;
+        bool clipEvenOdd = false;
         bool fillEvenOdd = false;
         double rotateDeg = 0;
         double rotateX = 0;
@@ -1167,6 +1301,8 @@ struct Engine {
         double fillOpacity = 1;
         double strokeOpacity = 1;
         Color currentColor{0, 0, 0, 255};
+        int shapeRendering = 0;
+        int textRendering = 0;
     };
 
     Color WithOpacity(Color color, double opacity) {
@@ -1187,7 +1323,68 @@ struct Engine {
         if (!AttributeValue(node, "color").empty()) {
             ParseColor(AttributeValue(node, "color"), space.currentColor);
         }
-        const std::string fillText = ToLowerAscii(AttributeValue(node, "fill"));
+        std::string fillText = ToLowerAscii(AttributeValue(node, "fill"));
+        if (fillText.empty()) {
+            const std::string style = ToLowerAscii(AttributeValue(node, "style"));
+            const std::size_t fillAt = style.find("fill:");
+            if (fillAt != std::string::npos) {
+                const std::size_t end = style.find(';', fillAt);
+                fillText = style.substr(fillAt + 5, end == std::string::npos ? std::string::npos : end - (fillAt + 5));
+                while (!fillText.empty() && fillText.front() == ' ') {
+                    fillText.erase(fillText.begin());
+                }
+            }
+        }
+        if (fillText.empty() && document != nullptr) {
+            const std::string classes = " " + ToLowerAscii(AttributeValue(node, "class")) + " ";
+            const std::string id = ToLowerAscii(AttributeValue(node, "id"));
+            const std::string tag = ToLowerAscii(node.tagName);
+            for (const ElementStyle& rule : document->styleRules) {
+                const std::string selector = rule.selector;
+                std::string head = selector;
+                std::string wantedLanguage;
+                const std::size_t langAt = selector.find(":lang(");
+                if (langAt != std::string::npos) {
+                    head = selector.substr(0, langAt);
+                    const std::size_t close = selector.find(')', langAt);
+                    wantedLanguage = selector.substr(langAt + 6, close == std::string::npos ? std::string::npos : close - (langAt + 6));
+                }
+                bool languageOk = wantedLanguage.empty();
+                if (!languageOk) {
+                    for (const Node* cursor = &node; cursor != nullptr; cursor = cursor->parent) {
+                        std::string spoken = ToLowerAscii(AttributeValue(*cursor, "xml:lang"));
+                        if (spoken.empty()) {
+                            spoken = ToLowerAscii(AttributeValue(*cursor, "lang"));
+                        }
+                        if (spoken == wantedLanguage || (spoken.size() > wantedLanguage.size() && spoken.compare(0, wantedLanguage.size(), wantedLanguage) == 0 &&
+                                                            spoken[wantedLanguage.size()] == '-')) {
+                            languageOk = true;
+                            break;
+                        }
+                    }
+                }
+                bool matched = false;
+                if (languageOk && !head.empty() && head[0] == '.') {
+                    matched = classes.find(" " + head.substr(1) + " ") != std::string::npos;
+                } else if (languageOk && !head.empty() && head[0] == '#') {
+                    matched = head.substr(1) == id;
+                } else if (languageOk && head.empty()) {
+                    matched = true;
+                } else if (languageOk) {
+                    const std::size_t dot = head.find('.');
+                    if (dot != std::string::npos && head.substr(0, dot) == tag) {
+                        matched = classes.find(" " + head.substr(dot + 1) + " ") != std::string::npos;
+                    } else if (dot == std::string::npos && head == tag) {
+                        matched = true;
+                    }
+                }
+                if (matched && rule.hasColor) {
+                    space.fill = Color{rule.colorRed, rule.colorGreen, rule.colorBlue, 255};
+                    space.fillUrl.clear();
+                    fillText = "styled";
+                }
+            }
+        }
         if (fillText == "currentcolor") {
             space.fill = space.currentColor;
             space.fillUrl.clear();
@@ -1224,6 +1421,20 @@ struct Engine {
         } else if (rule == "nonzero") {
             space.fillEvenOdd = false;
         }
+        const std::string shape = ToLowerAscii(AttributeValue(node, "shape-rendering"));
+        if (shape == "geometricprecision") {
+            space.shapeRendering = 1;
+        } else if (shape == "crispedges") {
+            space.shapeRendering = 2;
+        } else if (shape == "auto" || shape == "optimizespeed") {
+            space.shapeRendering = 0;
+        }
+        const std::string textHint = ToLowerAscii(AttributeValue(node, "text-rendering"));
+        if (textHint == "optimizelegibility") {
+            space.textRendering = 2;
+        } else if (textHint == "geometricprecision" || textHint == "auto" || textHint == "optimizespeed") {
+            space.textRendering = 0;
+        }
         const std::string anchor = ToLowerAscii(AttributeValue(node, "text-anchor"));
         if (anchor == "start" || anchor == "middle" || anchor == "end") {
             space.textAnchor = anchor;
@@ -1238,15 +1449,54 @@ struct Engine {
             Node* path = id.empty() ? nullptr : FindSvgById(*root, id);
             if (path != nullptr) {
                 for (const std::unique_ptr<Node>& child : path->children) {
+                    if (ToLowerAscii(child->tagName) == "polygon") {
+                        space.clipPoints = MapSvgPoints(ParsePointList(AttributeValue(*child, "points")), space);
+                        space.clipEvenOdd = ToLowerAscii(AttributeValue(*child, "clip-rule")) == "evenodd";
+                        break;
+                    }
                     if (ToLowerAscii(child->tagName) != "rect") {
                         continue;
                     }
                     space.clipped = true;
-                    space.clipX = SvgX(space, SvgNumber(*child, "x", 0));
-                    space.clipY = SvgY(space, SvgNumber(*child, "y", 0));
-                    space.clipWidth = SvgLength(space, SvgNumber(*child, "width", 0), true);
-                    space.clipHeight = SvgLength(space, SvgNumber(*child, "height", 0), false);
+                    const bool objectBox = ToLowerAscii(AttributeValue(*path, "clippathunits")) == "objectboundingbox";
+                    if (objectBox) {
+                        const double elementX = SvgNumber(node, "x", 0);
+                        const double elementY = SvgNumber(node, "y", 0);
+                        const double elementWidth = SvgNumber(node, "width", 0);
+                        const double elementHeight = SvgNumber(node, "height", 0);
+                        space.clipX = SvgX(space, elementX + SvgOffset(AttributeValue(*child, "x")) * elementWidth);
+                        space.clipY = SvgY(space, elementY + SvgOffset(AttributeValue(*child, "y")) * elementHeight);
+                        space.clipWidth = SvgLength(space, SvgOffset(AttributeValue(*child, "width")) * elementWidth, true);
+                        space.clipHeight = SvgLength(space, SvgOffset(AttributeValue(*child, "height")) * elementHeight, false);
+                    } else {
+                        space.clipX = SvgX(space, SvgNumber(*child, "x", 0));
+                        space.clipY = SvgY(space, SvgNumber(*child, "y", 0));
+                        space.clipWidth = SvgLength(space, SvgNumber(*child, "width", 0), true);
+                        space.clipHeight = SvgLength(space, SvgNumber(*child, "height", 0), false);
+                    }
                     break;
+                }
+            }
+        }
+        const std::string clipRect = ToLowerAscii(AttributeValue(node, "clip"));
+        const std::size_t rectAt = clipRect.find("rect");
+        if (rectAt != std::string::npos) {
+            std::size_t index = clipRect.find('(', rectAt);
+            double top = 0;
+            double right = 0;
+            double bottom = 0;
+            double left = 0;
+            if (index != std::string::npos) {
+                ++index;
+                if (ReadSvgNumber(clipRect, index, top) && ReadSvgNumber(clipRect, index, right) && ReadSvgNumber(clipRect, index, bottom) &&
+                    ReadSvgNumber(clipRect, index, left) && right > left && bottom > top) {
+                    const double elementX = SvgNumber(node, "x", 0);
+                    const double elementY = SvgNumber(node, "y", 0);
+                    space.clipped = true;
+                    space.clipX = SvgX(space, elementX + left);
+                    space.clipY = SvgY(space, elementY + top);
+                    space.clipWidth = SvgLength(space, right - left, true);
+                    space.clipHeight = SvgLength(space, bottom - top, false);
                 }
             }
         }
@@ -1325,7 +1575,7 @@ struct Engine {
         }
     }
 
-    void ApplySvgTransform(const std::string& text, SvgSpace& space) {
+    void ApplySvgTransform(const std::string& text, SvgSpace& space, bool hasOrigin = false, double originX = 0, double originY = 0) {
         const std::size_t translate = text.find("translate");
         if (translate != std::string::npos) {
             std::size_t index = text.find('(', translate);
@@ -1363,11 +1613,16 @@ struct Engine {
             if (index != std::string::npos) {
                 ++index;
                 ReadSvgNumber(text, index, angle);
-                ReadSvgNumber(text, index, centerX);
+                const bool gotCenter = ReadSvgNumber(text, index, centerX);
                 ReadSvgNumber(text, index, centerY);
                 space.rotateDeg += angle;
-                space.rotateX = centerX;
-                space.rotateY = centerY;
+                if (gotCenter) {
+                    space.rotateX = centerX;
+                    space.rotateY = centerY;
+                } else if (hasOrigin) {
+                    space.rotateX = originX;
+                    space.rotateY = originY;
+                }
             }
         }
     }
@@ -1406,6 +1661,25 @@ struct Engine {
         space.scaleY = space.pixelHeight / boxHeight;
         space.minX = minX;
         space.minY = minY;
+        const std::string aspect = ToLowerAscii(AttributeValue(node, "preserveaspectratio"));
+        if (!aspect.empty() && aspect.find("none") == std::string::npos) {
+            const bool slice = aspect.find("slice") != std::string::npos;
+            const double uniform = slice ? std::max(space.scaleX, space.scaleY) : std::min(space.scaleX, space.scaleY);
+            const double extraX = space.pixelWidth - boxWidth * uniform;
+            const double extraY = space.pixelHeight - boxHeight * uniform;
+            if (aspect.find("xmid") != std::string::npos) {
+                space.originX += extraX / 2;
+            } else if (aspect.find("xmax") != std::string::npos) {
+                space.originX += extraX;
+            }
+            if (aspect.find("ymid") != std::string::npos) {
+                space.originY += extraY / 2;
+            } else if (aspect.find("ymax") != std::string::npos) {
+                space.originY += extraY;
+            }
+            space.scaleX = uniform;
+            space.scaleY = uniform;
+        }
     }
 
     int SvgX(const SvgSpace& space, double x) {
@@ -1505,7 +1779,7 @@ struct Engine {
         }
     }
 
-    Color SampleStops(const std::vector<SvgStop>& stops, double t) {
+    Color SampleStops(const std::vector<SvgStop>& stops, double t, bool linear) {
         if (stops.empty()) {
             return Color{0, 0, 0, 255};
         }
@@ -1529,10 +1803,22 @@ struct Engine {
             const SvgStop& right = stops[index];
             const double span = right.offset - left.offset;
             const double mix = span <= 0 ? 0 : (t - left.offset) / span;
+            auto mixChannel = [&](int start, int end) {
+                if (!linear) {
+                    return static_cast<int>(start + (end - start) * mix);
+                }
+                auto decode = [](int value) {
+                    const double encoded = value / 255.0;
+                    return encoded <= 0.04045 ? encoded / 12.92 : std::pow((encoded + 0.055) / 1.055, 2.4);
+                };
+                const double decoded = decode(start) + (decode(end) - decode(start)) * mix;
+                const double encoded = decoded <= 0.0031308 ? 12.92 * decoded : 1.055 * std::pow(decoded, 1.0 / 2.4) - 0.055;
+                return static_cast<int>(std::max(0.0, std::min(255.0, encoded * 255.0 + 0.5)));
+            };
             Color color;
-            color.red = static_cast<std::uint8_t>(left.color.red + (right.color.red - left.color.red) * mix);
-            color.green = static_cast<std::uint8_t>(left.color.green + (right.color.green - left.color.green) * mix);
-            color.blue = static_cast<std::uint8_t>(left.color.blue + (right.color.blue - left.color.blue) * mix);
+            color.red = static_cast<std::uint8_t>(mixChannel(left.color.red, right.color.red));
+            color.green = static_cast<std::uint8_t>(mixChannel(left.color.green, right.color.green));
+            color.blue = static_cast<std::uint8_t>(mixChannel(left.color.blue, right.color.blue));
             color.alpha = static_cast<std::uint8_t>(left.color.alpha + (right.color.alpha - left.color.alpha) * mix);
             return color;
         }
@@ -1600,7 +1886,7 @@ struct Engine {
                             offset = (offset - focalRadius) / (1 - focalRadius);
                         }
                     }
-                    Fill(x + column, y + row, 1, 1, WithOpacity(SampleStops(stops, offset), space.opacity * space.fillOpacity), fixed);
+                    Fill(x + column, y + row, 1, 1, WithOpacity(SampleStops(stops, offset, ToLowerAscii(AttributeValue(*gradient, "color-interpolation")) == "linearrgb"), space.opacity * space.fillOpacity), fixed);
                 }
             }
             return true;
@@ -1653,7 +1939,7 @@ struct Engine {
                     const double fraction = t - period;
                     t = static_cast<int>(period) % 2 == 0 ? fraction : 1 - fraction;
                 }
-                Fill(x + column, y + row, 1, 1, WithOpacity(SampleStops(stops, t), space.opacity * space.fillOpacity), fixed);
+                Fill(x + column, y + row, 1, 1, WithOpacity(SampleStops(stops, t, ToLowerAscii(AttributeValue(*gradient, "color-interpolation")) == "linearrgb"), space.opacity * space.fillOpacity), fixed);
             }
         }
         return true;
@@ -1758,6 +2044,11 @@ struct Engine {
         }
         if (!AttributeValue(*marker, "markerheight").empty()) {
             local.scaleY *= std::atof(AttributeValue(*marker, "markerheight").c_str()) / 3.0;
+        }
+        if (ToLowerAscii(AttributeValue(*marker, "markerunits")) != "userspaceonuse") {
+            const double strokeScale = std::max(0.0, space.strokeWidth);
+            local.scaleX *= strokeScale;
+            local.scaleY *= strokeScale;
         }
         const std::string orient = ToLowerAscii(AttributeValue(*marker, "orient"));
         if (!orient.empty() && orient != "auto" && orient != "auto-start-reverse") {
@@ -1868,6 +2159,20 @@ struct Engine {
         if (mask == nullptr) {
             return true;
         }
+        if (ToLowerAscii(AttributeValue(*mask, "maskunits")) == "objectboundingbox" && !AttributeValue(*mask, "width").empty() &&
+            !AttributeValue(*mask, "height").empty()) {
+            const double elementX = SvgNumber(node, "x", 0);
+            const double elementY = SvgNumber(node, "y", 0);
+            const double elementWidth = SvgNumber(node, "width", 0);
+            const double elementHeight = SvgNumber(node, "height", 0);
+            const int regionLeft = SvgX(space, elementX + SvgOffset(AttributeValue(*mask, "x")) * elementWidth);
+            const int regionTop = SvgY(space, elementY + SvgOffset(AttributeValue(*mask, "y")) * elementHeight);
+            const int regionRight = regionLeft + SvgLength(space, SvgOffset(AttributeValue(*mask, "width")) * elementWidth, true);
+            const int regionBottom = regionTop + SvgLength(space, SvgOffset(AttributeValue(*mask, "height")) * elementHeight, false);
+            if (pixelX < regionLeft || pixelY < regionTop || pixelX >= regionRight || pixelY >= regionBottom) {
+                return false;
+            }
+        }
         const bool alpha = ToLowerAscii(AttributeValue(*mask, "mask-type")) == "alpha";
         Color covered{0, 0, 0, 0};
         bool hit = false;
@@ -1875,10 +2180,26 @@ struct Engine {
             if (ToLowerAscii(child->tagName) != "rect") {
                 continue;
             }
-            const int left = SvgX(space, SvgNumber(*child, "x", 0));
-            const int top = SvgY(space, SvgNumber(*child, "y", 0));
-            const int right = left + SvgLength(space, SvgNumber(*child, "width", 0), true);
-            const int bottom = top + SvgLength(space, SvgNumber(*child, "height", 0), false);
+            const bool objectBox = ToLowerAscii(AttributeValue(*mask, "maskcontentunits")) == "objectboundingbox";
+            int left = 0;
+            int top = 0;
+            int right = 0;
+            int bottom = 0;
+            if (objectBox) {
+                const double elementX = SvgNumber(node, "x", 0);
+                const double elementY = SvgNumber(node, "y", 0);
+                const double elementWidth = SvgNumber(node, "width", 0);
+                const double elementHeight = SvgNumber(node, "height", 0);
+                left = SvgX(space, elementX + SvgOffset(AttributeValue(*child, "x")) * elementWidth);
+                top = SvgY(space, elementY + SvgOffset(AttributeValue(*child, "y")) * elementHeight);
+                right = left + SvgLength(space, SvgOffset(AttributeValue(*child, "width")) * elementWidth, true);
+                bottom = top + SvgLength(space, SvgOffset(AttributeValue(*child, "height")) * elementHeight, false);
+            } else {
+                left = SvgX(space, SvgNumber(*child, "x", 0));
+                top = SvgY(space, SvgNumber(*child, "y", 0));
+                right = left + SvgLength(space, SvgNumber(*child, "width", 0), true);
+                bottom = top + SvgLength(space, SvgNumber(*child, "height", 0), false);
+            }
             if (pixelX < left || pixelY < top || pixelX >= right || pixelY >= bottom) {
                 continue;
             }
@@ -1920,12 +2241,21 @@ struct Engine {
                 }
                 return std::atof(value.c_str()) * scale;
             };
-            auto interpolate = [](const std::string& from, const std::string& to, double t) {
+            auto interpolate = [](const std::string& from, const std::string& to, double t, bool linear = false) {
                 Color start{0, 0, 0, 255};
                 Color end{0, 0, 0, 255};
                 if (ParseColor(from, start) && ParseColor(to, end)) {
-                    const auto channel = [t](int left, int right) {
-                        return static_cast<int>(left + (right - left) * t);
+                    const auto channel = [t, linear](int left, int right) {
+                        if (!linear) {
+                            return static_cast<int>(left + (right - left) * t);
+                        }
+                        auto decode = [](int value) {
+                            const double encoded = value / 255.0;
+                            return encoded <= 0.04045 ? encoded / 12.92 : std::pow((encoded + 0.055) / 1.055, 2.4);
+                        };
+                        const double decoded = decode(left) + (decode(right) - decode(left)) * t;
+                        const double encoded = decoded <= 0.0031308 ? 12.92 * decoded : 1.055 * std::pow(decoded, 1.0 / 2.4) - 0.055;
+                        return static_cast<int>(std::max(0.0, std::min(255.0, encoded * 255.0 + 0.5)));
                     };
                     char text[8];
                     std::snprintf(text, sizeof(text), "#%02x%02x%02x", channel(start.red, end.red), channel(start.green, end.green),
@@ -1934,6 +2264,45 @@ struct Engine {
                 }
                 const double number = std::atof(from.c_str()) + (std::atof(to.c_str()) - std::atof(from.c_str())) * t;
                 return std::to_string(static_cast<int>(number + 0.5));
+            };
+            auto splineMix = [](const std::string& splines, int interval, double mix) {
+                std::vector<double> numbers;
+                std::size_t index = 0;
+                while (index < splines.size()) {
+                    while (index < splines.size() && (splines[index] == ' ' || splines[index] == ',' || splines[index] == ';')) {
+                        ++index;
+                    }
+                    if (index >= splines.size()) {
+                        break;
+                    }
+                    char* end = nullptr;
+                    const double number = std::strtod(splines.c_str() + index, &end);
+                    if (end == splines.c_str() + index) {
+                        break;
+                    }
+                    numbers.push_back(number);
+                    index = static_cast<std::size_t>(end - splines.c_str());
+                }
+                const int base = interval * 4;
+                if (base < 0 || base + 3 >= static_cast<int>(numbers.size())) {
+                    return mix;
+                }
+                const double x1 = numbers[static_cast<std::size_t>(base)];
+                const double y1 = numbers[static_cast<std::size_t>(base + 1)];
+                const double x2 = numbers[static_cast<std::size_t>(base + 2)];
+                const double y2 = numbers[static_cast<std::size_t>(base + 3)];
+                double t = mix;
+                for (int step = 0; step < 8; ++step) {
+                    const double u = 1.0 - t;
+                    const double curve = 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t;
+                    const double slope = 3 * u * u * x1 + 6 * u * t * (x2 - x1) + 3 * t * t * (1.0 - x2);
+                    if (std::abs(slope) < 1e-6) {
+                        break;
+                    }
+                    t = std::max(0.0, std::min(1.0, t - (curve - mix) / slope));
+                }
+                const double u = 1.0 - t;
+                return 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t;
             };
             for (const std::unique_ptr<Node>& child : node.children) {
                 const std::string tag = ToLowerAscii(child->tagName);
@@ -1944,15 +2313,49 @@ struct Engine {
                 if (tag == "animatetransform" && attribute.empty()) {
                     attribute = "transform";
                 }
-                if (attribute.empty()) {
+                if (attribute.empty() || ToLowerAscii(AttributeValue(*child, "attributetype")) == "css") {
                     continue;
                 }
-                const double begin = clock(AttributeValue(*child, "begin"));
                 const double duration = std::max(0.0, clock(AttributeValue(*child, "dur")));
+                std::vector<double> begins;
+                const std::string beginText = AttributeValue(*child, "begin");
+                std::size_t beginCursor = 0;
+                while (beginCursor < beginText.size()) {
+                    const std::size_t semi = beginText.find(';', beginCursor);
+                    const std::string piece = beginText.substr(beginCursor, semi == std::string::npos ? std::string::npos : semi - beginCursor);
+                    if (!piece.empty()) {
+                        begins.push_back(clock(piece));
+                    }
+                    if (semi == std::string::npos) {
+                        break;
+                    }
+                    beginCursor = semi + 1;
+                }
+                if (begins.empty()) {
+                    begins.push_back(0);
+                }
+                const std::string restartMode = ToLowerAscii(AttributeValue(*child, "restart"));
+                double begin = begins.front();
+                for (std::size_t index = 1; index < begins.size(); ++index) {
+                    if (begins[index] > gSvgAnimationTime) {
+                        break;
+                    }
+                    if (restartMode == "never") {
+                        break;
+                    }
+                    if (restartMode == "whennotactive" && begins[index] < begin + duration) {
+                        continue;
+                    }
+                    begin = begins[index];
+                }
                 if (gSvgAnimationTime < begin || duration <= 0) {
                     continue;
                 }
+                if (!AttributeValue(*child, "end").empty() && gSvgAnimationTime >= clock(AttributeValue(*child, "end"))) {
+                    continue;
+                }
                 double local = gSvgAnimationTime - begin;
+                const double elapsed = local;
                 const std::string repeat = ToLowerAscii(AttributeValue(*child, "repeatcount"));
                 if (repeat == "indefinite") {
                     local = std::fmod(local, duration);
@@ -1969,12 +2372,29 @@ struct Engine {
                             continue;
                         }
                         local = std::fmod(local, duration);
-                    } else if (local >= duration) {
-                        continue;
+                    } else {
+                        double activeEnd = duration;
+                        const double minimum = clock(AttributeValue(*child, "min"));
+                        const double maximum = clock(AttributeValue(*child, "max"));
+                        if (maximum > 0) {
+                            activeEnd = std::min(activeEnd, maximum);
+                        }
+                        if (minimum > 0) {
+                            activeEnd = std::max(activeEnd, minimum);
+                        }
+                        if (local >= activeEnd) {
+                            continue;
+                        }
+                        if (local > duration) {
+                            local = duration;
+                        }
                     }
                 }
                 const std::string calcMode = ToLowerAscii(AttributeValue(*child, "calcmode"));
-                const double progress = calcMode == "discrete" && local / duration < 0.5 ? 0 : (calcMode == "discrete" ? 1 : local / duration);
+                double progress = calcMode == "discrete" && local / duration < 0.5 ? 0 : (calcMode == "discrete" ? 1 : local / duration);
+                if (calcMode == "spline") {
+                    progress = splineMix(AttributeValue(*child, "keysplines"), 0, local / duration);
+                }
                 std::string value;
                 if (tag == "animatetransform") {
                     const std::string type = ToLowerAscii(AttributeValue(*child, "type"));
@@ -2033,10 +2453,49 @@ struct Engine {
                         if (stops.size() == 1) {
                             value = stops.front();
                         } else if (!stops.empty()) {
-                            const double scaled = local / duration * static_cast<double>(stops.size() - 1);
-                            const int index = std::min(static_cast<int>(stops.size()) - 2, static_cast<int>(scaled));
-                            const double mix = scaled - index;
-                            value = interpolate(stops[static_cast<std::size_t>(index)], stops[static_cast<std::size_t>(index + 1)], mix);
+                            std::vector<double> keyTimes;
+                            const std::string keyText = AttributeValue(*child, "keytimes");
+                            std::size_t keyIndex = 0;
+                            while (keyIndex < keyText.size()) {
+                                while (keyIndex < keyText.size() && (keyText[keyIndex] == ' ' || keyText[keyIndex] == ';' || keyText[keyIndex] == ',')) {
+                                    ++keyIndex;
+                                }
+                                if (keyIndex >= keyText.size()) {
+                                    break;
+                                }
+                                char* end = nullptr;
+                                const double keyTime = std::strtod(keyText.c_str() + keyIndex, &end);
+                                if (end == keyText.c_str() + keyIndex) {
+                                    break;
+                                }
+                                keyTimes.push_back(keyTime);
+                                keyIndex = static_cast<std::size_t>(end - keyText.c_str());
+                            }
+                            if (keyTimes.size() == stops.size()) {
+                                const double paced = local / duration;
+                                if (paced >= keyTimes.back()) {
+                                    value = stops.back();
+                                } else {
+                                    std::size_t index = 0;
+                                    while (index + 1 < keyTimes.size() && paced > keyTimes[index + 1]) {
+                                        ++index;
+                                    }
+                                    const double span = keyTimes[index + 1] - keyTimes[index];
+                                    double mix = span <= 0 ? 0 : (paced - keyTimes[index]) / span;
+                                    if (calcMode == "spline") {
+                                        mix = splineMix(AttributeValue(*child, "keysplines"), static_cast<int>(index), mix);
+                                    }
+                                    value = interpolate(stops[index], stops[index + 1], mix);
+                                }
+                            } else {
+                                const double scaled = local / duration * static_cast<double>(stops.size() - 1);
+                                const int index = std::min(static_cast<int>(stops.size()) - 2, static_cast<int>(scaled));
+                                double mix = scaled - index;
+                                if (calcMode == "spline") {
+                                    mix = splineMix(AttributeValue(*child, "keysplines"), index, mix);
+                                }
+                                value = interpolate(stops[static_cast<std::size_t>(index)], stops[static_cast<std::size_t>(index + 1)], mix);
+                            }
                         }
                     } else {
                         std::string from = AttributeValue(*child, "from");
@@ -2052,7 +2511,12 @@ struct Engine {
                             from = base;
                             to = std::to_string(static_cast<int>(std::atof(from.c_str()) + std::atof(AttributeValue(*child, "by").c_str()) + 0.5));
                         }
-                        value = interpolate(from, to, progress);
+                        value = interpolate(from, to, progress, ToLowerAscii(AttributeValue(*child, "color-interpolation")) == "linearrgb");
+                        if (ToLowerAscii(AttributeValue(*child, "accumulate")) == "sum" && duration > 0) {
+                            const int finishedCycles = static_cast<int>(elapsed / duration);
+                            const double delta = std::atof(to.c_str()) - std::atof(from.c_str());
+                            value = std::to_string(static_cast<int>(std::atof(value.c_str()) + finishedCycles * delta + 0.5));
+                        }
                         if (ToLowerAscii(AttributeValue(*child, "additive")) == "sum") {
                             value = std::to_string(static_cast<int>(std::atof(base.c_str()) + std::atof(value.c_str()) + 0.5));
                         }
@@ -2114,10 +2578,21 @@ struct Engine {
         int erode = 0;
         bool saturate = false;
         double saturateAmount = 1;
+        bool colorMatrix = false;
+        int colorMatrixKind = 0;
+        double hueAngle = 0;
+        double matrix[20] = {1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0};
         bool transfer = false;
+        bool linearFilters = false;
         double slope[4] = {1, 1, 1, 1};
         double intercept[4] = {0, 0, 0, 0};
         bool transferChannel[4] = {false, false, false, false};
+        bool gamma[4] = {false, false, false, false};
+        double exponent[4] = {1, 1, 1, 1};
+        double amplitude[4] = {1, 1, 1, 1};
+        double gammaOffset[4] = {0, 0, 0, 0};
+        int tableCount[4] = {0, 0, 0, 0};
+        double tableValue[4][8] = {};
         bool blend = false;
         int blendMode = 0;
         Color blendColor{255, 255, 255, 255};
@@ -2128,15 +2603,34 @@ struct Engine {
         double k4 = 0;
         bool tile = false;
         bool convolve = false;
+        bool convolveSample = false;
+        bool convolvePreserveAlpha = true;
         double convolveGain = 1;
         double convolveBias = 0;
+        int kernelOrderX = 1;
+        int kernelOrderY = 1;
+        int kernelTargetX = 0;
+        int kernelTargetY = 0;
+        int kernelUnitX = 1;
+        int kernelUnitY = 1;
+        int kernelCount = 0;
+        int edgeMode = 0;
+        double kernel[25] = {};
         bool imageReplace = false;
         Color imageColor{0, 0, 0, 255};
         bool turbulence = false;
+        bool turbulenceAbs = false;
         int turbulenceSeed = 0;
+        int turbulenceOctaves = 1;
+        bool turbulenceStitch = false;
         double turbulenceFrequency = 0;
         bool diffuse = false;
+        bool distant = false;
         double diffuseAmount = 1;
+        double azimuth = 0;
+        double elevation = 0;
+        double surfaceScale = 1;
+        double specularExponent = 1;
         Color lightColor{255, 255, 255, 255};
         bool pointLight = false;
         double pointX = 0;
@@ -2237,9 +2731,19 @@ struct Engine {
                 found = true;
             } else if (tag == "feoffset") {
                 effect = SvgFilter();
-                effect.dx = static_cast<int>(std::atof(AttributeValue(*child, "dx").c_str()) * space.scaleX);
-                effect.dy = static_cast<int>(std::atof(AttributeValue(*child, "dy").c_str()) * space.scaleY);
+                if (ToLowerAscii(AttributeValue(*filter, "primitiveunits")) == "objectboundingbox") {
+                    effect.dx = static_cast<int>(SvgOffset(AttributeValue(*child, "dx")) * SvgNumber(node, "width", 0) * space.scaleX);
+                    effect.dy = static_cast<int>(SvgOffset(AttributeValue(*child, "dy")) * SvgNumber(node, "height", 0) * space.scaleY);
+                } else {
+                    effect.dx = static_cast<int>(std::atof(AttributeValue(*child, "dx").c_str()) * space.scaleX);
+                    effect.dy = static_cast<int>(std::atof(AttributeValue(*child, "dy").c_str()) * space.scaleY);
+                }
                 found = true;
+                const std::string input = ToLowerAscii(AttributeValue(*child, "in"));
+                if (!input.empty() && input != "sourcegraphic" && input == ToLowerAscii(lastName)) {
+                    effect.imageReplace = true;
+                    effect.imageColor = lastColor;
+                }
             } else if (tag == "fegaussianblur") {
                 effect = SvgFilter();
                 effect.blur = std::max(1, static_cast<int>(std::atof(AttributeValue(*child, "stddeviation").c_str()) * std::max(space.scaleX, space.scaleY)));
@@ -2255,14 +2759,34 @@ struct Engine {
                 found = true;
             } else if (tag == "fecolormatrix") {
                 effect = SvgFilter();
-                if (ToLowerAscii(AttributeValue(*child, "type")) == "saturate") {
+                const std::string matrixType = ToLowerAscii(AttributeValue(*child, "type"));
+                if (matrixType == "saturate") {
                     effect.saturate = true;
                     effect.saturateAmount = std::max(0.0, std::min(1.0, std::atof(AttributeValue(*child, "values").c_str())));
+                } else if (matrixType == "huerotate") {
+                    effect.colorMatrix = true;
+                    effect.colorMatrixKind = 2;
+                    effect.hueAngle = std::atof(AttributeValue(*child, "values").c_str());
+                } else if (matrixType == "luminancetoalpha") {
+                    effect.colorMatrix = true;
+                    effect.colorMatrixKind = 3;
+                } else if (matrixType == "matrix" || (matrixType.empty() && !AttributeValue(*child, "values").empty())) {
+                    effect.colorMatrix = true;
+                    effect.colorMatrixKind = 1;
+                    std::size_t cursor = 0;
+                    int slot = 0;
+                    double sample = 0;
+                    const std::string samples = AttributeValue(*child, "values");
+                    while (slot < 20 && ReadSvgNumber(samples, cursor, sample)) {
+                        effect.matrix[slot] = sample;
+                        ++slot;
+                    }
                 }
                 found = true;
             } else if (tag == "fecomponenttransfer") {
                 effect = SvgFilter();
                 effect.transfer = true;
+                effect.linearFilters = ToLowerAscii(AttributeValue(*filter, "color-interpolation-filters")) == "linearrgb";
                 for (const std::unique_ptr<Node>& channel : child->children) {
                     const std::string channelTag = ToLowerAscii(channel->tagName);
                     int index = channelTag == "fefuncr" ? 0 : channelTag == "fefuncg" ? 1 : channelTag == "fefuncb" ? 2 : channelTag == "fefunca" ? 3 : -1;
@@ -2270,12 +2794,32 @@ struct Engine {
                         continue;
                     }
                     effect.transferChannel[index] = true;
-                    if (ToLowerAscii(AttributeValue(*channel, "type")) == "linear") {
+                    const std::string transferType = ToLowerAscii(AttributeValue(*channel, "type"));
+                    if (transferType == "linear") {
                         if (!AttributeValue(*channel, "slope").empty()) {
                             effect.slope[index] = std::atof(AttributeValue(*channel, "slope").c_str());
                         }
                         if (!AttributeValue(*channel, "intercept").empty()) {
                             effect.intercept[index] = std::atof(AttributeValue(*channel, "intercept").c_str());
+                        }
+                    } else if (transferType == "gamma") {
+                        effect.gamma[index] = true;
+                        if (!AttributeValue(*channel, "exponent").empty()) {
+                            effect.exponent[index] = std::atof(AttributeValue(*channel, "exponent").c_str());
+                        }
+                        if (!AttributeValue(*channel, "amplitude").empty()) {
+                            effect.amplitude[index] = std::atof(AttributeValue(*channel, "amplitude").c_str());
+                        }
+                        if (!AttributeValue(*channel, "offset").empty()) {
+                            effect.gammaOffset[index] = std::atof(AttributeValue(*channel, "offset").c_str());
+                        }
+                    } else if (transferType == "table" || transferType == "discrete") {
+                        std::size_t cursor = 0;
+                        double sample = 0;
+                        const std::string samples = AttributeValue(*channel, "tablevalues");
+                        while (effect.tableCount[index] < 8 && ReadSvgNumber(samples, cursor, sample)) {
+                            effect.tableValue[index][effect.tableCount[index]] = sample;
+                            ++effect.tableCount[index];
                         }
                     }
                 }
@@ -2284,6 +2828,10 @@ struct Engine {
                 effect = SvgFilter();
                 effect.blend = true;
                 effect.blendColor = lastColor;
+                const std::string secondInput = ToLowerAscii(AttributeValue(*child, "in2"));
+                if (!secondInput.empty() && secondInput != "sourcegraphic" && secondInput != ToLowerAscii(lastName)) {
+                    effect.blend = false;
+                }
                 const std::string mode = ToLowerAscii(AttributeValue(*child, "mode"));
                 if (mode == "screen") {
                     effect.blendMode = 2;
@@ -2336,11 +2884,56 @@ struct Engine {
                 const std::string matrix = AttributeValue(*child, "kernelmatrix");
                 double value = 0;
                 while (ReadSvgNumber(matrix, index, value)) {
+                    if (effect.kernelCount < 25) {
+                        effect.kernel[effect.kernelCount] = value;
+                        ++effect.kernelCount;
+                    }
                     sum += value;
                 }
                 const double divisor = AttributeValue(*child, "divisor").empty() ? (sum == 0 ? 1 : sum) : std::atof(AttributeValue(*child, "divisor").c_str());
                 effect.convolveGain = std::abs(divisor) < 0.000001 ? 0 : sum / divisor;
                 effect.convolveBias = std::atof(AttributeValue(*child, "bias").c_str());
+                effect.convolvePreserveAlpha = ToLowerAscii(AttributeValue(*child, "preservealpha")) != "false";
+                const std::string edge = ToLowerAscii(AttributeValue(*child, "edgemode"));
+                if (edge == "wrap") {
+                    effect.edgeMode = 1;
+                } else if (edge == "none") {
+                    effect.edgeMode = 2;
+                }
+                const std::string order = AttributeValue(*child, "order");
+                if (!order.empty()) {
+                    std::size_t cursor = 0;
+                    double across = 1;
+                    double down = 1;
+                    ReadSvgNumber(order, cursor, across);
+                    if (!ReadSvgNumber(order, cursor, down)) {
+                        down = across;
+                    }
+                    effect.kernelOrderX = std::max(1, std::min(5, static_cast<int>(across)));
+                    effect.kernelOrderY = std::max(1, std::min(5, static_cast<int>(down)));
+                } else if (effect.kernelCount == 1) {
+                    effect.kernelOrderX = 1;
+                    effect.kernelOrderY = 1;
+                } else {
+                    const int side = std::max(1, static_cast<int>(std::sqrt(static_cast<double>(effect.kernelCount)) + 0.5));
+                    effect.kernelOrderX = std::min(5, side);
+                    effect.kernelOrderY = std::min(5, side);
+                }
+                effect.kernelTargetX = AttributeValue(*child, "targetx").empty() ? effect.kernelOrderX / 2 : std::atoi(AttributeValue(*child, "targetx").c_str());
+                effect.kernelTargetY = AttributeValue(*child, "targety").empty() ? effect.kernelOrderY / 2 : std::atoi(AttributeValue(*child, "targety").c_str());
+                const std::string unit = AttributeValue(*child, "kernelunitlength");
+                if (!unit.empty()) {
+                    std::size_t cursor = 0;
+                    double across = 1;
+                    double down = 1;
+                    ReadSvgNumber(unit, cursor, across);
+                    if (!ReadSvgNumber(unit, cursor, down)) {
+                        down = across;
+                    }
+                    effect.kernelUnitX = std::max(1, static_cast<int>(across));
+                    effect.kernelUnitY = std::max(1, static_cast<int>(down));
+                }
+                effect.convolveSample = effect.edgeMode != 0 || !order.empty() || !AttributeValue(*child, "targetx").empty() || !AttributeValue(*child, "targety").empty() || !unit.empty();
                 found = true;
             } else if (tag == "fedisplacementmap") {
                 effect = SvgFilter();
@@ -2385,7 +2978,10 @@ struct Engine {
             } else if (tag == "feturbulence") {
                 effect = SvgFilter();
                 effect.turbulence = true;
+                effect.turbulenceAbs = ToLowerAscii(AttributeValue(*child, "type")) == "turbulence";
                 effect.turbulenceSeed = static_cast<int>(std::atof(AttributeValue(*child, "seed").c_str()));
+                effect.turbulenceOctaves = std::max(1, AttributeValue(*child, "numoctaves").empty() ? 1 : std::atoi(AttributeValue(*child, "numoctaves").c_str()));
+                effect.turbulenceStitch = ToLowerAscii(AttributeValue(*child, "stitchtiles")) == "stitch";
                 effect.turbulenceFrequency = std::max(0.01, std::atof(AttributeValue(*child, "basefrequency").c_str()));
                 found = true;
             } else if (tag == "fediffuselighting") {
@@ -2397,13 +2993,21 @@ struct Engine {
                 }
                 const double constant = AttributeValue(*child, "diffuseconstant").empty() ? 1 : std::atof(AttributeValue(*child, "diffuseconstant").c_str());
                 double elevation = 0;
+                double azimuth = 0;
+                bool distant = false;
                 for (const std::unique_ptr<Node>& lamp : child->children) {
                     if (ToLowerAscii(lamp->tagName) == "fedistantlight") {
+                        distant = true;
                         elevation = std::atof(AttributeValue(*lamp, "elevation").c_str());
+                        azimuth = std::atof(AttributeValue(*lamp, "azimuth").c_str());
                     }
                 }
-                const double facing = std::sin(elevation * std::acos(-1.0) / 180.0);
-                effect.diffuseAmount = std::max(0.0, facing) * constant;
+                effect.surfaceScale = AttributeValue(*child, "surfacescale").empty() ? 1 : std::atof(AttributeValue(*child, "surfacescale").c_str());
+                effect.distant = distant;
+                effect.azimuth = azimuth;
+                effect.elevation = elevation;
+                effect.specularExponent = 1;
+                effect.diffuseAmount = distant ? constant : std::max(0.0, std::sin(elevation * std::acos(-1.0) / 180.0)) * constant;
                 ReadSvgLight(space, *child, effect, constant);
                 found = true;
             } else if (tag == "fespecularlighting") {
@@ -2416,13 +3020,22 @@ struct Engine {
                 const double constant = AttributeValue(*child, "specularconstant").empty() ? 1 : std::atof(AttributeValue(*child, "specularconstant").c_str());
                 const double exponent = AttributeValue(*child, "specularexponent").empty() ? 1 : std::atof(AttributeValue(*child, "specularexponent").c_str());
                 double elevation = 0;
+                double azimuth = 0;
+                bool distant = false;
                 for (const std::unique_ptr<Node>& lamp : child->children) {
                     if (ToLowerAscii(lamp->tagName) == "fedistantlight") {
+                        distant = true;
                         elevation = std::atof(AttributeValue(*lamp, "elevation").c_str());
+                        azimuth = std::atof(AttributeValue(*lamp, "azimuth").c_str());
                     }
                 }
+                effect.surfaceScale = AttributeValue(*child, "surfacescale").empty() ? 1 : std::atof(AttributeValue(*child, "surfacescale").c_str());
+                effect.distant = distant;
+                effect.azimuth = azimuth;
+                effect.elevation = elevation;
+                effect.specularExponent = std::max(1.0, exponent);
                 const double facing = std::max(0.0, std::sin(elevation * std::acos(-1.0) / 180.0));
-                effect.diffuseAmount = constant * std::pow(facing, std::max(1.0, exponent));
+                effect.diffuseAmount = distant ? constant : constant * std::pow(facing, effect.specularExponent);
                 ReadSvgLight(space, *child, effect, constant);
                 found = true;
             }
@@ -2491,10 +3104,62 @@ struct Engine {
             double startY = 0;
             double atX = 0;
             double atY = 0;
+            double traveled = length * (local / duration);
+            const std::string keyPoints = AttributeValue(*child, "keypoints");
+            if (!keyPoints.empty()) {
+                auto readList = [](const std::string& text, std::vector<double>& out) {
+                    std::size_t index = 0;
+                    while (index < text.size()) {
+                        while (index < text.size() && (text[index] == ' ' || text[index] == ';' || text[index] == ',')) {
+                            ++index;
+                        }
+                        if (index >= text.size()) {
+                            break;
+                        }
+                        char* end = nullptr;
+                        const double number = std::strtod(text.c_str() + index, &end);
+                        if (end == text.c_str() + index) {
+                            break;
+                        }
+                        out.push_back(number);
+                        index = static_cast<std::size_t>(end - text.c_str());
+                    }
+                };
+                std::vector<double> marks;
+                std::vector<double> times;
+                readList(keyPoints, marks);
+                readList(AttributeValue(*child, "keytimes"), times);
+                if (marks.size() >= 2 && marks.size() == times.size()) {
+                    const double paced = local / duration;
+                    if (paced >= times.back()) {
+                        traveled = length * marks.back();
+                    } else {
+                        std::size_t index = 0;
+                        while (index + 1 < times.size() && paced > times[index + 1]) {
+                            ++index;
+                        }
+                        const double span = times[index + 1] - times[index];
+                        const double mix = span <= 0 ? 0 : (paced - times[index]) / span;
+                        const double point = marks[index] + (marks[index + 1] - marks[index]) * mix;
+                        traveled = length * point;
+                    }
+                }
+            }
             PointAlong(course, 0, startX, startY);
-            PointAlong(course, length * (local / duration), atX, atY);
+            PointAlong(course, traveled, atX, atY);
             space.originX += atX - startX;
             space.originY += atY - startY;
+            const std::string spin = ToLowerAscii(AttributeValue(*child, "rotate"));
+            if (spin == "auto" || spin == "auto-reverse") {
+                double aheadX = atX;
+                double aheadY = atY;
+                PointAlong(course, std::min(length, traveled + 1), aheadX, aheadY);
+                double angle = std::atan2(aheadY - atY, aheadX - atX) * 180.0 / std::acos(-1.0);
+                if (spin == "auto-reverse") {
+                    angle += 180;
+                }
+                space.rotateDeg += angle;
+            }
         }
     }
 
@@ -2517,7 +3182,15 @@ struct Engine {
         if (!referenced && (tag == "defs" || tag == "symbol" || tag == "clippath" || tag == "mask" || tag == "filter")) {
             return;
         }
-        ApplySvgTransform(AttributeValue(node, "transform"), space);
+        double originX = 0;
+        double originY = 0;
+        std::size_t originIndex = 0;
+        const std::string origin = AttributeValue(node, "transform-origin");
+        const bool hasOrigin = !origin.empty() && ReadSvgNumber(origin, originIndex, originX);
+        if (hasOrigin) {
+            ReadSvgNumber(origin, originIndex, originY);
+        }
+        ApplySvgTransform(AttributeValue(node, "transform"), space, hasOrigin, originX, originY);
         ApplySvgMotion(node, space);
         if (tag == "svg" || node.kind == ElementKind::Svg) {
             ApplyViewBox(node, space);
@@ -2529,6 +3202,13 @@ struct Engine {
                     }
                 }
             }
+        }
+        if ((tag == "svg" || node.kind == ElementKind::Svg) && ToLowerAscii(AttributeValue(node, "overflow")) == "hidden" && space.pixelWidth > 0 && space.pixelHeight > 0) {
+            space.clipped = true;
+            space.clipX = static_cast<int>(space.originX);
+            space.clipY = static_cast<int>(space.originY);
+            space.clipWidth = static_cast<int>(space.pixelWidth);
+            space.clipHeight = static_cast<int>(space.pixelHeight);
         }
         ReadSvgPaint(node, space);
         const Color fill = WithOpacity(space.fill, space.opacity * space.fillOpacity);
@@ -2569,7 +3249,7 @@ struct Engine {
             if (filtered && filterEffect.imageReplace) {
                 shown = filterEffect.imageColor;
             }
-            if (filtered && filterEffect.diffuse && !filterEffect.pointLight) {
+            if (filtered && filterEffect.diffuse && !filterEffect.pointLight && !filterEffect.distant) {
                 auto lit = [&](int value) {
                     return static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, value * filterEffect.diffuseAmount)));
                 };
@@ -2578,7 +3258,7 @@ struct Engine {
                 shown.blue = lit(filterEffect.lightColor.blue);
                 shown.alpha = 255;
             }
-            if (filtered && filterEffect.convolve) {
+            if (filtered && filterEffect.convolve && !filterEffect.convolveSample) {
                 auto mapChannel = [&](int value) {
                     const double mapped = value * filterEffect.convolveGain + filterEffect.convolveBias * 255.0;
                     return static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, mapped)));
@@ -2586,6 +3266,9 @@ struct Engine {
                 shown.red = mapChannel(shown.red);
                 shown.green = mapChannel(shown.green);
                 shown.blue = mapChannel(shown.blue);
+                if (!filterEffect.convolvePreserveAlpha) {
+                    shown.alpha = mapChannel(shown.alpha);
+                }
             }
             if (filtered && filterEffect.saturate) {
                 const int gray = (shown.red * 30 + shown.green * 59 + shown.blue * 11) / 100;
@@ -2594,22 +3277,89 @@ struct Engine {
                 shown.green = static_cast<std::uint8_t>(gray + (shown.green - gray) * amount);
                 shown.blue = static_cast<std::uint8_t>(gray + (shown.blue - gray) * amount);
             }
+            if (filtered && filterEffect.colorMatrix) {
+                const double red = shown.red / 255.0;
+                const double green = shown.green / 255.0;
+                const double blue = shown.blue / 255.0;
+                const double alpha = shown.alpha / 255.0;
+                auto clampChannel = [](double value) {
+                    return static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, value * 255.0)));
+                };
+                if (filterEffect.colorMatrixKind == 3) {
+                    shown.alpha = clampChannel(0.2125 * red + 0.7154 * green + 0.0721 * blue);
+                    shown.red = 0;
+                    shown.green = 0;
+                    shown.blue = 0;
+                } else {
+                    double cell[20];
+                    for (int index = 0; index < 20; ++index) {
+                        cell[index] = filterEffect.matrix[index];
+                    }
+                    if (filterEffect.colorMatrixKind == 2) {
+                        const double radians = filterEffect.hueAngle * std::acos(-1.0) / 180.0;
+                        const double cosine = std::cos(radians);
+                        const double sine = std::sin(radians);
+                        cell[0] = 0.213 + cosine * 0.787 - sine * 0.213;
+                        cell[1] = 0.715 - cosine * 0.715 - sine * 0.715;
+                        cell[2] = 0.072 - cosine * 0.072 + sine * 0.928;
+                        cell[5] = 0.213 - cosine * 0.213 + sine * 0.143;
+                        cell[6] = 0.715 + cosine * 0.285 + sine * 0.140;
+                        cell[7] = 0.072 - cosine * 0.072 - sine * 0.283;
+                        cell[10] = 0.213 - cosine * 0.213 - sine * 0.787;
+                        cell[11] = 0.715 - cosine * 0.715 + sine * 0.715;
+                        cell[12] = 0.072 + cosine * 0.928 + sine * 0.072;
+                    }
+                    auto map = [&](int row) {
+                        const int base = row * 5;
+                        return clampChannel(cell[base] * red + cell[base + 1] * green + cell[base + 2] * blue + cell[base + 3] * alpha + cell[base + 4]);
+                    };
+                    shown.red = map(0);
+                    shown.green = map(1);
+                    shown.blue = map(2);
+                    shown.alpha = map(3);
+                }
+            }
             if (filtered && filterEffect.transfer) {
-                auto mapChannel = [](int value, double slope, double intercept) {
-                    const double mapped = static_cast<double>(value) / 255.0 * slope + intercept;
+                auto mapChannel = [&](int value, double slope, double intercept) {
+                    double amount = static_cast<double>(value) / 255.0;
+                    if (filterEffect.linearFilters) {
+                        amount = amount <= 0.04045 ? amount / 12.92 : std::pow((amount + 0.055) / 1.055, 2.4);
+                    }
+                    double mapped = amount * slope + intercept;
+                    if (filterEffect.linearFilters) {
+                        mapped = mapped <= 0.0031308 ? 12.92 * mapped : 1.055 * std::pow(std::max(0.0, mapped), 1.0 / 2.4) - 0.055;
+                    }
+                    return static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, mapped * 255.0)));
+                };
+                auto mapTable = [&](int value, int index) {
+                    if (filterEffect.gamma[index]) {
+                        const double mapped = filterEffect.amplitude[index] * std::pow(static_cast<double>(value) / 255.0, filterEffect.exponent[index]) + filterEffect.gammaOffset[index];
+                        return static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, mapped * 255.0)));
+                    }
+                    const int count = filterEffect.tableCount[index];
+                    if (count <= 0) {
+                        return mapChannel(value, filterEffect.slope[index], filterEffect.intercept[index]);
+                    }
+                    if (count == 1) {
+                        return static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, filterEffect.tableValue[index][0] * 255.0)));
+                    }
+                    const double scaled = static_cast<double>(value) / 255.0 * static_cast<double>(count - 1);
+                    const int left = std::min(count - 2, static_cast<int>(scaled));
+                    const double mix = scaled - left;
+                    const double mapped = filterEffect.tableValue[index][left] + (filterEffect.tableValue[index][left + 1] - filterEffect.tableValue[index][left]) * mix;
                     return static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, mapped * 255.0)));
                 };
                 if (filterEffect.transferChannel[0]) {
-                    shown.red = mapChannel(shown.red, filterEffect.slope[0], filterEffect.intercept[0]);
+                    shown.red = mapTable(shown.red, 0);
                 }
                 if (filterEffect.transferChannel[1]) {
-                    shown.green = mapChannel(shown.green, filterEffect.slope[1], filterEffect.intercept[1]);
+                    shown.green = mapTable(shown.green, 1);
                 }
                 if (filterEffect.transferChannel[2]) {
-                    shown.blue = mapChannel(shown.blue, filterEffect.slope[2], filterEffect.intercept[2]);
+                    shown.blue = mapTable(shown.blue, 2);
                 }
                 if (filterEffect.transferChannel[3]) {
-                    shown.alpha = mapChannel(shown.alpha, filterEffect.slope[3], filterEffect.intercept[3]);
+                    shown.alpha = mapTable(shown.alpha, 3);
                 }
             }
             if (filtered && filterEffect.blend) {
@@ -2711,6 +3461,38 @@ struct Engine {
                         Fill(x + column, y + row, 1, 1, blurred, fixed);
                     }
                 }
+            } else if (!painted && filtered && filterEffect.distant && width > 0 && height > 0) {
+                const double radians = std::acos(-1.0) / 180.0;
+                const double lightX = std::cos(filterEffect.azimuth * radians) * std::cos(filterEffect.elevation * radians);
+                const double lightY = std::sin(filterEffect.azimuth * radians) * std::cos(filterEffect.elevation * radians);
+                const double lightZ = std::sin(filterEffect.elevation * radians);
+                auto heightAt = [&](int column, int row) {
+                    if (column < 0 || row < 0 || column >= width || row >= height) {
+                        return 0.0;
+                    }
+                    return filterEffect.surfaceScale;
+                };
+                for (int row = 0; row < height; ++row) {
+                    for (int column = 0; column < width; ++column) {
+                        const double slopeX = heightAt(column + 1, row) - heightAt(column - 1, row);
+                        const double slopeY = heightAt(column, row + 1) - heightAt(column, row - 1);
+                        const double normalX = -slopeX;
+                        const double normalY = -slopeY;
+                        const double normalZ = 1;
+                        const double length = std::sqrt(normalX * normalX + normalY * normalY + normalZ * normalZ);
+                        const double dot = length <= 0 ? 0 : (normalX * lightX + normalY * lightY + normalZ * lightZ) / length;
+                        const double facing = std::pow(std::max(0.0, dot), filterEffect.specularExponent);
+                        auto lit = [&](int value) {
+                            return static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, value * facing * filterEffect.diffuseAmount)));
+                        };
+                        Color grain;
+                        grain.red = lit(filterEffect.lightColor.red);
+                        grain.green = lit(filterEffect.lightColor.green);
+                        grain.blue = lit(filterEffect.lightColor.blue);
+                        grain.alpha = 255;
+                        Fill(x + column, y + row, 1, 1, grain, fixed);
+                    }
+                }
             } else if (!painted && filtered && filterEffect.pointLight && width > 0 && height > 0) {
                 const double aimX = filterEffect.aimX - filterEffect.pointX;
                 const double aimY = filterEffect.aimY - filterEffect.pointY;
@@ -2749,19 +3531,96 @@ struct Engine {
                 const double frequency = filterEffect.turbulenceFrequency;
                 for (int row = 0; row < height; ++row) {
                     for (int column = 0; column < width; ++column) {
-                        const int cellX = static_cast<int>(column * frequency);
-                        const int cellY = static_cast<int>(row * frequency);
+                        int cellX = static_cast<int>(column * frequency);
+                        int cellY = static_cast<int>(row * frequency);
+                        if (filterEffect.turbulenceStitch) {
+                            cellX %= std::max(1, width / 2);
+                            cellY %= std::max(1, height / 2);
+                        }
                         Color grain;
                         grain.red = noise(cellX, cellY, 1);
                         grain.green = noise(cellX, cellY, 2);
                         grain.blue = noise(cellX, cellY, 3);
+                        if (filterEffect.turbulenceOctaves > 1) {
+                            grain.red = static_cast<std::uint8_t>((grain.red + noise(cellX * 2, cellY * 2, 9)) / 2);
+                            grain.green = static_cast<std::uint8_t>((grain.green + noise(cellX * 2, cellY * 2, 10)) / 2);
+                            grain.blue = static_cast<std::uint8_t>((grain.blue + noise(cellX * 2, cellY * 2, 11)) / 2);
+                        }
+                        if (filterEffect.turbulenceAbs) {
+                            auto fold = [](std::uint8_t value) {
+                                return static_cast<std::uint8_t>(std::min(255, std::abs(static_cast<int>(value) - 128) * 2));
+                            };
+                            grain.red = fold(grain.red);
+                            grain.green = fold(grain.green);
+                            grain.blue = fold(grain.blue);
+                        }
                         grain.alpha = 255;
                         Fill(x + column, y + row, 1, 1, grain, fixed);
                     }
                 }
             } else if (!painted && fillWidth > 0 && fillHeight > 0 && shown.alpha != 0) {
-                if (AttributeValue(node, "mask").empty()) {
-                    Fill(fillX, fillY, fillWidth, fillHeight, shown, fixed);
+                if (filtered && filterEffect.convolveSample) {
+                    double kernelSum = 0;
+                    for (int index = 0; index < filterEffect.kernelCount; ++index) {
+                        kernelSum += filterEffect.kernel[index];
+                    }
+                    const double usedDivisor = std::abs(kernelSum) < 0.000001 || std::abs(filterEffect.convolveGain) < 0.000001 ? 1 : kernelSum / filterEffect.convolveGain;
+                    for (int row = 0; row < fillHeight; ++row) {
+                        for (int column = 0; column < fillWidth; ++column) {
+                            double weight = 0;
+                            int cursor = 0;
+                            for (int ky = 0; ky < filterEffect.kernelOrderY; ++ky) {
+                                for (int kx = 0; kx < filterEffect.kernelOrderX; ++kx) {
+                                    const double cell = cursor < filterEffect.kernelCount ? filterEffect.kernel[cursor] : 0;
+                                    ++cursor;
+                                    int sampleX = column + (kx - filterEffect.kernelTargetX) * filterEffect.kernelUnitX;
+                                    int sampleY = row + (ky - filterEffect.kernelTargetY) * filterEffect.kernelUnitY;
+                                    if (filterEffect.edgeMode == 1) {
+                                        sampleX = (sampleX % fillWidth + fillWidth) % fillWidth;
+                                        sampleY = (sampleY % fillHeight + fillHeight) % fillHeight;
+                                        weight += cell;
+                                    } else if (filterEffect.edgeMode == 0) {
+                                        weight += cell;
+                                    } else if (sampleX >= 0 && sampleY >= 0 && sampleX < fillWidth && sampleY < fillHeight) {
+                                        weight += cell;
+                                    }
+                                }
+                            }
+                            auto map = [&](int value) {
+                                const double mapped = value * weight / usedDivisor + filterEffect.convolveBias * 255.0;
+                                return static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, mapped)));
+                            };
+                            Color pixel = shown;
+                            pixel.red = map(shown.red);
+                            pixel.green = map(shown.green);
+                            pixel.blue = map(shown.blue);
+                            if (!filterEffect.convolvePreserveAlpha) {
+                                pixel.alpha = map(shown.alpha);
+                            }
+                            Fill(fillX + column, fillY + row, 1, 1, pixel, fixed);
+                        }
+                    }
+                } else if (AttributeValue(node, "mask").empty()) {
+                    if (space.clipPoints.size() >= 3) {
+                        FillPolygonInRect(space.clipPoints, fillX, fillY, fillWidth, fillHeight, shown, fixed, space.clipEvenOdd);
+                    } else if (space.shapeRendering == 1) {
+                        const double rawX = space.originX + (SvgReal(node, "x", 0) - space.minX) * space.scaleX;
+                        const double rawY = space.originY + (SvgReal(node, "y", 0) - space.minY) * space.scaleY;
+                        const double rawWidth = SvgReal(node, "width", 0) * space.scaleX;
+                        const double rawHeight = SvgReal(node, "height", 0) * space.scaleY;
+                        FillCoverage(rawX, rawY, rawWidth, rawHeight, shown, fixed);
+                    } else if (space.shapeRendering == 2) {
+                        const double rawX = space.originX + (SvgReal(node, "x", 0) - space.minX) * space.scaleX;
+                        const double rawY = space.originY + (SvgReal(node, "y", 0) - space.minY) * space.scaleY;
+                        const double rawRight = rawX + SvgReal(node, "width", 0) * space.scaleX;
+                        const double rawBottom = rawY + SvgReal(node, "height", 0) * space.scaleY;
+                        const int snappedX = static_cast<int>(std::lround(rawX));
+                        const int snappedY = static_cast<int>(std::lround(rawY));
+                        Fill(snappedX, snappedY, std::max(0, static_cast<int>(std::lround(rawRight)) - snappedX),
+                            std::max(0, static_cast<int>(std::lround(rawBottom)) - snappedY), shown, fixed);
+                    } else {
+                        Fill(fillX, fillY, fillWidth, fillHeight, shown, fixed);
+                    }
                 } else {
                     for (int row = 0; row < fillHeight; ++row) {
                         for (int column = 0; column < fillWidth; ++column) {
@@ -2772,35 +3631,40 @@ struct Engine {
                     }
                 }
             }
-            if (stroke.alpha != 0 && width > 0 && height > 0) {
-                StrokeLine(x, y, x + width, y, stroke, fixed, thickness);
-                StrokeLine(x + width, y, x + width, y + height, stroke, fixed, thickness);
-                StrokeLine(x + width, y + height, x, y + height, stroke, fixed, thickness);
-                StrokeLine(x, y + height, x, y, stroke, fixed, thickness);
+            if (!strokeFirst) {
+                strokeRect();
             }
             RememberSvgLink(node, x, y, width, height, fixed);
             }
         } else if (!space.hidden && tag == "circle") {
-            const int cx = SvgX(space, SvgNumber(node, "cx", 0));
-            const int cy = SvgY(space, SvgNumber(node, "cy", 0));
+            const double rawCx = space.originX + (SvgReal(node, "cx", 0) - space.minX) * space.scaleX;
+            const double rawCy = space.originY + (SvgReal(node, "cy", 0) - space.minY) * space.scaleY;
+            const int cx = space.shapeRendering == 2 ? static_cast<int>(std::lround(rawCx)) : SvgX(space, SvgNumber(node, "cx", 0));
+            const int cy = space.shapeRendering == 2 ? static_cast<int>(std::lround(rawCy)) : SvgY(space, SvgNumber(node, "cy", 0));
             const int radiusX = SvgLength(space, SvgNumber(node, "r", 0), true);
             const int radiusY = SvgLength(space, SvgNumber(node, "r", 0), false);
             FillEllipse(cx, cy, radiusX, radiusY, fill, fixed);
             StrokeEllipse(cx, cy, radiusX, radiusY, thickness, stroke, fixed);
             RememberSvgLink(node, cx - radiusX, cy - radiusY, radiusX * 2, radiusY * 2, fixed);
         } else if (!space.hidden && tag == "ellipse") {
-            const int cx = SvgX(space, SvgNumber(node, "cx", 0));
-            const int cy = SvgY(space, SvgNumber(node, "cy", 0));
+            const double rawCx = space.originX + (SvgReal(node, "cx", 0) - space.minX) * space.scaleX;
+            const double rawCy = space.originY + (SvgReal(node, "cy", 0) - space.minY) * space.scaleY;
+            const int cx = space.shapeRendering == 2 ? static_cast<int>(std::lround(rawCx)) : SvgX(space, SvgNumber(node, "cx", 0));
+            const int cy = space.shapeRendering == 2 ? static_cast<int>(std::lround(rawCy)) : SvgY(space, SvgNumber(node, "cy", 0));
             const int radiusX = SvgLength(space, SvgNumber(node, "rx", 0), true);
             const int radiusY = SvgLength(space, SvgNumber(node, "ry", 0), false);
             FillEllipse(cx, cy, radiusX, radiusY, fill, fixed);
             StrokeEllipse(cx, cy, radiusX, radiusY, thickness, stroke, fixed);
             RememberSvgLink(node, cx - radiusX, cy - radiusY, radiusX * 2, radiusY * 2, fixed);
         } else if (!space.hidden && tag == "line") {
-            int x1 = SvgX(space, SvgNumber(node, "x1", 0));
-            int y1 = SvgY(space, SvgNumber(node, "y1", 0));
-            int x2 = SvgX(space, SvgNumber(node, "x2", 0));
-            int y2 = SvgY(space, SvgNumber(node, "y2", 0));
+            const double rawX1 = space.originX + (SvgReal(node, "x1", 0) - space.minX) * space.scaleX;
+            const double rawY1 = space.originY + (SvgReal(node, "y1", 0) - space.minY) * space.scaleY;
+            const double rawX2 = space.originX + (SvgReal(node, "x2", 0) - space.minX) * space.scaleX;
+            const double rawY2 = space.originY + (SvgReal(node, "y2", 0) - space.minY) * space.scaleY;
+            int x1 = space.shapeRendering == 2 ? static_cast<int>(std::lround(rawX1)) : SvgX(space, SvgNumber(node, "x1", 0));
+            int y1 = space.shapeRendering == 2 ? static_cast<int>(std::lround(rawY1)) : SvgY(space, SvgNumber(node, "y1", 0));
+            int x2 = space.shapeRendering == 2 ? static_cast<int>(std::lround(rawX2)) : SvgX(space, SvgNumber(node, "x2", 0));
+            int y2 = space.shapeRendering == 2 ? static_cast<int>(std::lround(rawY2)) : SvgY(space, SvgNumber(node, "y2", 0));
             const std::string cap = ToLowerAscii(AttributeValue(node, "stroke-linecap"));
             if ((cap == "square" || cap == "round") && thickness > 1) {
                 const double deltaX = x2 - x1;
@@ -2814,7 +3678,29 @@ struct Engine {
                     y2 += static_cast<int>(deltaY / length * extend);
                 }
             }
-            StrokeLine(x1, y1, x2, y2, stroke, fixed, thickness, AttributeValue(node, "stroke-dasharray"), std::atof(AttributeValue(node, "stroke-dashoffset").c_str()));
+            std::string dasharray = AttributeValue(node, "stroke-dasharray");
+            const double pathLength = std::atof(AttributeValue(node, "pathlength").c_str());
+            if (!AttributeValue(node, "pathlength").empty() && pathLength > 0) {
+                const double pixelLength = std::sqrt(static_cast<double>(x2 - x1) * (x2 - x1) + static_cast<double>(y2 - y1) * (y2 - y1));
+                if (pixelLength > 0) {
+                    const double dashScale = pixelLength / pathLength;
+                    std::string scaled;
+                    std::size_t index = 0;
+                    double number = 0;
+                    bool any = false;
+                    while (ReadSvgNumber(dasharray, index, number)) {
+                        if (any) {
+                            scaled += ' ';
+                        }
+                        scaled += std::to_string(static_cast<int>(number * dashScale + 0.5));
+                        any = true;
+                    }
+                    if (any) {
+                        dasharray = scaled;
+                    }
+                }
+            }
+            StrokeLine(x1, y1, x2, y2, stroke, fixed, thickness, dasharray, std::atof(AttributeValue(node, "stroke-dashoffset").c_str()));
             PaintLineMarkers(node, space, x1, y1, x2, y2, fixed);
             RememberSvgLink(node, std::min(x1, x2), std::min(y1, y2), std::abs(x2 - x1) + thickness, std::abs(y2 - y1) + thickness, fixed);
         } else if (!space.hidden && (tag == "polygon" || tag == "polyline")) {
@@ -2823,7 +3709,47 @@ struct Engine {
                 FillPolygon(points, 0, 0, fill, fixed, space.fillEvenOdd);
             }
             StrokePolyline(points, 0, 0, stroke, fixed, tag == "polygon", thickness);
-            if (ToLowerAscii(AttributeValue(node, "stroke-linejoin")) == "round" && thickness > 1 && points.size() > 2) {
+            const std::string join = ToLowerAscii(AttributeValue(node, "stroke-linejoin"));
+            const double miterLimit = AttributeValue(node, "stroke-miterlimit").empty() ? 4 : std::atof(AttributeValue(node, "stroke-miterlimit").c_str());
+            if (stroke.alpha != 0 && join != "round" && join != "bevel" && thickness > 1 && points.size() > 2) {
+                for (std::size_t index = 1; index + 1 < points.size(); ++index) {
+                    const double ax = points[index].x - points[index - 1].x;
+                    const double ay = points[index].y - points[index - 1].y;
+                    const double bx = points[index + 1].x - points[index].x;
+                    const double by = points[index + 1].y - points[index].y;
+                    const double aLength = std::sqrt(ax * ax + ay * ay);
+                    const double bLength = std::sqrt(bx * bx + by * by);
+                    if (aLength < 1 || bLength < 1) {
+                        continue;
+                    }
+                    const double ux = ax / aLength;
+                    const double uy = ay / aLength;
+                    const double vx = bx / bLength;
+                    const double vy = by / bLength;
+                    const double dot = std::max(-1.0, std::min(1.0, ux * vx + uy * vy));
+                    const double sine = std::sin(std::acos(dot) / 2);
+                    if (sine < 0.05 || (1.0 / sine) > miterLimit) {
+                        continue;
+                    }
+                    const double cross = ux * vy - uy * vx;
+                    double normalX = cross >= 0 ? uy + vy : -uy - vy;
+                    double normalY = cross >= 0 ? -ux - vx : ux + vx;
+                    const double normalLength = std::sqrt(normalX * normalX + normalY * normalY);
+                    if (normalLength < 0.001) {
+                        continue;
+                    }
+                    normalX /= normalLength;
+                    normalY /= normalLength;
+                    const double extension = thickness / 2.0 / sine;
+                    const int brush = std::max(1, thickness / 2);
+                    for (double distance = thickness / 2.0 + 1; distance <= extension; distance += 1) {
+                        const int tipX = static_cast<int>(points[index].x + normalX * distance) - brush / 2;
+                        const int tipY = static_cast<int>(points[index].y + normalY * distance) - brush / 2;
+                        Fill(tipX, tipY, brush, brush, stroke, fixed);
+                    }
+                }
+            }
+            if (join == "round" && thickness > 1 && points.size() > 2) {
                 const int radius = std::max(1, thickness / 2);
                 for (std::size_t index = 1; index + 1 < points.size(); ++index) {
                     const int centerX = static_cast<int>(points[index].x);
@@ -2872,6 +3798,14 @@ struct Engine {
             op.width = std::max(1, SvgLength(space, SvgNumber(node, "width", 0), true));
             op.height = std::max(1, SvgLength(space, SvgNumber(node, "height", 0), false));
             op.imagePath = path.find("://") == std::string::npos ? path : href;
+            const std::string rendering = ToLowerAscii(AttributeValue(node, "image-rendering"));
+            op.smoothImage = rendering == "optimizequality";
+            op.deferImage = ToLowerAscii(AttributeValue(node, "decoding")) == "async";
+            std::string fetchMode = "omit";
+            if (HasAttribute(node, "crossorigin")) {
+                fetchMode = ToLowerAscii(AttributeValue(node, "crossorigin")) == "use-credentials" ? "include" : "anonymous";
+            }
+            NoteResourceFetch(href, ToLowerAscii(AttributeValue(node, "fetchpriority")), fetchMode);
             op.fixed = fixed;
             result->ops.push_back(op);
             RememberSvgLink(node, op.x, op.y, op.width, op.height, fixed);
@@ -2931,8 +3865,41 @@ struct Engine {
             textStyle.color = fill;
             const int fontSize = std::max(1, SvgNumber(node, "font-size", DEFAULT_FONT_SIZE_PX));
             textStyle.fontSizePx = std::max(1, SvgLength(space, fontSize, false));
-            const std::string content = GatherText(node);
+            std::string content = GatherText(node);
+            const std::string pathWhiteSpace = ToLowerAscii(AttributeValue(node, "white-space"));
+            const std::string pathXmlSpace = ToLowerAscii(AttributeValue(node, "xml:space"));
+            if (pathWhiteSpace != "pre" && pathWhiteSpace != "pre-wrap" && pathXmlSpace != "preserve") {
+                std::string collapsed;
+                bool skipped = false;
+                for (char character : content) {
+                    if (character == ' ' || character == '\n' || character == '\t') {
+                        if (!skipped && !collapsed.empty()) {
+                            collapsed += ' ';
+                            skipped = true;
+                        }
+                    } else {
+                        collapsed += character;
+                        skipped = false;
+                    }
+                }
+                content = collapsed;
+            }
+            double pathLength = 0;
+            for (std::size_t index = 1; index < course.size(); ++index) {
+                const double deltaX = course[index].x - course[index - 1].x;
+                const double deltaY = course[index].y - course[index - 1].y;
+                pathLength += std::sqrt(deltaX * deltaX + deltaY * deltaY);
+            }
+            int glyphCount = 0;
+            for (char character : content) {
+                if (character != ' ') {
+                    ++glyphCount;
+                }
+            }
+            const bool exactSpacing = (ToLowerAscii(AttributeValue(node, "spacing")) == "exact" || ToLowerAscii(AttributeValue(node, "method")) == "stretch") && glyphCount > 1;
+            const double exactStep = exactSpacing ? pathLength / static_cast<double>(glyphCount - 1) : 0;
             double traveled = std::atof(AttributeValue(node, "startoffset").c_str()) * std::max(space.scaleX, space.scaleY);
+            int glyphIndex = 0;
             for (std::size_t byte = 0; byte < content.size(); ++byte) {
                 const std::string glyph(1, content[byte]);
                 if (glyph == " ") {
@@ -2942,9 +3909,11 @@ struct Engine {
                 const int advance = std::max(1, MeasureTextPx(glyph, textStyle.fontSizePx, textStyle.bold, textStyle.italic, textStyle.fontFamily));
                 double glyphX = 0;
                 double glyphY = 0;
-                if (PointAlong(course, traveled, glyphX, glyphY)) {
-                    Text(static_cast<int>(glyphX), static_cast<int>(glyphY) - textStyle.fontSizePx, glyph, textStyle, fixed);
+                if (PointAlong(course, exactSpacing ? glyphIndex * exactStep : traveled, glyphX, glyphY)) {
+                    const int sideShift = ToLowerAscii(AttributeValue(node, "side")) == "right" ? 0 : textStyle.fontSizePx;
+                    Text(static_cast<int>(glyphX), static_cast<int>(glyphY) - sideShift, glyph, textStyle, fixed);
                 }
+                ++glyphIndex;
                 traveled += advance;
             }
         } else if (!space.hidden && (tag == "text" || tag == "tspan")) {
@@ -2959,14 +3928,46 @@ struct Engine {
                 textStyle.color = fill;
                 const int fontSize = std::max(1, SvgNumber(node, "font-size", DEFAULT_FONT_SIZE_PX));
                 textStyle.fontSizePx = std::max(1, SvgLength(space, fontSize, false));
+                const std::string sizeAdjust = AttributeValue(node, "font-size-adjust");
+                if (!sizeAdjust.empty() && ToLowerAscii(sizeAdjust) != "none") {
+                    const double aspect = std::atof(sizeAdjust.c_str());
+                    if (aspect > 0) {
+                        textStyle.fontSizePx = std::max(1, static_cast<int>(textStyle.fontSizePx * aspect / 0.5 + 0.5));
+                    }
+                }
                 const std::string weight = ToLowerAscii(AttributeValue(node, "font-weight"));
                 textStyle.bold = weight == "bold" || weight == "bolder" || std::atoi(weight.c_str()) >= 700;
                 const std::string decoration = ToLowerAscii(AttributeValue(node, "text-decoration"));
                 textStyle.underline = decoration.find("underline") != std::string::npos;
                 textStyle.strike = decoration.find("line-through") != std::string::npos;
                 textStyle.italic = ToLowerAscii(AttributeValue(node, "font-style")) == "italic" || ToLowerAscii(AttributeValue(node, "font-style")) == "oblique";
-                const std::string content = GatherText(node);
-                int textX = SvgX(space, SvgNumber(node, "x", 0));
+                textStyle.fontFamily = AttributeValue(node, "font-family");
+                textStyle.monospace = ToLowerAscii(textStyle.fontFamily).find("monospace") != std::string::npos;
+                std::string content = GatherText(node);
+                const std::string whiteSpace = ToLowerAscii(AttributeValue(node, "white-space"));
+                const std::string xmlSpace = ToLowerAscii(AttributeValue(node, "xml:space"));
+                if (whiteSpace != "pre" && whiteSpace != "pre-wrap" && xmlSpace != "preserve") {
+                    std::string collapsed;
+                    bool skipped = false;
+                    for (char character : content) {
+                        if (character == ' ' || character == '\n' || character == '\t') {
+                            if (!skipped && !collapsed.empty()) {
+                                collapsed += ' ';
+                                skipped = true;
+                            }
+                        } else {
+                            collapsed += character;
+                            skipped = false;
+                        }
+                    }
+                    content = collapsed;
+                }
+                if (ToLowerAscii(AttributeValue(node, "direction")) == "rtl" &&
+                    ToLowerAscii(AttributeValue(node, "unicode-bidi")).find("override") != std::string::npos) {
+                    std::reverse(content.begin(), content.end());
+                }
+                const double rawTextX = space.originX + (SvgReal(node, "x", 0) - space.minX) * space.scaleX;
+                int textX = space.textRendering == 2 ? static_cast<int>(std::lround(rawTextX)) : SvgX(space, SvgNumber(node, "x", 0));
                 const int textWidth = MeasureTextPx(content, textStyle.fontSizePx, textStyle.bold, textStyle.italic, textStyle.fontFamily);
                 if (space.textAnchor == "middle") {
                     textX -= textWidth / 2;
@@ -2997,19 +3998,133 @@ struct Engine {
                     baseline = -SvgLength(space, std::atof(baselineShift.c_str()), false);
                 }
                 const int textY = SvgY(space, SvgNumber(node, "y", 0)) + SvgLength(space, SvgNumber(node, "dy", 0), false) + baseline - dominantDrop;
+                const std::string writingMode = ToLowerAscii(AttributeValue(node, "writing-mode"));
+                if ((writingMode == "tb" || writingMode.find("vertical") != std::string::npos) && !content.empty()) {
+                    int cursor = textY;
+                    const std::string orientation = ToLowerAscii(AttributeValue(node, "glyph-orientation-vertical"));
+                    const bool upright = orientation == "0" || orientation == "0deg" || orientation == "180" || orientation == "180deg";
+                    for (std::size_t byte = 0; byte < content.size(); ++byte) {
+                        const std::string glyph(1, content[byte]);
+                        const int advance = upright ? textStyle.fontSizePx : std::max(1, MeasureTextPx(glyph, textStyle.fontSizePx, textStyle.bold, textStyle.italic, textStyle.fontFamily));
+                        Text(textX, cursor, glyph, textStyle, fixed);
+                        cursor += advance;
+                    }
+                    RememberSvgLink(node, textX, textY, textStyle.fontSizePx, std::max(1, cursor - textY), fixed);
+                } else {
                 const int letterSpacing = SvgLength(space, std::atof(AttributeValue(node, "letter-spacing").c_str()), true);
-                if (letterSpacing != 0 && !content.empty()) {
+                const int wordSpacing = SvgLength(space, std::atof(AttributeValue(node, "word-spacing").c_str()), true);
+                const int textLength = AttributeValue(node, "textlength").empty() ? 0 : SvgLength(space, std::atof(AttributeValue(node, "textlength").c_str()), true);
+                const bool glyphAdjust = ToLowerAscii(AttributeValue(node, "lengthadjust")) == "spacingandglyphs";
+                if (glyphAdjust && textLength > 0 && textWidth > 0) {
+                    textStyle.fontSizePx = std::max(1, textStyle.fontSizePx * textLength / textWidth);
+                }
+                int spacing = letterSpacing;
+                if (!glyphAdjust && textLength > textWidth && content.size() > 1) {
+                    spacing += (textLength - textWidth) / static_cast<int>(content.size() - 1);
+                }
+                auto stretchOf = [](const std::string& text) {
+                    const std::string value = ToLowerAscii(text);
+                    if (value == "ultra-condensed") {
+                        return 0.5;
+                    }
+                    if (value == "extra-condensed") {
+                        return 0.625;
+                    }
+                    if (value == "condensed") {
+                        return 0.75;
+                    }
+                    if (value == "semi-condensed") {
+                        return 0.875;
+                    }
+                    if (value == "semi-expanded") {
+                        return 1.125;
+                    }
+                    if (value == "expanded") {
+                        return 1.25;
+                    }
+                    if (value == "extra-expanded") {
+                        return 1.5;
+                    }
+                    if (value == "ultra-expanded") {
+                        return 2.0;
+                    }
+                    if (value.find('%') != std::string::npos) {
+                        return std::atof(value.c_str()) / 100.0;
+                    }
+                    return 1.0;
+                };
+                std::string stretchText = AttributeValue(node, "font-stretch");
+                if (stretchText.empty()) {
+                    stretchText = AttributeValue(node, "font-width");
+                }
+                const double stretch = stretchOf(stretchText);
+                const std::string horizontalOrientation = ToLowerAscii(AttributeValue(node, "glyph-orientation-horizontal"));
+                const bool turnedGlyph = horizontalOrientation == "90" || horizontalOrientation == "90deg" || horizontalOrientation == "270" || horizontalOrientation == "270deg";
+                const std::string textOverflow = ToLowerAscii(AttributeValue(node, "text-overflow"));
+                if ((textOverflow == "ellipsis" || textOverflow == "ellipses") && whiteSpace != "pre" && whiteSpace != "pre-wrap" &&
+                    !AttributeValue(node, "inline-size").empty() && !content.empty()) {
+                    const int limit = SvgLength(space, std::atof(AttributeValue(node, "inline-size").c_str()), true);
+                    const int ellipsisWidth = MeasureTextPx("...", textStyle.fontSizePx, textStyle.bold, textStyle.italic, textStyle.fontFamily);
+                    const std::string original = content;
+                    while (!content.empty() && MeasureTextPx(content, textStyle.fontSizePx, textStyle.bold, textStyle.italic, textStyle.fontFamily) + ellipsisWidth > limit) {
+                        content.pop_back();
+                    }
+                    if (content.size() < original.size()) {
+                        if (MeasureTextPx(content, textStyle.fontSizePx, textStyle.bold, textStyle.italic, textStyle.fontFamily) + ellipsisWidth > limit) {
+                            content = "...";
+                        } else {
+                            content += "...";
+                        }
+                    }
+                }
+                const bool smallCaps = ToLowerAscii(AttributeValue(node, "font-variant")).find("small-caps") != std::string::npos;
+                if (turnedGlyph && !content.empty()) {
+                    int cursor = textY;
+                    for (std::size_t byte = 0; byte < content.size(); ++byte) {
+                        const std::string glyph(1, content[byte]);
+                        Text(textX, cursor, glyph, textStyle, fixed);
+                        cursor += textStyle.fontSizePx;
+                    }
+                    RememberSvgLink(node, textX, textY, textStyle.fontSizePx, std::max(1, cursor - textY), fixed);
+                } else if (std::abs(stretch - 1.0) > 0.01 && !content.empty()) {
+                    int cursor = textX;
+                    for (std::size_t byte = 0; byte < content.size(); ++byte) {
+                        const std::string glyph(1, content[byte]);
+                        const int advance = std::max(1, static_cast<int>(MeasureTextPx(glyph, textStyle.fontSizePx, textStyle.bold, textStyle.italic, textStyle.fontFamily) * stretch + 0.5));
+                        Text(cursor, textY, glyph, textStyle, fixed);
+                        cursor += advance;
+                    }
+                    RememberSvgLink(node, textX, textY, std::max(1, cursor - textX), textStyle.fontSizePx, fixed);
+                } else if (smallCaps && !content.empty()) {
+                    int cursor = textX;
+                    for (std::size_t byte = 0; byte < content.size(); ++byte) {
+                        std::string glyph(1, content[byte]);
+                        ResolvedStyle glyphStyle = textStyle;
+                        if (glyph[0] >= 'a' && glyph[0] <= 'z') {
+                            glyph[0] = static_cast<char>(glyph[0] - 'a' + 'A');
+                            glyphStyle.fontSizePx = std::max(1, textStyle.fontSizePx * 7 / 10);
+                        }
+                        const int advance = std::max(1, MeasureTextPx(glyph, glyphStyle.fontSizePx, glyphStyle.bold, glyphStyle.italic, glyphStyle.fontFamily));
+                        Text(cursor, textY, glyph, glyphStyle, fixed);
+                        cursor += advance;
+                    }
+                    RememberSvgLink(node, textX, textY, std::max(1, cursor - textX), textStyle.fontSizePx, fixed);
+                } else if ((letterSpacing != 0 || wordSpacing != 0 || (!glyphAdjust && textLength > 0)) && !content.empty()) {
                     int cursor = textX;
                     for (std::size_t byte = 0; byte < content.size(); ++byte) {
                         const std::string glyph(1, content[byte]);
                         const int advance = std::max(1, MeasureTextPx(glyph, textStyle.fontSizePx, textStyle.bold, textStyle.italic, textStyle.fontFamily));
                         Text(cursor, textY, glyph, textStyle, fixed);
-                        cursor += advance + letterSpacing;
+                        cursor += advance + spacing;
+                        if (glyph == " ") {
+                            cursor += wordSpacing;
+                        }
                     }
                     RememberSvgLink(node, textX, textY, std::max(1, cursor - textX), textStyle.fontSizePx, fixed);
                 } else {
                     Text(textX, textY, content, textStyle, fixed);
                     RememberSvgLink(node, textX, textY, std::max(1, textWidth), textStyle.fontSizePx, fixed);
+                }
                 }
             }
         }
@@ -3158,17 +4273,727 @@ struct Engine {
         PaintReplaced(node, x, y, width, height, style, fixed);
     }
 
+    void PaintFraction(Node& node, int x, int y, int width, int height, const ResolvedStyle& style, bool fixed) {
+        std::string numerator;
+        std::string denominator;
+        for (const std::unique_ptr<Node>& part : node.children) {
+            if (part->type != Node::Type::Element) {
+                continue;
+            }
+            if (numerator.empty()) {
+                numerator = CollapsedText(GatherText(*part), false);
+            } else if (denominator.empty()) {
+                denominator = CollapsedText(GatherText(*part), false);
+            }
+        }
+        const int line = LineHeightPx(style.fontSizePx);
+        const int thickness = AttributeValue(node, "linethickness").empty() ? 1 : std::max(0, std::atoi(AttributeValue(node, "linethickness").c_str()));
+        const int numeratorWidth = MeasureTextPx(numerator, style.fontSizePx, style.bold, style.italic, style.fontFamily);
+        const int denominatorWidth = MeasureTextPx(denominator, style.fontSizePx, style.bold, style.italic, style.fontFamily);
+        Text(x + std::max(0, (width - numeratorWidth) / 2), y, numerator, style, fixed);
+        if (thickness > 0) {
+            Fill(x, y + line, width, thickness, style.color, fixed);
+        }
+        Text(x + std::max(0, (width - denominatorWidth) / 2), y + line + thickness, denominator, style, fixed);
+        AddBox(node, x, y, width, height, style, fixed);
+    }
+
+    void MathChildren(const Node& node, std::string& first, std::string& second, std::string& third) {
+        first.clear();
+        second.clear();
+        third.clear();
+        for (const std::unique_ptr<Node>& part : node.children) {
+            if (part->type != Node::Type::Element) {
+                continue;
+            }
+            const std::string text = CollapsedText(GatherText(*part), false);
+            if (first.empty()) {
+                first = text;
+            } else if (second.empty()) {
+                second = text;
+            } else if (third.empty()) {
+                third = text;
+            }
+        }
+    }
+
+    bool MathFlag(const Node& node, const char* name) {
+        const std::string value = ToLowerAscii(AttributeValue(node, name));
+        return value == "true" || value == "1";
+    }
+
+    void PaintRadical(Node& node, int x, int y, int width, int height, const ResolvedStyle& style, bool fixed, bool indexed) {
+        std::string base;
+        std::string index;
+        std::string unused;
+        MathChildren(node, base, index, unused);
+        const int line = LineHeightPx(style.fontSizePx);
+        const int scriptSize = std::max(1, style.fontSizePx * 7 / 10);
+        const int scriptLine = LineHeightPx(scriptSize);
+        const int gap = std::max(4, style.fontSizePx / 2);
+        const int baseY = indexed ? y + scriptLine / 2 : y;
+        if (indexed && !index.empty()) {
+            ResolvedStyle indexStyle = style;
+            indexStyle.fontSizePx = scriptSize;
+            Text(x, y, index, indexStyle, fixed);
+        }
+        Fill(x, baseY, 1, std::max(1, line), style.color, fixed);
+        Fill(x, baseY, width, 1, style.color, fixed);
+        Text(x + gap, baseY, base, style, fixed);
+        AddBox(node, x, y, width, height, style, fixed);
+    }
+
+    void PaintScript(Node& node, int x, int y, int width, int height, const ResolvedStyle& style, bool fixed, bool superscript) {
+        std::string base;
+        std::string script;
+        std::string unused;
+        MathChildren(node, base, script, unused);
+        const int line = LineHeightPx(style.fontSizePx);
+        const int scriptSize = std::max(1, style.fontSizePx * 7 / 10);
+        ResolvedStyle scriptStyle = style;
+        scriptStyle.fontSizePx = scriptSize;
+        const int baseWidth = MeasureTextPx(base, style.fontSizePx, style.bold, style.italic, style.fontFamily);
+        const int shift = std::max(0, std::atoi(AttributeValue(node, superscript ? "superscriptshift" : "subscriptshift").c_str()));
+        if (superscript) {
+            const int baseDrop = LineHeightPx(scriptSize) / 2 + shift;
+            Text(x, y + baseDrop, base, style, fixed);
+            Text(x + baseWidth, y, script, scriptStyle, fixed);
+        } else {
+            Text(x, y, base, style, fixed);
+            Text(x + baseWidth, y + line / 2 + shift, script, scriptStyle, fixed);
+        }
+        AddBox(node, x, y, width, height, style, fixed);
+    }
+
+    void PaintSubSup(Node& node, int x, int y, int width, int height, const ResolvedStyle& style, bool fixed) {
+        std::string base;
+        std::string subscript;
+        std::string superscript;
+        MathChildren(node, base, subscript, superscript);
+        const int line = LineHeightPx(style.fontSizePx);
+        const int scriptSize = std::max(1, style.fontSizePx * 7 / 10);
+        ResolvedStyle scriptStyle = style;
+        scriptStyle.fontSizePx = scriptSize;
+        const int baseWidth = MeasureTextPx(base, style.fontSizePx, style.bold, style.italic, style.fontFamily);
+        const int superShift = std::max(0, std::atoi(AttributeValue(node, "superscriptshift").c_str()));
+        const int subShift = std::max(0, std::atoi(AttributeValue(node, "subscriptshift").c_str()));
+        const int baseDrop = LineHeightPx(scriptSize) / 2 + superShift;
+        Text(x, y + baseDrop, base, style, fixed);
+        Text(x + baseWidth, y, superscript, scriptStyle, fixed);
+        Text(x + baseWidth, y + baseDrop + line / 2 + subShift, subscript, scriptStyle, fixed);
+        AddBox(node, x, y, width, height, style, fixed);
+    }
+
+    void PaintLimits(Node& node, int x, int y, int width, int height, const ResolvedStyle& style, bool fixed, bool over, bool under) {
+        std::string base;
+        std::string second;
+        std::string third;
+        MathChildren(node, base, second, third);
+        const std::string underscript = over && under ? second : under ? second : std::string();
+        const std::string overscript = over && under ? third : over ? second : std::string();
+        const int line = LineHeightPx(style.fontSizePx);
+        const bool accent = over && MathFlag(node, "accent");
+        const bool accentUnder = under && MathFlag(node, "accentunder");
+        const int overSize = accent ? style.fontSizePx : std::max(1, style.fontSizePx * 7 / 10);
+        const int underSize = accentUnder ? style.fontSizePx : std::max(1, style.fontSizePx * 7 / 10);
+        const int overLine = over ? LineHeightPx(overSize) : 0;
+        const int underLine = under ? LineHeightPx(underSize) : 0;
+        const int overGap = accent ? 0 : over ? overLine / 2 : 0;
+        const int underGap = accentUnder ? 0 : under ? underLine / 2 : 0;
+        ResolvedStyle overStyle = style;
+        overStyle.fontSizePx = overSize;
+        ResolvedStyle underStyle = style;
+        underStyle.fontSizePx = underSize;
+        bool operatorBase = false;
+        for (const std::unique_ptr<Node>& part : node.children) {
+            if (part->type != Node::Type::Element) {
+                continue;
+            }
+            operatorBase = ToLowerAscii(part->tagName) == "mo";
+            break;
+        }
+        int displayMode = -1;
+        for (const Node* cursor = &node; cursor != nullptr; cursor = cursor->parent) {
+            const std::string value = ToLowerAscii(AttributeValue(*cursor, "displaystyle"));
+            if (value == "true" || value == "1") {
+                displayMode = 1;
+                break;
+            }
+            if (value == "false" || value == "0") {
+                displayMode = 0;
+                break;
+            }
+            if (ToLowerAscii(cursor->tagName) == "math" && ToLowerAscii(AttributeValue(*cursor, "display")) == "block") {
+                displayMode = 1;
+                break;
+            }
+        }
+        if (operatorBase && displayMode == 0) {
+            ResolvedStyle scriptStyle = style;
+            scriptStyle.fontSizePx = std::max(1, style.fontSizePx * 7 / 10);
+            const int baseWidth = MeasureTextPx(base, style.fontSizePx, style.bold, style.italic, style.fontFamily);
+            const int scriptLine = LineHeightPx(scriptStyle.fontSizePx);
+            if (over && under) {
+                const int baseDrop = scriptLine / 2;
+                Text(x, y + baseDrop, base, style, fixed);
+                Text(x + baseWidth, y, overscript, scriptStyle, fixed);
+                Text(x + baseWidth, y + baseDrop + line / 2, underscript, scriptStyle, fixed);
+            } else if (over) {
+                Text(x, y + scriptLine / 2, base, style, fixed);
+                Text(x + baseWidth, y, overscript, scriptStyle, fixed);
+            } else {
+                Text(x, y, base, style, fixed);
+                Text(x + baseWidth, y + line / 2, underscript, scriptStyle, fixed);
+            }
+            AddBox(node, x, y, width, height, style, fixed);
+            return;
+        }
+        ResolvedStyle baseStyle = style;
+        if (operatorBase && displayMode == 1) {
+            baseStyle.fontSizePx = std::max(1, baseStyle.fontSizePx * 3 / 2);
+        }
+        const int baseWidth = MeasureTextPx(base, baseStyle.fontSizePx, baseStyle.bold, baseStyle.italic, baseStyle.fontFamily);
+        const int overWidth = MeasureTextPx(overscript, overSize, style.bold, style.italic, style.fontFamily);
+        const int underWidth = MeasureTextPx(underscript, underSize, style.bold, style.italic, style.fontFamily);
+        if (over) {
+            Text(x + std::max(0, (width - overWidth) / 2), y, overscript, overStyle, fixed);
+        }
+        Text(x + std::max(0, (width - baseWidth) / 2), y + overLine + overGap, base, baseStyle, fixed);
+        if (under) {
+            Text(x + std::max(0, (width - underWidth) / 2), y + overLine + overGap + line + underGap, underscript, underStyle, fixed);
+        }
+        AddBox(node, x, y, width, height, style, fixed);
+    }
+
+    int MathLength(const std::string& raw, int base) const {
+        if (raw.empty()) {
+            return 0;
+        }
+        const std::string lower = ToLowerAscii(raw);
+        std::size_t index = 0;
+        const bool plus = lower[0] == '+';
+        const bool minus = lower[0] == '-';
+        if (plus || minus) {
+            ++index;
+        }
+        char* end = nullptr;
+        const double number = std::strtod(lower.c_str() + index, &end);
+        const std::string unit = end == nullptr ? std::string() : std::string(end);
+        const bool percent = unit.find('%') != std::string::npos;
+        const bool pseudo = unit.find("width") != std::string::npos || unit.find("height") != std::string::npos || unit.find("depth") != std::string::npos;
+        int magnitude = percent ? static_cast<int>(number / 100.0 * static_cast<double>(base) + (number < 0 ? -0.5 : 0.5))
+                                : pseudo ? static_cast<int>(number * static_cast<double>(base) + (number < 0 ? -0.5 : 0.5))
+                                         : static_cast<int>(number + (number < 0 ? -0.5 : 0.5));
+        if (minus) {
+            magnitude = -std::abs(magnitude);
+        }
+        if (plus || minus) {
+            return base + magnitude;
+        }
+        return magnitude;
+    }
+
+    void MathParts(const Node& node, std::vector<std::string>& parts) {
+        parts.clear();
+        for (const std::unique_ptr<Node>& part : node.children) {
+            if (part->type != Node::Type::Element) {
+                continue;
+            }
+            parts.push_back(CollapsedText(GatherText(*part), false));
+        }
+    }
+
+    int MathRunWidth(const std::vector<std::string>& parts, const ResolvedStyle& style) {
+        int width = 0;
+        for (const std::string& part : parts) {
+            width += MeasureTextPx(part, style.fontSizePx, style.bold, style.italic, style.fontFamily);
+        }
+        return width;
+    }
+
+    void PaintMathRun(int x, int y, const std::vector<std::string>& parts, const ResolvedStyle& style, bool fixed) {
+        int cursor = x;
+        for (const std::string& part : parts) {
+            if (!part.empty()) {
+                Text(cursor, y, part, style, fixed);
+            }
+            cursor += MeasureTextPx(part, style.fontSizePx, style.bold, style.italic, style.fontFamily);
+        }
+    }
+
+    bool HasNotation(const std::string& notation, const char* token) {
+        std::string word;
+        const std::string lower = ToLowerAscii(notation);
+        for (std::size_t index = 0; index <= lower.size(); ++index) {
+            const char letter = index < lower.size() ? lower[index] : ' ';
+            if (letter == ' ' || letter == '\t' || letter == '\n') {
+                if (word == token) {
+                    return true;
+                }
+                word.clear();
+            } else {
+                word.push_back(letter);
+            }
+        }
+        return false;
+    }
+
+    void Hairline(int x0, int y0, int x1, int y1, Color color, bool fixed) {
+        const int steps = std::max(std::abs(x1 - x0), std::abs(y1 - y0));
+        if (steps == 0) {
+            Fill(x0, y0, 1, 1, color, fixed);
+            return;
+        }
+        for (int step = 0; step <= steps; ++step) {
+            Fill(x0 + (x1 - x0) * step / steps, y0 + (y1 - y0) * step / steps, 1, 1, color, fixed);
+        }
+    }
+
+    void PaintEnclose(Node& node, int x, int y, int width, int height, const ResolvedStyle& style, bool fixed) {
+        std::vector<std::string> parts;
+        MathParts(node, parts);
+        const int pad = 3;
+        PaintMathRun(x + pad, y, parts, style, fixed);
+        const std::string notation = AttributeValue(node, "notation");
+        const std::string marks = notation.empty() ? std::string("longdiv") : notation;
+        const bool rounded = HasNotation(marks, "roundedbox");
+        const bool box = HasNotation(marks, "box") || rounded;
+        const int inset = rounded ? 2 : 0;
+        const bool left = box || HasNotation(marks, "left") || HasNotation(marks, "longdiv") || HasNotation(marks, "phasorangle");
+        const bool right = box || HasNotation(marks, "right") || HasNotation(marks, "actuarial") || HasNotation(marks, "madruwb");
+        const bool top = box || HasNotation(marks, "top") || HasNotation(marks, "longdiv") || HasNotation(marks, "actuarial");
+        const bool bottom = box || HasNotation(marks, "bottom") || HasNotation(marks, "madruwb") || HasNotation(marks, "phasorangle");
+        if (top) {
+            Fill(x + inset, y, std::max(1, width - inset * 2), 1, style.color, fixed);
+        }
+        if (bottom) {
+            Fill(x + inset, y + height - 1, std::max(1, width - inset * 2), 1, style.color, fixed);
+        }
+        if (left) {
+            Fill(x, y + inset, 1, std::max(1, height - inset * 2), style.color, fixed);
+        }
+        if (right) {
+            Fill(x + width - 1, y + inset, 1, std::max(1, height - inset * 2), style.color, fixed);
+        }
+        if (HasNotation(marks, "horizontalstrike")) {
+            Fill(x, y + height / 2, width, 1, style.color, fixed);
+        }
+        if (HasNotation(marks, "verticalstrike")) {
+            Fill(x + width / 2, y, 1, height, style.color, fixed);
+        }
+        if (HasNotation(marks, "updiagonalstrike") || HasNotation(marks, "updiagonalarrow")) {
+            Hairline(x, y + height - 1, x + width - 1, y, style.color, fixed);
+        }
+        if (HasNotation(marks, "downdiagonalstrike")) {
+            Hairline(x, y, x + width - 1, y + height - 1, style.color, fixed);
+        }
+        if (HasNotation(marks, "phasorangle")) {
+            Hairline(x, y + height - 1, x + width - 1, y, style.color, fixed);
+        }
+        if (HasNotation(marks, "circle")) {
+            const int steps = std::max(16, width + height);
+            const double cx = static_cast<double>(x) + static_cast<double>(width) / 2.0;
+            const double cy = static_cast<double>(y) + static_cast<double>(height) / 2.0;
+            const double rx = std::max(1.0, static_cast<double>(width) / 2.0 - 0.5);
+            const double ry = std::max(1.0, static_cast<double>(height) / 2.0 - 0.5);
+            Fill(static_cast<int>(cx), static_cast<int>(cy - ry), 1, 1, style.color, fixed);
+            Fill(static_cast<int>(cx), static_cast<int>(cy + ry), 1, 1, style.color, fixed);
+            Fill(static_cast<int>(cx - rx), static_cast<int>(cy), 1, 1, style.color, fixed);
+            Fill(static_cast<int>(cx + rx), static_cast<int>(cy), 1, 1, style.color, fixed);
+            for (int step = 0; step < steps; ++step) {
+                const double angle = 6.28318530718 * static_cast<double>(step) / static_cast<double>(steps);
+                Fill(static_cast<int>(cx + rx * std::cos(angle)), static_cast<int>(cy + ry * std::sin(angle)), 1, 1, style.color, fixed);
+            }
+        }
+        AddBox(node, x, y, width, height, style, fixed);
+    }
+
+    void PaintPadded(Node& node, int x, int y, int width, int height, const ResolvedStyle& style, bool fixed) {
+        std::vector<std::string> parts;
+        MathParts(node, parts);
+        const int lspace = MathLength(AttributeValue(node, "lspace"), 0);
+        const int voffset = MathLength(AttributeValue(node, "voffset"), 0);
+        PaintMathRun(x + lspace, y - voffset, parts, style, fixed);
+        AddBox(node, x, y, width, height, style, fixed);
+    }
+
+    void PaintFenced(Node& node, int x, int y, int width, int height, const ResolvedStyle& style, bool fixed) {
+        std::vector<std::string> parts;
+        MathParts(node, parts);
+        const std::string open = HasAttribute(node, "open") ? AttributeValue(node, "open") : "(";
+        const std::string close = HasAttribute(node, "close") ? AttributeValue(node, "close") : ")";
+        std::string separators = HasAttribute(node, "separators") ? AttributeValue(node, "separators") : ",";
+        std::string marks;
+        for (char letter : separators) {
+            if (letter != ' ' && letter != '\t' && letter != '\n') {
+                marks.push_back(letter);
+            }
+        }
+        int cursor = x;
+        if (!open.empty()) {
+            Text(cursor, y, open, style, fixed);
+            cursor += MeasureTextPx(open, style.fontSizePx, style.bold, style.italic, style.fontFamily);
+        }
+        for (std::size_t index = 0; index < parts.size(); ++index) {
+            if (!parts[index].empty()) {
+                Text(cursor, y, parts[index], style, fixed);
+            }
+            cursor += MeasureTextPx(parts[index], style.fontSizePx, style.bold, style.italic, style.fontFamily);
+            if (index + 1 < parts.size() && !marks.empty()) {
+                const std::string separator(1, marks[std::min(index, marks.size() - 1)]);
+                Text(cursor, y, separator, style, fixed);
+                cursor += MeasureTextPx(separator, style.fontSizePx, style.bold, style.italic, style.fontFamily);
+            }
+        }
+        if (!close.empty()) {
+            Text(cursor, y, close, style, fixed);
+        }
+        AddBox(node, x, y, width, height, style, fixed);
+    }
+
+    void MathTokens(const std::string& raw, std::vector<std::string>& tokens) const {
+        tokens.clear();
+        std::string word;
+        const std::string lower = ToLowerAscii(raw);
+        for (std::size_t index = 0; index <= lower.size(); ++index) {
+            const char letter = index < lower.size() ? lower[index] : ' ';
+            if (letter == ' ' || letter == '\t' || letter == '\n') {
+                if (!word.empty()) {
+                    tokens.push_back(word);
+                }
+                word.clear();
+            } else {
+                word.push_back(letter);
+            }
+        }
+    }
+
+    const std::string& TokenAt(const std::vector<std::string>& tokens, std::size_t index) const {
+        static const std::string empty;
+        if (tokens.empty()) {
+            return empty;
+        }
+        return index < tokens.size() ? tokens[index] : tokens.back();
+    }
+
+    void PaintMathRule(int x, int y, int width, int height, bool dashed, Color color, bool fixed) {
+        if (width <= 0 || height <= 0) {
+            return;
+        }
+        if (!dashed) {
+            Fill(x, y, width, height, color, fixed);
+            return;
+        }
+        if (width >= height) {
+            for (int step = 0; step < width; step += 4) {
+                Fill(x + step, y, std::min(2, width - step), height, color, fixed);
+            }
+        } else {
+            for (int step = 0; step < height; step += 4) {
+                Fill(x, y + step, width, std::min(2, height - step), color, fixed);
+            }
+        }
+    }
+
+    void ReadMathTable(const Node& node, std::vector<std::vector<std::string>>& cells, std::vector<std::vector<int>>& spans,         std::vector<std::vector<std::string>>& cellAlign, std::vector<std::string>& rowAlign, std::vector<std::string>& rowColumnAlign) const {
+        cells.clear();
+        spans.clear();
+        cellAlign.clear();
+        rowAlign.clear();
+        rowColumnAlign.clear();
+        for (const std::unique_ptr<Node>& child : node.children) {
+            if (child->type != Node::Type::Element) {
+                continue;
+            }
+            const std::string tag = ToLowerAscii(child->tagName);
+            if (tag != "mtr" && tag != "mtd") {
+                continue;
+            }
+            std::vector<std::string> row;
+            std::vector<int> rowSpans;
+            std::vector<std::string> aligns;
+            const Node* rowNode = child.get();
+            if (tag == "mtd") {
+                row.push_back(CollapsedText(GatherText(*child), false));
+                rowSpans.push_back(std::max(1, std::atoi(AttributeValue(*child, "columnspan").c_str())));
+                aligns.push_back(ToLowerAscii(AttributeValue(*child, "columnalign")));
+                rowAlign.push_back(ToLowerAscii(AttributeValue(*child, "rowalign")));
+                rowColumnAlign.push_back(ToLowerAscii(AttributeValue(*child, "columnalign")));
+            } else {
+                for (const std::unique_ptr<Node>& cellNode : rowNode->children) {
+                    if (cellNode->type != Node::Type::Element) {
+                        continue;
+                    }
+                    row.push_back(CollapsedText(GatherText(*cellNode), false));
+                    const int span = std::max(1, std::atoi(AttributeValue(*cellNode, "columnspan").c_str()));
+                    rowSpans.push_back(span);
+                    const std::string own = ToLowerAscii(AttributeValue(*cellNode, "columnalign"));
+                    aligns.push_back(own);
+                }
+                rowAlign.push_back(ToLowerAscii(AttributeValue(*rowNode, "rowalign")));
+                rowColumnAlign.push_back(ToLowerAscii(AttributeValue(*rowNode, "columnalign")));
+            }
+            if (!row.empty()) {
+                cells.push_back(row);
+                spans.push_back(rowSpans);
+                cellAlign.push_back(aligns);
+            }
+        }
+    }
+
+    void MeasureMathTable(const Node& node, const ResolvedStyle& style, int& width, int& height, std::vector<int>& columnWidths, std::vector<int>& columnX, int& rowHeight,
+        int& rowGap, int& origin, std::vector<std::vector<std::string>>& cells, std::vector<std::vector<int>>& spans) const {
+        std::vector<std::vector<std::string>> cellAlign;
+        std::vector<std::string> rowAlign;
+        std::vector<std::string> rowColumnAlign;
+        ReadMathTable(node, cells, spans, cellAlign, rowAlign, rowColumnAlign);
+        int columns = 0;
+        for (const std::vector<int>& rowSpans : spans) {
+            int count = 0;
+            for (int span : rowSpans) {
+                count += span;
+            }
+            columns = std::max(columns, count);
+        }
+        columnWidths.assign(static_cast<std::size_t>(std::max(1, columns)), 0);
+        for (std::size_t row = 0; row < cells.size(); ++row) {
+            int column = 0;
+            for (std::size_t cell = 0; cell < cells[row].size(); ++cell) {
+                const int span = spans[row][cell];
+                if (span == 1 && column < columns) {
+                    const int textWidth = MeasureTextPx(cells[row][cell], style.fontSizePx, style.bold, style.italic, style.fontFamily);
+                    columnWidths[static_cast<std::size_t>(column)] = std::max(columnWidths[static_cast<std::size_t>(column)], textWidth);
+                }
+                column += span;
+            }
+        }
+        const int spacing = std::max(0, HasAttribute(node, "columnspacing") ? MathLength(AttributeValue(node, "columnspacing"), style.fontSizePx) : style.fontSizePx / 2);
+        for (std::size_t row = 0; row < cells.size(); ++row) {
+            int column = 0;
+            for (std::size_t cell = 0; cell < cells[row].size(); ++cell) {
+                const int span = spans[row][cell];
+                if (span > 1 && column < columns) {
+                    const int used = std::min(span, columns - column);
+                    int sum = spacing * std::max(0, used - 1);
+                    for (int index = 0; index < used; ++index) {
+                        sum += columnWidths[static_cast<std::size_t>(column + index)];
+                    }
+                    const int textWidth = MeasureTextPx(cells[row][cell], style.fontSizePx, style.bold, style.italic, style.fontFamily);
+                    if (textWidth > sum) {
+                        columnWidths[static_cast<std::size_t>(column + used - 1)] += textWidth - sum;
+                    }
+                }
+                column += span;
+            }
+        }
+        rowGap = std::max(0, HasAttribute(node, "rowspacing") ? MathLength(AttributeValue(node, "rowspacing"), style.fontSizePx) : 2);
+        rowHeight = LineHeightPx(style.fontSizePx);
+        const std::string frame = ToLowerAscii(AttributeValue(node, "frame"));
+        origin = frame == "solid" || frame == "dashed" ? 2 : 0;
+        if (HasAttribute(node, "framespacing")) {
+            std::vector<std::string> frameSpace;
+            MathTokens(AttributeValue(node, "framespacing"), frameSpace);
+            if (!frameSpace.empty()) {
+                origin += std::max(0, MathLength(frameSpace[0], style.fontSizePx));
+            }
+        }
+        int contentWidth = origin * 2;
+        for (int column = 0; column < columns; ++column) {
+            contentWidth += columnWidths[static_cast<std::size_t>(column)];
+            if (column + 1 < columns) {
+                contentWidth += spacing;
+            }
+        }
+        if (HasAttribute(node, "width")) {
+            const int requested = MathLength(AttributeValue(node, "width"), contentWidth);
+            if (requested > contentWidth && columns > 0) {
+                columnWidths[static_cast<std::size_t>(columns - 1)] += requested - contentWidth;
+                contentWidth = requested;
+            }
+        }
+        columnX.resize(static_cast<std::size_t>(std::max(1, columns)));
+        int cursor = origin;
+        for (int column = 0; column < columns; ++column) {
+            columnX[static_cast<std::size_t>(column)] = cursor;
+            cursor += columnWidths[static_cast<std::size_t>(column)] + (column + 1 < columns ? spacing : 0);
+        }
+        const int rows = std::max(1, static_cast<int>(cells.size()));
+        width = std::max(1, contentWidth);
+        height = std::max(rowHeight, origin * 2 + rows * rowHeight + std::max(0, rows - 1) * rowGap);
+    }
+
+    void PaintTable(Node& node, int x, int y, int width, int height, const ResolvedStyle& style, bool fixed) {
+        std::vector<int> columnWidths;
+        std::vector<int> columnX;
+        std::vector<std::vector<std::string>> cells;
+        std::vector<std::vector<int>> spans;
+        int rowHeight = 0;
+        int rowGap = 0;
+        int origin = 0;
+        int measuredWidth = width;
+        int measuredHeight = height;
+        MeasureMathTable(node, style, measuredWidth, measuredHeight, columnWidths, columnX, rowHeight, rowGap, origin, cells, spans);
+        std::vector<std::string> columnAlign;
+        std::vector<std::string> rowLines;
+        std::vector<std::string> columnLines;
+        MathTokens(AttributeValue(node, "columnalign"), columnAlign);
+        MathTokens(AttributeValue(node, "rowlines"), rowLines);
+        MathTokens(AttributeValue(node, "columnlines"), columnLines);
+        std::vector<std::vector<std::string>> paintCells;
+        std::vector<std::vector<int>> paintSpans;
+        std::vector<std::vector<std::string>> cellAlign;
+        std::vector<std::string> rowAlign;
+        std::vector<std::string> rowColumnAlign;
+        ReadMathTable(node, paintCells, paintSpans, cellAlign, rowAlign, rowColumnAlign);
+        const std::string frame = ToLowerAscii(AttributeValue(node, "frame"));
+        if (frame == "solid" || frame == "dashed") {
+            const bool dashed = frame == "dashed";
+            PaintMathRule(x, y, width, 1, dashed, style.color, fixed);
+            PaintMathRule(x, y + height - 1, width, 1, dashed, style.color, fixed);
+            PaintMathRule(x, y, 1, height, dashed, style.color, fixed);
+            PaintMathRule(x + width - 1, y, 1, height, dashed, style.color, fixed);
+        }
+        for (std::size_t row = 0; row < cells.size(); ++row) {
+            const int rowY = y + origin + static_cast<int>(row) * (rowHeight + rowGap);
+            if (row + 1 < cells.size()) {
+                const std::string line = TokenAt(rowLines, row);
+                if (line == "solid" || line == "dashed") {
+                    PaintMathRule(x, rowY + rowHeight, width, 1, line == "dashed", style.color, fixed);
+                }
+            }
+            int column = 0;
+            for (std::size_t cell = 0; cell < cells[row].size(); ++cell) {
+                const int span = spans[row][cell];
+                const int used = std::min(span, std::max(0, static_cast<int>(columnWidths.size()) - column));
+                if (used <= 0) {
+                    break;
+                }
+                int spanWidth = 0;
+                for (int index = 0; index < used; ++index) {
+                    spanWidth += columnWidths[static_cast<std::size_t>(column + index)];
+                }
+                if (used > 1 && column + used - 1 < static_cast<int>(columnX.size())) {
+                    spanWidth = columnX[static_cast<std::size_t>(column + used - 1)] + columnWidths[static_cast<std::size_t>(column + used - 1)] - columnX[static_cast<std::size_t>(column)];
+                }
+                if (column + 1 < static_cast<int>(columnWidths.size())) {
+                    const std::string line = TokenAt(columnLines, static_cast<std::size_t>(column));
+                    if ((line == "solid" || line == "dashed") && span == 1) {
+                        PaintMathRule(x + columnX[static_cast<std::size_t>(column + 1)] - 1, y, 1, height, line == "dashed", style.color, fixed);
+                    }
+                }
+                std::string align = cell < cellAlign[row].size() ? cellAlign[row][cell] : std::string();
+                if (align.empty() && row < rowColumnAlign.size()) {
+                    std::vector<std::string> rowTokens;
+                    MathTokens(rowColumnAlign[row], rowTokens);
+                    align = TokenAt(rowTokens, static_cast<std::size_t>(column));
+                }
+                if (align.empty()) {
+                    align = TokenAt(columnAlign, static_cast<std::size_t>(column));
+                }
+                const std::string text = cells[row][cell];
+                const int textWidth = MeasureTextPx(text, style.fontSizePx, style.bold, style.italic, style.fontFamily);
+                int textX = x + columnX[static_cast<std::size_t>(column)];
+                if (align == "right") {
+                    textX += std::max(0, spanWidth - textWidth);
+                } else if (align != "left") {
+                    textX += std::max(0, (spanWidth - textWidth) / 2);
+                }
+                Text(textX, rowY, text, style, fixed);
+                column += span;
+            }
+        }
+        AddBox(node, x, y, width, height, style, fixed);
+    }
+
+    void PaintMultiscripts(Node& node, int x, int y, int width, int height, const ResolvedStyle& style, bool fixed) {
+        std::string base;
+        std::vector<std::string> postSub;
+        std::vector<std::string> postSup;
+        std::vector<std::string> preSub;
+        std::vector<std::string> preSup;
+        bool baseSet = false;
+        bool prescripts = false;
+        bool subscript = true;
+        for (const std::unique_ptr<Node>& part : node.children) {
+            if (part->type != Node::Type::Element) {
+                continue;
+            }
+            if (ToLowerAscii(part->tagName) == "mprescripts") {
+                prescripts = true;
+                subscript = true;
+                continue;
+            }
+            const std::string text = CollapsedText(GatherText(*part), false);
+            if (!baseSet) {
+                base = text;
+                baseSet = true;
+                continue;
+            }
+            std::vector<std::string>& target = prescripts ? (subscript ? preSub : preSup) : (subscript ? postSub : postSup);
+            target.push_back(text);
+            subscript = !subscript;
+        }
+        const int line = LineHeightPx(style.fontSizePx);
+        const int scriptSize = std::max(1, style.fontSizePx * 7 / 10);
+        ResolvedStyle scriptStyle = style;
+        scriptStyle.fontSizePx = scriptSize;
+        const int superShift = std::max(0, std::atoi(AttributeValue(node, "superscriptshift").c_str()));
+        const int subShift = std::max(0, std::atoi(AttributeValue(node, "subscriptshift").c_str()));
+        const int baseDrop = LineHeightPx(scriptSize) / 2 + superShift;
+        const auto pairWidth = [&](const std::vector<std::string>& subs, const std::vector<std::string>& sups) {
+            int total = 0;
+            const std::size_t count = std::max(subs.size(), sups.size());
+            for (std::size_t index = 0; index < count; ++index) {
+                const int subWidth = index < subs.size() ? MeasureTextPx(subs[index], scriptSize, style.bold, style.italic, style.fontFamily) : 0;
+                const int supWidth = index < sups.size() ? MeasureTextPx(sups[index], scriptSize, style.bold, style.italic, style.fontFamily) : 0;
+                total += std::max(subWidth, supWidth);
+            }
+            return total;
+        };
+        const int preWidth = pairWidth(preSub, preSup);
+        const int baseWidth = MeasureTextPx(base, style.fontSizePx, style.bold, style.italic, style.fontFamily);
+        const auto paintPairs = [&](int cursor, const std::vector<std::string>& subs, const std::vector<std::string>& sups, bool forward) {
+            const std::size_t count = std::max(subs.size(), sups.size());
+            for (std::size_t step = 0; step < count; ++step) {
+                const std::size_t index = forward ? step : count - 1 - step;
+                const std::string sub = index < subs.size() ? subs[index] : std::string();
+                const std::string sup = index < sups.size() ? sups[index] : std::string();
+                const int subWidth = MeasureTextPx(sub, scriptSize, style.bold, style.italic, style.fontFamily);
+                const int supWidth = MeasureTextPx(sup, scriptSize, style.bold, style.italic, style.fontFamily);
+                const int pair = std::max(subWidth, supWidth);
+                if (!forward) {
+                    cursor -= pair;
+                }
+                if (!sup.empty()) {
+                    Text(cursor, y, sup, scriptStyle, fixed);
+                }
+                if (!sub.empty()) {
+                    Text(cursor, y + baseDrop + line / 2 + subShift, sub, scriptStyle, fixed);
+                }
+                if (forward) {
+                    cursor += pair;
+                }
+            }
+        };
+        paintPairs(x + preWidth, preSub, preSup, false);
+        Text(x + preWidth, y + baseDrop, base, style, fixed);
+        paintPairs(x + preWidth + baseWidth, postSub, postSup, true);
+        AddBox(node, x, y, width, height, style, fixed);
+    }
+
     void LayoutLines(Node& block, int x, int y, int width, const ResolvedStyle& style, bool fixed, int& usedHeight, bool paint) {
         std::vector<Piece> pieces;
         CollectInlines(block, style, width, pieces, true);
         int cursorY = y;
         std::size_t index = 0;
+        bool firstLine = true;
+        bool afterForced = false;
         while (index < pieces.size()) {
             int lineWidth = 0;
-            int lineHeight = LineHeightPx(style.fontSizePx);
+            int lineHeight = style.lineHeightPx > 0 ? style.lineHeightPx : LineHeightPx(style.fontSizePx);
             std::size_t end = index;
             while (end < pieces.size() && !pieces[end].lineBreak) {
-                if (!style.nowrap && !style.pre && lineWidth > 0 && lineWidth + pieces[end].width > width) {
+                if (!style.nowrap && !style.pre && !pieces[end].style.nowrap && lineWidth > 0 && lineWidth + pieces[end].width > width) {
                     break;
                 }
                 lineWidth += pieces[end].width;
@@ -3184,10 +5009,57 @@ struct Engine {
             } else if (style.textAlign == 2 || style.rtl) {
                 offset = std::max(0, width - lineWidth);
             }
-            int cursorX = x + offset;
+            int indent = style.textIndentMilli >= 0 ? width * style.textIndentMilli / 1000 : style.textIndentPx;
+            bool indented = firstLine || (style.textIndentEachLine && afterForced);
+            if (style.textIndentHanging) {
+                indented = !indented;
+            }
+            if (!indented) {
+                indent = 0;
+            }
+            int cursorX = x + offset + indent;
             for (std::size_t pieceIndex = index; pieceIndex < end; ++pieceIndex) {
                 Piece& piece = pieces[pieceIndex];
-                if (paint && piece.atomic && piece.node != nullptr) {
+                const std::string mathTag = piece.node == nullptr ? std::string() : ToLowerAscii(piece.node->tagName);
+                if (paint && mathTag == "mfrac") {
+                    PaintFraction(*piece.node, cursorX, cursorY, piece.width, piece.height, piece.style, fixed);
+                } else if (paint && (mathTag == "msqrt" || mathTag == "mroot")) {
+                    PaintRadical(*piece.node, cursorX, cursorY, piece.width, piece.height, piece.style, fixed, mathTag == "mroot");
+                } else if (paint && (mathTag == "msup" || mathTag == "msub")) {
+                    PaintScript(*piece.node, cursorX, cursorY, piece.width, piece.height, piece.style, fixed, mathTag == "msup");
+                } else if (paint && mathTag == "msubsup") {
+                    PaintSubSup(*piece.node, cursorX, cursorY, piece.width, piece.height, piece.style, fixed);
+                } else if (paint && (mathTag == "mover" || mathTag == "munder" || mathTag == "munderover")) {
+                    PaintLimits(*piece.node, cursorX, cursorY, piece.width, piece.height, piece.style, fixed, mathTag != "munder", mathTag != "mover");
+                } else if (paint && mathTag == "menclose") {
+                    PaintEnclose(*piece.node, cursorX, cursorY, piece.width, piece.height, piece.style, fixed);
+                } else if (paint && mathTag == "mpadded") {
+                    PaintPadded(*piece.node, cursorX, cursorY, piece.width, piece.height, piece.style, fixed);
+                } else if (paint && mathTag == "mfenced") {
+                    PaintFenced(*piece.node, cursorX, cursorY, piece.width, piece.height, piece.style, fixed);
+                } else if (paint && mathTag == "mo") {
+                    const std::string form = ToLowerAscii(AttributeValue(*piece.node, "form"));
+                    int lead = HasAttribute(*piece.node, "lspace") ? std::max(0, MathLength(AttributeValue(*piece.node, "lspace"), piece.style.fontSizePx)) : 0;
+                    if (!HasAttribute(*piece.node, "lspace") && (form == "infix" || form == "postfix")) {
+                        lead = std::max(1, piece.style.fontSizePx / 5);
+                    }
+                    ResolvedStyle operatorStyle = piece.style;
+                    if (MathFlag(*piece.node, "largeop")) {
+                        operatorStyle.fontSizePx = std::max(1, operatorStyle.fontSizePx * 3 / 2);
+                    }
+                    if (MathFlag(*piece.node, "stretchy")) {
+                        Fill(cursorX + lead, cursorY, 2, piece.height, operatorStyle.color, fixed);
+                    } else if (!piece.text.empty()) {
+                        Text(cursorX + lead, cursorY, piece.text, operatorStyle, fixed);
+                    }
+                    AddBox(*piece.node, cursorX, cursorY, piece.width, piece.height, operatorStyle, fixed);
+                } else if (paint && (mathTag == "mspace" || mathTag == "mphantom")) {
+                    AddBox(*piece.node, cursorX, cursorY, piece.width, piece.height, piece.style, fixed);
+                } else if (paint && mathTag == "mtable") {
+                    PaintTable(*piece.node, cursorX, cursorY, piece.width, piece.height, piece.style, fixed);
+                } else if (paint && mathTag == "mmultiscripts") {
+                    PaintMultiscripts(*piece.node, cursorX, cursorY, piece.width, piece.height, piece.style, fixed);
+                } else if (paint && piece.atomic && piece.node != nullptr) {
                     PaintAtomic(*piece.node, cursorX, cursorY, piece.width, piece.height, piece.style, fixed);
                 } else if (paint && !piece.text.empty()) {
                     Text(cursorX, cursorY, piece.text, piece.style, fixed);
@@ -3198,10 +5070,16 @@ struct Engine {
                 cursorX += piece.width;
             }
             cursorY += lineHeight;
-            if (end < pieces.size() && pieces[end].lineBreak) {
+            const bool hardBreak = end < pieces.size() && pieces[end].lineBreak;
+            if (hardBreak) {
                 ++end;
             }
+            firstLine = false;
+            afterForced = hardBreak;
             if (end == index) {
+                if (index < pieces.size() && pieces[index].lineBreak) {
+                    afterForced = true;
+                }
                 ++index;
                 continue;
             }
@@ -3214,6 +5092,7 @@ struct Engine {
     }
 
     void CollectInlines(Node& node, const ResolvedStyle& style, int containing, std::vector<Piece>& pieces, bool rootBlock) {
+        const std::size_t rtlStart = pieces.size();
         if (node.scriptText || HasAttribute(node, "contenteditable")) {
             const std::string text = CollapsedText(node.liveValue.empty() && !node.scriptText ? GatherText(node) : node.liveValue, style.pre);
             if (!text.empty()) {
@@ -3221,7 +5100,7 @@ struct Engine {
                 piece.text = text;
                 piece.style = style;
                 piece.node = &node;
-                piece.width = MeasureTextPx(text, style.fontSizePx, style.bold, style.italic, style.fontFamily);
+                piece.width = MeasureTextPx(text, style.fontSizePx, style.bold, style.italic, style.fontFamily, style.letterSpacingPx, style.wordSpacingPx);
                 piece.height = LineHeightPx(style.fontSizePx);
                 pieces.push_back(piece);
             }
@@ -3245,7 +5124,7 @@ struct Engine {
                             Piece piece;
                             piece.text = line;
                             piece.style = style;
-                            piece.width = MeasureTextPx(line, style.fontSizePx, style.bold, style.italic, style.fontFamily);
+                            piece.width = MeasureTextPx(line, style.fontSizePx, style.bold, style.italic, style.fontFamily, style.letterSpacingPx, style.wordSpacingPx);
                             piece.height = LineHeightPx(style.fontSizePx);
                             pieces.push_back(piece);
                             Piece breaker;
@@ -3260,7 +5139,7 @@ struct Engine {
                         Piece piece;
                         piece.text = line;
                         piece.style = style;
-                        piece.width = MeasureTextPx(line, style.fontSizePx, style.bold, style.italic, style.fontFamily);
+                        piece.width = MeasureTextPx(line, style.fontSizePx, style.bold, style.italic, style.fontFamily, style.letterSpacingPx, style.wordSpacingPx);
                         piece.height = LineHeightPx(style.fontSizePx);
                         pieces.push_back(piece);
                     }
@@ -3269,7 +5148,7 @@ struct Engine {
                     piece.text = text;
                     piece.style = style;
                     piece.node = &node;
-                    piece.width = MeasureTextPx(text, style.fontSizePx, style.bold, style.italic, style.fontFamily);
+                    piece.width = MeasureTextPx(text, style.fontSizePx, style.bold, style.italic, style.fontFamily, style.letterSpacingPx, style.wordSpacingPx);
                     piece.height = LineHeightPx(style.fontSizePx);
                     if (rootBlock) {
                         piece.node = nullptr;
@@ -3295,6 +5174,262 @@ struct Engine {
                 continue;
             }
             const ResolvedStyle childStyle = ResolveStyle(child, style, *document);
+            const std::string mathTag = ToLowerAscii(child.tagName);
+            if (mathTag == "math" && ToLowerAscii(AttributeValue(child, "display")) == "block") {
+                Piece beforeBreak;
+                beforeBreak.lineBreak = true;
+                pieces.push_back(beforeBreak);
+                CollectInlines(child, childStyle, containing, pieces, false);
+                Piece afterBreak;
+                afterBreak.lineBreak = true;
+                pieces.push_back(afterBreak);
+                continue;
+            }
+            if (mathTag == "semantics") {
+                for (const std::unique_ptr<Node>& part : child.children) {
+                    if (part->type != Node::Type::Element) {
+                        continue;
+                    }
+                    CollectInlines(*part, ResolveStyle(*part, childStyle, *document), containing, pieces, false);
+                    break;
+                }
+                continue;
+            }
+            if (mathTag == "maction") {
+                const bool toggle = ToLowerAscii(AttributeValue(child, "actiontype")) == "toggle";
+                const int selection = toggle ? std::max(1, std::atoi(AttributeValue(child, "selection").c_str())) : 1;
+                int shown = 1;
+                for (const std::unique_ptr<Node>& part : child.children) {
+                    if (part->type != Node::Type::Element) {
+                        continue;
+                    }
+                    if (shown == selection) {
+                        CollectInlines(*part, ResolveStyle(*part, childStyle, *document), containing, pieces, false);
+                        break;
+                    }
+                    ++shown;
+                }
+                continue;
+            }
+            if (mathTag == "ms" || mathTag == "mo") {
+                const std::string body = CollapsedText(GatherText(child), false);
+                std::string shown = body;
+                if (mathTag == "ms") {
+                    const std::string openQuote = HasAttribute(child, "lquote") ? AttributeValue(child, "lquote") : "\"";
+                    const std::string closeQuote = HasAttribute(child, "rquote") ? AttributeValue(child, "rquote") : "\"";
+                    shown = openQuote + body + closeQuote;
+                }
+                const std::string form = ToLowerAscii(AttributeValue(child, "form"));
+                int lead = HasAttribute(child, "lspace") ? std::max(0, MathLength(AttributeValue(child, "lspace"), childStyle.fontSizePx)) : 0;
+                int trail = HasAttribute(child, "rspace") ? std::max(0, MathLength(AttributeValue(child, "rspace"), childStyle.fontSizePx)) : 0;
+                if (mathTag == "mo" && !HasAttribute(child, "lspace") && (form == "infix" || form == "postfix")) {
+                    lead = std::max(1, childStyle.fontSizePx / 5);
+                }
+                if (mathTag == "mo" && !HasAttribute(child, "rspace") && (form == "infix" || form == "prefix")) {
+                    trail = std::max(1, childStyle.fontSizePx / 5);
+                }
+                ResolvedStyle operatorStyle = childStyle;
+                if (mathTag == "mo" && (ToLowerAscii(AttributeValue(child, "largeop")) == "true" || AttributeValue(child, "largeop") == "1")) {
+                    operatorStyle.fontSizePx = std::max(1, operatorStyle.fontSizePx * 3 / 2);
+                }
+                Piece piece;
+                piece.node = &child;
+                piece.style = operatorStyle;
+                piece.text = shown;
+                const bool stretchy = mathTag == "mo" && (ToLowerAscii(AttributeValue(child, "stretchy")) == "true" || AttributeValue(child, "stretchy") == "1");
+                int bar = LineHeightPx(operatorStyle.fontSizePx);
+                if (stretchy) {
+                    const int minSize = HasAttribute(child, "minsize") ? std::max(1, MathLength(AttributeValue(child, "minsize"), bar)) : bar * 2;
+                    const int maxSize = HasAttribute(child, "maxsize") ? std::max(minSize, MathLength(AttributeValue(child, "maxsize"), bar)) : minSize;
+                    bar = std::min(maxSize, std::max(minSize, bar));
+                    piece.text.clear();
+                    piece.width = lead + 2 + trail;
+                    piece.height = bar;
+                } else {
+                    piece.width = lead + MeasureTextPx(shown, operatorStyle.fontSizePx, operatorStyle.bold, operatorStyle.italic, operatorStyle.fontFamily) + trail;
+                    piece.height = LineHeightPx(operatorStyle.fontSizePx);
+                }
+                pieces.push_back(piece);
+                continue;
+            }
+            if (mathTag == "mtable" || mathTag == "mmultiscripts") {
+                Piece piece;
+                piece.node = &child;
+                piece.style = childStyle;
+                if (mathTag == "mtable") {
+                    std::vector<int> columnWidths;
+                    std::vector<int> columnX;
+                    std::vector<std::vector<std::string>> cells;
+                    std::vector<std::vector<int>> spans;
+                    int rowHeight = 0;
+                    int rowGap = 0;
+                    int origin = 0;
+                    MeasureMathTable(child, childStyle, piece.width, piece.height, columnWidths, columnX, rowHeight, rowGap, origin, cells, spans);
+                } else {
+                    std::string base;
+                    std::vector<std::string> postSub;
+                    std::vector<std::string> postSup;
+                    std::vector<std::string> preSub;
+                    std::vector<std::string> preSup;
+                    bool baseSet = false;
+                    bool prescripts = false;
+                    bool subscript = true;
+                    for (const std::unique_ptr<Node>& part : child.children) {
+                        if (part->type != Node::Type::Element) {
+                            continue;
+                        }
+                        if (ToLowerAscii(part->tagName) == "mprescripts") {
+                            prescripts = true;
+                            subscript = true;
+                            continue;
+                        }
+                        const std::string text = CollapsedText(GatherText(*part), false);
+                        if (!baseSet) {
+                            base = text;
+                            baseSet = true;
+                            continue;
+                        }
+                        std::vector<std::string>& target = prescripts ? (subscript ? preSub : preSup) : (subscript ? postSub : postSup);
+                        target.push_back(text);
+                        subscript = !subscript;
+                    }
+                    const int scriptSize = std::max(1, childStyle.fontSizePx * 7 / 10);
+                    const int scriptLine = LineHeightPx(scriptSize);
+                    const int superShift = std::max(0, std::atoi(AttributeValue(child, "superscriptshift").c_str()));
+                    const int subShift = std::max(0, std::atoi(AttributeValue(child, "subscriptshift").c_str()));
+                    const auto pairWidth = [&](const std::vector<std::string>& subs, const std::vector<std::string>& sups) {
+                        int total = 0;
+                        const std::size_t count = std::max(subs.size(), sups.size());
+                        for (std::size_t index = 0; index < count; ++index) {
+                            const int subWidth = index < subs.size() ? MeasureTextPx(subs[index], scriptSize, childStyle.bold, childStyle.italic, childStyle.fontFamily) : 0;
+                            const int supWidth = index < sups.size() ? MeasureTextPx(sups[index], scriptSize, childStyle.bold, childStyle.italic, childStyle.fontFamily) : 0;
+                            total += std::max(subWidth, supWidth);
+                        }
+                        return total;
+                    };
+                    piece.width = pairWidth(preSub, preSup) + MeasureTextPx(base, childStyle.fontSizePx, childStyle.bold, childStyle.italic, childStyle.fontFamily) + pairWidth(postSub, postSup);
+                    piece.height = LineHeightPx(childStyle.fontSizePx) + scriptLine + superShift + subShift;
+                }
+                pieces.push_back(piece);
+                continue;
+            }
+            if (mathTag == "mspace" || mathTag == "mphantom" || mathTag == "menclose" || mathTag == "mpadded" || mathTag == "mfenced") {
+                std::vector<std::string> parts;
+                MathParts(child, parts);
+                const int line = LineHeightPx(childStyle.fontSizePx);
+                const int contentWidth = MathRunWidth(parts, childStyle);
+                Piece piece;
+                piece.node = &child;
+                piece.style = childStyle;
+                piece.height = line;
+                if (mathTag == "mspace") {
+                    const int depth = std::max(0, MathLength(AttributeValue(child, "depth"), line));
+                    const int rise = std::max(0, MathLength(AttributeValue(child, "height"), line));
+                    piece.width = std::max(0, MathLength(AttributeValue(child, "width"), contentWidth));
+                    piece.height = std::max(line, rise + depth);
+                } else if (mathTag == "mphantom") {
+                    piece.width = contentWidth;
+                } else if (mathTag == "menclose") {
+                    piece.width = contentWidth + 6;
+                } else if (mathTag == "mpadded") {
+                    const int lspace = MathLength(AttributeValue(child, "lspace"), 0);
+                    const int voffset = MathLength(AttributeValue(child, "voffset"), 0);
+                    const bool widthSet = HasAttribute(child, "width");
+                    piece.width = widthSet ? std::max(0, MathLength(AttributeValue(child, "width"), contentWidth)) : lspace + contentWidth;
+                    piece.height = line + std::abs(voffset);
+                } else {
+                    const std::string open = HasAttribute(child, "open") ? AttributeValue(child, "open") : "(";
+                    const std::string close = HasAttribute(child, "close") ? AttributeValue(child, "close") : ")";
+                    std::string separators = HasAttribute(child, "separators") ? AttributeValue(child, "separators") : ",";
+                    std::string marks;
+                    for (char letter : separators) {
+                        if (letter != ' ' && letter != '\t' && letter != '\n') {
+                            marks.push_back(letter);
+                        }
+                    }
+                    int fenceWidth = MeasureTextPx(open, childStyle.fontSizePx, childStyle.bold, childStyle.italic, childStyle.fontFamily) +
+                                     MeasureTextPx(close, childStyle.fontSizePx, childStyle.bold, childStyle.italic, childStyle.fontFamily) + contentWidth;
+                    if (!marks.empty() && parts.size() > 1) {
+                        for (std::size_t index = 0; index + 1 < parts.size(); ++index) {
+                            const std::string separator(1, marks[std::min(index, marks.size() - 1)]);
+                            fenceWidth += MeasureTextPx(separator, childStyle.fontSizePx, childStyle.bold, childStyle.italic, childStyle.fontFamily);
+                        }
+                    }
+                    piece.width = fenceWidth;
+                }
+                pieces.push_back(piece);
+                continue;
+            }
+            if (mathTag == "mfrac" || mathTag == "msqrt" || mathTag == "mroot" || mathTag == "msup" || mathTag == "msub" || mathTag == "msubsup" ||
+                mathTag == "mover" || mathTag == "munder" || mathTag == "munderover") {
+                std::string first;
+                std::string second;
+                std::string third;
+                for (const std::unique_ptr<Node>& part : child.children) {
+                    if (part->type != Node::Type::Element) {
+                        continue;
+                    }
+                    const std::string text = CollapsedText(GatherText(*part), false);
+                    if (first.empty()) {
+                        first = text;
+                    } else if (second.empty()) {
+                        second = text;
+                    } else if (third.empty()) {
+                        third = text;
+                    }
+                }
+                const int line = LineHeightPx(childStyle.fontSizePx);
+                const int scriptSize = std::max(1, childStyle.fontSizePx * 7 / 10);
+                const int scriptLine = LineHeightPx(scriptSize);
+                const int firstWidth = MeasureTextPx(first, childStyle.fontSizePx, childStyle.bold, childStyle.italic, childStyle.fontFamily);
+                const int secondWidth = MeasureTextPx(second, scriptSize, childStyle.bold, childStyle.italic, childStyle.fontFamily);
+                Piece piece;
+                piece.node = &child;
+                piece.style = childStyle;
+                if (mathTag == "mfrac") {
+                    const int thickness = AttributeValue(child, "linethickness").empty() ? 1 : std::max(0, std::atoi(AttributeValue(child, "linethickness").c_str()));
+                    const int denominatorWidth = MeasureTextPx(second, childStyle.fontSizePx, childStyle.bold, childStyle.italic, childStyle.fontFamily);
+                    piece.width = std::max(1, std::max(firstWidth, denominatorWidth));
+                    piece.height = line + thickness + line;
+                } else if (mathTag == "msqrt" || mathTag == "mroot") {
+                    const int gap = std::max(4, childStyle.fontSizePx / 2);
+                    piece.width = gap + std::max(1, firstWidth);
+                    piece.height = line + (mathTag == "mroot" ? scriptLine / 2 : 0);
+                } else if (mathTag == "msup") {
+                    const int shift = std::max(0, std::atoi(AttributeValue(child, "superscriptshift").c_str()));
+                    piece.width = std::max(1, firstWidth) + secondWidth;
+                    piece.height = line + scriptLine / 2 + shift;
+                } else if (mathTag == "msub") {
+                    const int shift = std::max(0, std::atoi(AttributeValue(child, "subscriptshift").c_str()));
+                    piece.width = std::max(1, firstWidth) + secondWidth;
+                    piece.height = line + scriptLine / 2 + shift;
+                } else if (mathTag == "msubsup") {
+                    const int superShift = std::max(0, std::atoi(AttributeValue(child, "superscriptshift").c_str()));
+                    const int subShift = std::max(0, std::atoi(AttributeValue(child, "subscriptshift").c_str()));
+                    const int thirdWidth = MeasureTextPx(third, scriptSize, childStyle.bold, childStyle.italic, childStyle.fontFamily);
+                    piece.width = std::max(1, firstWidth) + std::max(secondWidth, thirdWidth);
+                    piece.height = line + scriptLine + superShift + subShift;
+                } else {
+                    const bool over = mathTag != "munder";
+                    const bool under = mathTag != "mover";
+                    const bool accent = over && (ToLowerAscii(AttributeValue(child, "accent")) == "true" || AttributeValue(child, "accent") == "1");
+                    const bool accentUnder = under && (ToLowerAscii(AttributeValue(child, "accentunder")) == "true" || AttributeValue(child, "accentunder") == "1");
+                    const int overSize = accent ? childStyle.fontSizePx : scriptSize;
+                    const int underSize = accentUnder ? childStyle.fontSizePx : scriptSize;
+                    const int overLine = over ? LineHeightPx(overSize) : 0;
+                    const int underLine = under ? LineHeightPx(underSize) : 0;
+                    const int overGap = accent ? 0 : over ? overLine / 2 : 0;
+                    const int underGap = accentUnder ? 0 : under ? underLine / 2 : 0;
+                    const std::string overText = mathTag == "munderover" ? third : over ? second : std::string();
+                    const std::string underText = mathTag == "munder" ? second : mathTag == "munderover" ? second : std::string();
+                    const int overWidth = MeasureTextPx(overText, overSize, childStyle.bold, childStyle.italic, childStyle.fontFamily);
+                    const int underWidth = MeasureTextPx(underText, underSize, childStyle.bold, childStyle.italic, childStyle.fontFamily);
+                    piece.width = std::max(1, std::max(firstWidth, std::max(overWidth, underWidth)));
+                    piece.height = overLine + overGap + line + underGap + underLine;
+                }
+                pieces.push_back(piece);
+                continue;
+            }
             const DisplayKind display = childStyle.display;
             if (display == DisplayKind::Inline || display == DisplayKind::ListItem || child.kind == ElementKind::Ruby) {
                 if ((SpecFor(child.kind).presentation & PRESENTATION_QUOTE) != 0) {
@@ -3334,6 +5469,9 @@ struct Engine {
             atomic.style = childStyle;
             MeasureAtomic(child, childStyle, containing, atomic.width, atomic.height);
             pieces.push_back(atomic);
+        }
+        if (ToLowerAscii(AttributeValue(node, "dir")) == "rtl") {
+            std::reverse(pieces.begin() + static_cast<std::ptrdiff_t>(rtlStart), pieces.end());
         }
         (void)rootBlock;
     }
@@ -4060,8 +6198,34 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
         style.paddingTop = marginHeight;
         style.paddingBottom = marginHeight;
     }
-    if (node.tagName == "mi") {
-        style.italic = true;
+    if (ToLowerAscii(node.tagName) == "mi") {
+        const std::string variant = ToLowerAscii(AttributeValue(node, "mathvariant"));
+        const std::string identifier = CollapsedText(GatherText(node), false);
+        if (variant == "normal" || variant == "monospace") {
+            style.italic = false;
+            style.monospace = variant == "monospace";
+        } else if (variant == "bold") {
+            style.bold = true;
+            style.italic = false;
+        } else if (variant == "italic" || variant == "bold-italic") {
+            style.italic = true;
+            style.bold = variant == "bold-italic";
+        } else if (identifier.size() <= 1) {
+            style.italic = true;
+        }
+    }
+    if (ToLowerAscii(node.tagName) == "merror") {
+        style.color = Color{255, 0, 0, 255};
+    }
+    if (ToLowerAscii(node.tagName) == "mn") {
+        style.italic = false;
+    }
+    if (ToLowerAscii(node.tagName) == "mtext") {
+        style.italic = false;
+        style.pre = true;
+    }
+    if (ToLowerAscii(node.tagName) == "mrow") {
+        style.nowrap = true;
     }
     const std::string face = ToLowerAscii(AttributeValue(node, "face"));
     if (face.find("mono") != std::string::npos || face.find("courier") != std::string::npos) {
@@ -4085,6 +6249,52 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
         }
         if (rule.fontSizePx > 0) {
             target.fontSizePx = rule.fontSizePx;
+        }
+        if (rule.hasLetterSpacing) {
+            target.letterSpacingPx = rule.letterSpacingPx;
+        }
+        if (rule.hasWordSpacing) {
+            if (rule.wordSpacingMilli >= 0) {
+                target.wordSpacingPx = EmToPx(target.fontSizePx, rule.wordSpacingMilli);
+            } else {
+                target.wordSpacingPx = rule.wordSpacingPx;
+            }
+        }
+        if (rule.hasTextTransform) {
+            target.textTransform = rule.textTransform;
+        }
+        if (rule.hasUnderlineOffset) {
+            if (rule.underlineOffsetRelative) {
+                target.underlineOffsetPx = EmToPx(target.fontSizePx, rule.underlineOffsetMilli);
+            } else {
+                target.underlineOffsetPx = rule.underlineOffsetPx;
+            }
+        }
+        if (rule.hasDecorationColor) {
+            if (rule.decorationUsesText) {
+                target.hasDecorationColor = false;
+            } else {
+                target.hasDecorationColor = true;
+                target.decorationColor = Color{rule.decorationRed, rule.decorationGreen, rule.decorationBlue, rule.decorationAlpha};
+            }
+        }
+        if (rule.hasTextIndent) {
+            target.textIndentHanging = rule.textIndentHanging;
+            target.textIndentEachLine = rule.textIndentEachLine;
+            if (rule.textIndentFromEm) {
+                target.textIndentPx = EmToPx(target.fontSizePx, rule.textIndentEmMilli);
+                target.textIndentMilli = -1;
+            } else {
+                target.textIndentPx = rule.textIndentPx;
+                target.textIndentMilli = rule.textIndentMilli;
+            }
+        }
+        if (rule.hasLineHeight) {
+            if (rule.lineHeightMilli >= 0) {
+                target.lineHeightPx = std::max(1, EmToPx(target.fontSizePx, rule.lineHeightMilli));
+            } else {
+                target.lineHeightPx = std::max(0, rule.lineHeightPx);
+            }
         }
         if (rule.hasColor) {
             target.color = Color{rule.colorRed, rule.colorGreen, rule.colorBlue, 255};
@@ -4168,8 +6378,36 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
             const std::string classes = " " + AttributeValue(current, "class") + " ";
             return classes.find(" " + selector.substr(1) + " ") != std::string::npos;
         }
-        const std::size_t dot = selector.find('.');
-        const std::string tag = dot == std::string::npos ? selector : selector.substr(0, dot);
+        std::string head = selector;
+        std::string wantedLanguage;
+        const std::size_t langAt = selector.find(":lang(");
+        if (langAt != std::string::npos) {
+            head = selector.substr(0, langAt);
+            const std::size_t close = selector.find(')', langAt);
+            wantedLanguage = ToLowerAscii(selector.substr(langAt + 6, close == std::string::npos ? std::string::npos : close - (langAt + 6)));
+        }
+        if (!wantedLanguage.empty()) {
+            bool languageOk = false;
+            for (const Node* cursor = &current; cursor != nullptr; cursor = cursor->parent) {
+                std::string spoken = ToLowerAscii(AttributeValue(*cursor, "xml:lang"));
+                if (spoken.empty()) {
+                    spoken = ToLowerAscii(AttributeValue(*cursor, "lang"));
+                }
+                if (spoken == wantedLanguage || (spoken.size() > wantedLanguage.size() && spoken.compare(0, wantedLanguage.size(), wantedLanguage) == 0 &&
+                                                    spoken[wantedLanguage.size()] == '-')) {
+                    languageOk = true;
+                    break;
+                }
+            }
+            if (!languageOk) {
+                return false;
+            }
+        }
+        if (head.empty()) {
+            return true;
+        }
+        const std::size_t dot = head.find('.');
+        const std::string tag = dot == std::string::npos ? head : head.substr(0, dot);
         if (tag != ToLowerAscii(current.tagName)) {
             return false;
         }
@@ -4177,8 +6415,97 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
             return true;
         }
         const std::string classes = " " + AttributeValue(current, "class") + " ";
-        return classes.find(" " + selector.substr(dot + 1) + " ") != std::string::npos;
+        return classes.find(" " + head.substr(dot + 1) + " ") != std::string::npos;
     };
+    std::vector<const Node*> mathChain;
+    for (const Node* cursor = &node; cursor != nullptr; cursor = cursor->parent) {
+        mathChain.push_back(cursor);
+    }
+    for (std::size_t chainIndex = mathChain.size(); chainIndex > 0; --chainIndex) {
+        const Node& source = *mathChain[chainIndex - 1];
+        Color mathColor{0, 0, 0, 255};
+        if (ParseColor(AttributeValue(source, "mathcolor"), mathColor)) {
+            style.color = mathColor;
+        }
+        if (ParseColor(AttributeValue(source, "mathbackground"), mathColor)) {
+            style.background = mathColor;
+        }
+        const std::string mathSize = ToLowerAscii(AttributeValue(source, "mathsize"));
+        if (mathSize == "small") {
+            style.fontSizePx = std::max(1, style.fontSizePx * 7 / 10);
+        } else if (mathSize == "big") {
+            style.fontSizePx = std::max(1, style.fontSizePx * 14 / 10);
+        } else if (!mathSize.empty()) {
+            const int size = std::atoi(mathSize.c_str());
+            if (size > 0) {
+                style.fontSizePx = size;
+            }
+        }
+        if (ToLowerAscii(source.tagName) == "mstyle") {
+            if (ParseColor(AttributeValue(source, "color"), mathColor)) {
+                style.color = mathColor;
+            }
+            if (ParseColor(AttributeValue(source, "background"), mathColor)) {
+                style.background = mathColor;
+            }
+            const std::string weight = ToLowerAscii(AttributeValue(source, "fontweight"));
+            if (weight == "bold" || weight == "bolder") {
+                style.bold = true;
+            } else if (weight == "normal") {
+                style.bold = false;
+            }
+            const std::string fontStyle = ToLowerAscii(AttributeValue(source, "fontstyle"));
+            if (fontStyle == "italic") {
+                style.italic = true;
+            } else if (fontStyle == "normal") {
+                style.italic = false;
+            }
+            if (HasAttribute(source, "fontsize")) {
+                const int size = std::atoi(AttributeValue(source, "fontsize").c_str());
+                if (size > 0) {
+                    style.fontSizePx = size;
+                }
+            }
+        }
+    }
+    int ancestorDepth = 0;
+    int scriptDepth = 0;
+    std::vector<const Node*> scriptChain;
+    for (const Node* cursor = node.parent; cursor != nullptr; cursor = cursor->parent) {
+        scriptChain.push_back(cursor);
+    }
+    for (std::size_t chainIndex = scriptChain.size(); chainIndex > 0; --chainIndex) {
+        const Node& source = *scriptChain[chainIndex - 1];
+        if (!HasAttribute(source, "scriptlevel")) {
+            continue;
+        }
+        const std::string level = AttributeValue(source, "scriptlevel");
+        if (level.empty()) {
+            continue;
+        }
+        if (level[0] == '+' || level[0] == '-') {
+            ancestorDepth += std::atoi(level.c_str());
+        } else {
+            ancestorDepth = std::atoi(level.c_str());
+        }
+    }
+    scriptDepth = ancestorDepth;
+    if (HasAttribute(node, "scriptlevel")) {
+        const std::string level = AttributeValue(node, "scriptlevel");
+        if (!level.empty() && (level[0] == '+' || level[0] == '-')) {
+            scriptDepth += std::atoi(level.c_str());
+        } else if (!level.empty()) {
+            scriptDepth = std::atoi(level.c_str());
+        }
+    }
+    if (scriptDepth != ancestorDepth) {
+        int nextSize = style.fontSizePx;
+        const int steps = scriptDepth > ancestorDepth ? scriptDepth - ancestorDepth : ancestorDepth - scriptDepth;
+        for (int step = 0; step < steps; ++step) {
+            nextSize = scriptDepth > ancestorDepth ? std::max(1, nextSize * 7 / 10) : std::max(1, nextSize * 10 / 7);
+        }
+        style.fontSizePx = nextSize;
+    }
     for (const ElementStyle& rule : document.styleRules) {
         if (matches(node, rule.selector)) {
             applyRule(style, rule);
@@ -4201,6 +6528,7 @@ double SvgAnimationTime() {
 }
 
 LayoutResult LayoutDocument(Document& document, int viewportWidth, int viewportHeight) {
+    ClearResourceFetchPlan();
     LoadDocumentStyles(document);
     RunDocumentScripts(document);
     LayoutResult result;
