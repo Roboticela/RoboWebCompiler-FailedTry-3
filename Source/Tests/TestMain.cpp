@@ -11,7 +11,12 @@
 #include "Render/Renderer.h"
 #include "Runtime/Interaction.h"
 #include "Validate/TreeValidator.h"
+#include "Xml/XmlParser.h"
+#include "Xml/XPath.h"
+#include "Xml/Xslt.h"
 
+#include <cmath>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <sstream>
@@ -1442,9 +1447,16 @@ void TestHtmlBehavior() {
     const RoboWeb::ElementBox* blurredBox = RoboWeb::FindBox(blurredLayout, "svg");
     EXPECT(blurredBox != nullptr);
     if (blurredBox != nullptr) {
-        EXPECT(RoboWeb::PixelGreen(blurredFrame, blurredBox->x + 2, blurredBox->y + 4) == 0);
+        // A Gaussian blur keeps partial alpha everywhere: the interior close to
+        // the rim blends with the backdrop and the outside fades along the
+        // normal curve instead of the old linear ramp.
+        const int rim = RoboWeb::PixelGreen(blurredFrame, blurredBox->x + 2, blurredBox->y + 4);
+        EXPECT(rim > 60 && rim < 170);
+        const int middle = RoboWeb::PixelGreen(blurredFrame, blurredBox->x + 4, blurredBox->y + 8);
+        EXPECT(middle < rim);
         const int fringe = RoboWeb::PixelGreen(blurredFrame, blurredBox->x + 10, blurredBox->y + 4);
         EXPECT(fringe > 40 && fringe < 230);
+        EXPECT(fringe > middle);
     }
     RoboWeb::Document dilated = Parse(
         "<!DOCTYPE html><svg width='40' height='16'><defs><filter id='wide'><feMorphology operator='dilate' radius='4'/></filter></defs><rect x='10' width='8' height='16' fill='red' filter='url(#wide)'/></svg>",
@@ -1747,7 +1759,10 @@ void TestHtmlBehavior() {
     const RoboWeb::ElementBox* joinedBox = RoboWeb::FindBox(joinedLayout, "svg");
     EXPECT(joinedBox != nullptr);
     if (joinedBox != nullptr) {
-        EXPECT(RoboWeb::PixelGreen(joinedFrame, joinedBox->x + 14, joinedBox->y + 6) == 0);
+        // The round join's disc is antialiased at its rim, so the pixel just
+        // past the horizontal band keeps part of the stroke.
+        EXPECT(RoboWeb::PixelGreen(joinedFrame, joinedBox->x + 14, joinedBox->y + 6) < 160);
+        EXPECT(RoboWeb::PixelGreen(joinedFrame, joinedBox->x + 13, joinedBox->y + 6) == 0);
     }
     RoboWeb::Document hanging = Parse(
         "<!DOCTYPE html><svg width='80' height='30'><text x='4' y='4' dominant-baseline='hanging' fill='red'>Hi</text></svg>", diagnostics);
@@ -2467,7 +2482,9 @@ void TestHtmlBehavior() {
     if (miterBox != nullptr) {
         // The 73.7° vertex miters to (20,11); with miterlimit 1 the join is
         // beveled and its cut edge sits at y=12.8, leaving row 11 empty.
-        EXPECT(RoboWeb::PixelGreen(miterSharpFrame, miterBox->x + 19, miterBox->y + 11) == 0);
+        // The miter tip covers only part of that pixel, so it blends instead of
+        // landing fully on it.
+        EXPECT(RoboWeb::PixelGreen(miterSharpFrame, miterBox->x + 19, miterBox->y + 11) < 140);
         EXPECT(RoboWeb::PixelGreen(miterCutFrame, miterBox->x + 19, miterBox->y + 11) == 255);
         EXPECT(RoboWeb::PixelGreen(miterSharpFrame, miterBox->x + 20, miterBox->y + 10) == 255);
     }
@@ -4209,10 +4226,13 @@ void TestSvgSpecification() {
         EXPECT(isWhite(autoRadius, 0, 0) && isRed(autoRadius, 10, 10) && isRed(autoRadius, 10, 0));
         SvgFrame clamped = render("<svg width='20' height='10'><rect width='20' height='10' ry='20' fill='red'/></svg>", 80, 48);
         EXPECT(isWhite(clamped, 0, 0));
-        EXPECT(isRed(clamped, 0, 5));
+        // The clamped caps are elliptical, so the extreme columns are mostly
+        // covered rather than fully inked; the corners stay empty.
+        EXPECT(pixelRed(clamped, 0, 5) > 200 && pixelGreen(clamped, 0, 5) < 80);
         EXPECT(isRed(clamped, 10, 5));
         EXPECT(isRed(clamped, 18, 5));
-        EXPECT(isWhite(clamped, 19, 5));
+        EXPECT(pixelRed(clamped, 19, 5) > 200 && pixelGreen(clamped, 19, 5) < 80);
+        EXPECT(isWhite(clamped, 19, 9));
         SvgFrame oval = render("<svg width='20' height='20'><rect width='20' height='20' rx='10' ry='4' fill='red'/></svg>", 80, 48);
         EXPECT(isWhite(oval, 0, 0));
         EXPECT(isRed(oval, 0, 10));
@@ -4476,8 +4496,8 @@ void TestSvgSpecification() {
         EXPECT(isWhite(bevelJoin, 13, 3));
         EXPECT(isRed(bevelJoin, 11, 4));
         EXPECT(isWhite(bevelJoin, 13, 4));
-        EXPECT(isRed(roundJoin, 12, 3));
-        EXPECT(isWhite(roundJoin, 13, 3));
+        EXPECT(pixelRed(roundJoin, 12, 3) > 200 && pixelGreen(roundJoin, 12, 3) < 60);
+        EXPECT(pixelGreen(roundJoin, 13, 3) > 190);
         SvgFrame miterClip = render(
             "<svg width='48' height='40'><polyline points='4,28 20,16 36,28' fill='none' stroke='red' stroke-width='8' stroke-miterlimit='1' stroke-linejoin='miter-clip'/></svg>",
             120, 80);
@@ -4486,9 +4506,9 @@ void TestSvgSpecification() {
             120, 80);
         // miterlimit 1 clips the 5-unit spike at 4 units: row 12 is inside the
         // clipped quad, row 11 stays empty just as it does for a bevel.
-        EXPECT(isRed(miterClip, 20, 12));
+        EXPECT(pixelRed(miterClip, 20, 12) > 200 && pixelGreen(miterClip, 20, 12) < 110);
         EXPECT(isWhite(miterClip, 19, 11));
-        EXPECT(isWhite(miterBevel, 20, 12));
+        EXPECT(pixelGreen(miterBevel, 20, 12) > 150);
     }
     {
         SvgFrame buttCap = render(
@@ -4503,7 +4523,7 @@ void TestSvgSpecification() {
         EXPECT(isWhite(buttCap, 5, 10));
         EXPECT(isRed(squareCap, 5, 10));
         EXPECT(isWhite(squareCap, 4, 10));
-        EXPECT(isRed(roundCap, 5, 10));
+        EXPECT(pixelRed(roundCap, 5, 10) > 200 && pixelGreen(roundCap, 5, 10) < 60);
         EXPECT(isWhite(roundCap, 4, 10));
         SvgFrame hairline = render(
             "<svg width='20' height='20'><line x1='2' y1='10' x2='18' y2='10' stroke='red'/></svg>", 80, 48);
@@ -4511,11 +4531,106 @@ void TestSvgSpecification() {
             "<svg width='20' height='20'><line x1='10' y1='2' x2='10' y2='18' stroke='red'/></svg>", 80, 48);
         SvgFrame invisible = render(
             "<svg width='20' height='20'><line x1='2' y1='10' x2='18' y2='10' stroke='red' stroke-width='0'/></svg>", 80, 48);
-        EXPECT(isRed(hairline, 10, 10));
-        EXPECT(isWhite(hairline, 10, 9));
-        EXPECT(isRed(portrait, 10, 10));
-        EXPECT(isWhite(portrait, 9, 10));
+        // A unit stroke straddles the line it follows, so a browser paints two
+        // rows (or columns) at half coverage each, and nothing beyond them.
+        EXPECT(pixelGreen(hairline, 10, 9) > 100 && pixelGreen(hairline, 10, 9) < 160);
+        EXPECT(pixelGreen(hairline, 10, 10) > 100 && pixelGreen(hairline, 10, 10) < 160);
+        EXPECT(isWhite(hairline, 10, 8));
+        EXPECT(isWhite(hairline, 10, 11));
+        EXPECT(pixelGreen(portrait, 9, 10) > 100 && pixelGreen(portrait, 9, 10) < 160);
+        EXPECT(pixelGreen(portrait, 10, 10) > 100 && pixelGreen(portrait, 10, 10) < 160);
+        EXPECT(isWhite(portrait, 8, 10));
+        EXPECT(isWhite(portrait, 11, 10));
         EXPECT(isWhite(invisible, 10, 10));
+    }
+    {
+        // Coverage antialiasing: an edge blends by the fraction of the pixel the
+        // shape covers, so hard edges become the soft ones a browser paints.
+        SvgFrame unitLine = render("<svg width='20' height='20'><line x1='2' y1='10' x2='18' y2='10' stroke='red'/></svg>", 80, 48);
+        // A unit stroke straddles its line: half coverage on each side row.
+        EXPECT(pixelGreen(unitLine, 10, 9) > 120 && pixelGreen(unitLine, 10, 9) < 136);
+        EXPECT(pixelGreen(unitLine, 10, 10) > 120 && pixelGreen(unitLine, 10, 10) < 136);
+        EXPECT(isWhite(unitLine, 10, 8));
+        EXPECT(isWhite(unitLine, 10, 11));
+        // crispEdges is the one rendering mode that snaps the same stroke onto
+        // a single row instead of antialiasing it.
+        SvgFrame crispLine = render(
+            "<svg width='20' height='20'><line x1='2' y1='10' x2='18' y2='10' stroke='red' shape-rendering='crispEdges'/></svg>",
+            80, 48);
+        EXPECT(isRed(crispLine, 10, 10));
+        EXPECT(isWhite(crispLine, 10, 9));
+        EXPECT(isWhite(crispLine, 10, 11));
+        // A fractional rectangle edge covers half of its first row.
+        SvgFrame fractional = render("<svg width='12' height='20'><rect y='5.5' width='12' height='8' fill='red'/></svg>", 80, 48);
+        EXPECT(pixelGreen(fractional, 6, 5) > 120 && pixelGreen(fractional, 6, 5) < 136);
+        EXPECT(isRed(fractional, 6, 6));
+        EXPECT(isRed(fractional, 6, 12));
+        EXPECT(pixelGreen(fractional, 6, 13) > 120 && pixelGreen(fractional, 6, 13) < 136);
+        EXPECT(isWhite(fractional, 6, 14));
+        // A circle blends its rim: each pixel row is covered by the ellipse
+        // chord that crosses it.
+        SvgFrame rimCircle = render("<svg width='20' height='20'><circle cx='10' cy='10' r='6' fill='red'/></svg>", 80, 48);
+        EXPECT(isRed(rimCircle, 10, 10));
+        EXPECT(isWhite(rimCircle, 1, 1));
+        EXPECT(pixelGreen(rimCircle, 5, 6) > 0 && pixelGreen(rimCircle, 5, 6) < 120);
+        EXPECT(pixelGreen(rimCircle, 4, 8) > 0 && pixelGreen(rimCircle, 4, 8) < 120);
+        // The exact Gaussian blur of a box: a pixel's alpha is the product of
+        // its two edge profiles, 0.5*erfc(distance / (sigma*sqrt(2))).
+        SvgFrame softBlur = render(
+            "<svg width='30' height='16'><defs><filter id='aaSoft'><feGaussianBlur stdDeviation='4'/></filter></defs>"
+            "<rect width='8' height='16' fill='red' filter='url(#aaSoft)'/></svg>",
+            140, 80);
+        const double blurSigma = 4.0;
+        auto gaussianCdf = [](double value) { return 0.5 * std::erfc(-value / std::sqrt(2.0)); };
+        auto boxCoverage = [&](double x, double y) {
+            return (gaussianCdf((8.0 - x) / blurSigma) - gaussianCdf((0.0 - x) / blurSigma)) *
+                   (gaussianCdf((16.0 - y) / blurSigma) - gaussianCdf((0.0 - y) / blurSigma));
+        };
+        auto blurredAlpha = [&](int x, int y) { return 255.0 - pixelGreen(softBlur, x, y); };
+        EXPECT(std::fabs(blurredAlpha(2, 4) - 255.0 * boxCoverage(2.5, 4.5)) < 3);
+        EXPECT(std::fabs(blurredAlpha(4, 8) - 255.0 * boxCoverage(4.5, 8.5)) < 3);
+        EXPECT(std::fabs(blurredAlpha(10, 4) - 255.0 * boxCoverage(10.5, 4.5)) < 3);
+    }
+    {
+        // Adaptive curve flattening: a quadratic that spans the whole viewport
+        // is subdivided finely enough to follow the true curve, where a fixed
+        // eight-segment outline would cut the corner by many pixels.
+        SvgFrame curve = render("<svg width='1000' height='1000' viewBox='0 0 1000 1000'>"
+                                "<path d='M0 0 Q500 1000 1000 0 L1000 1000 L0 1000 Z' fill='red'/></svg>",
+                                1100, 1050);
+        // The curve passes through (187.5, 304.7) at that column.
+        EXPECT(isWhite(curve, 187, 290));
+        EXPECT(isWhite(curve, 187, 297));
+        EXPECT(pixelRed(curve, 187, 304) > 200 && pixelGreen(curve, 187, 304) > 120);
+        EXPECT(isRed(curve, 187, 308));
+        // The same path scaled down to 200 px keeps its smooth outline.
+        SvgFrame scaledCurve = render("<svg width='200' height='200' viewBox='0 0 1000 1000'>"
+                                      "<path d='M0 0 Q500 1000 1000 0 L1000 1000 L0 1000 Z' fill='red'/></svg>",
+                                      300, 260);
+        EXPECT(isWhite(scaledCurve, 37, 58));
+        EXPECT(isRed(scaledCurve, 37, 62));
+        EXPECT(isWhite(scaledCurve, 100, 96));
+        EXPECT(isRed(scaledCurve, 100, 100));
+    }
+    {
+        // SVG 2 geometry properties are CSS properties: a stylesheet beats the
+        // presentation attribute and an inline style beats the stylesheet.
+        RoboWeb::Diagnostics geometryDiagnostics;
+        Parse("<style>circle { cx: 12; cy: 10; r: 6 }</style><svg width='20' height='20'><circle fill='red' cx='2' cy='2' r='2'/></svg>", geometryDiagnostics);
+        EXPECT(!geometryDiagnostics.HasErrors());
+        SvgFrame cssCircle = render(
+            "<style>circle { cx: 12; cy: 10; r: 6 }</style><svg width='20' height='20'><circle fill='red' cx='2' cy='2' r='2'/></svg>", 80, 48);
+        EXPECT(isRed(cssCircle, 12, 10));
+        EXPECT(isWhite(cssCircle, 2, 2));
+        SvgFrame cssPath = render(
+            "<style>path { d: path('M2 2 H18 V18 H2 Z') }</style><svg width='20' height='20'><path fill='red'/></svg>", 80, 48);
+        EXPECT(isRed(cssPath, 10, 10));
+        EXPECT(isWhite(cssPath, 0, 0));
+        SvgFrame inlineRect = render(
+            "<style>rect { width: 4 }</style><svg width='20' height='20'><rect width='20' height='20' style='width:10px' fill='red'/></svg>",
+            80, 48);
+        EXPECT(isRed(inlineRect, 8, 10));
+        EXPECT(isWhite(inlineRect, 12, 10));
     }
     {
         // Diagonal dashes are measured along the line itself: 10 units of
@@ -4617,6 +4732,211 @@ void TestSvgSpecification() {
     }
 }
 
+void TestXml() {
+    RoboWeb::Diagnostics diagnostics;
+    RoboWeb::XmlParseResult parsed = RoboWeb::ParseXml(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!--note--><message id=\"m\"><warning>Hello &amp; World</warning></message>",
+        "fixture.xml", diagnostics);
+    EXPECT(parsed.wellFormed);
+    EXPECT(diagnostics.ErrorCount() == 0);
+    const std::string serialized = RoboWeb::SerializeXml(*parsed.document.root);
+    EXPECT(serialized.find("Hello &amp; World") != std::string::npos);
+    EXPECT(serialized.find("<warning>") != std::string::npos);
+    RoboWeb::Diagnostics brokenDiagnostics;
+    RoboWeb::XmlParseResult broken = RoboWeb::ParseXml("<message></warning>", "fixture.xml", brokenDiagnostics);
+    EXPECT(!broken.wellFormed);
+    EXPECT(brokenDiagnostics.ErrorCount() > 0);
+    bool parserError = false;
+    for (const std::unique_ptr<RoboWeb::Node>& child : broken.document.root->children) {
+        if (child->tagName == "parsererror") {
+            parserError = true;
+        }
+    }
+    EXPECT(parserError);
+    RoboWeb::Diagnostics entityDiagnostics;
+    RoboWeb::XmlParseResult entity = RoboWeb::ParseXml(
+        "<?xml version=\"1.0\"?><!DOCTYPE body [<!ENTITY warning \"Careful\"><!ATTLIST item id ID #IMPLIED><!ENTITY logo SYSTEM \"logo.png\" NDATA gif>]><body>&warning;<item id=\"one\">&#65;</item></body>",
+        "fixture.xml", entityDiagnostics);
+    EXPECT(entity.wellFormed);
+    EXPECT(RoboWeb::SerializeText(*entity.document.root).find("Careful") != std::string::npos);
+    EXPECT(RoboWeb::SerializeText(*entity.document.root).find("A") != std::string::npos);
+    EXPECT(entity.unparsedEntities["logo"] == "logo.png");
+    EXPECT(!entity.idAttributes.empty());
+    RoboWeb::XmlParseResult marked = RoboWeb::ParseXml(
+        "<root xml:lang=\"en-US\" xmlns:ex=\"urn:example\">A<![CDATA[<b>]]><!--hidden--><?pi yes?><item id=\"a\">2</item><item id=\"b\">3</item><ex:item>9</ex:item></root>",
+        "fixture.xml", diagnostics);
+    EXPECT(marked.wellFormed);
+    RoboWeb::XPathEnvironment environment;
+    environment.sourceRoot = marked.document.root.get();
+    environment.idAttributes = marked.idAttributes;
+    RoboWeb::XPathNode documentNode{marked.document.root.get(), false, "", ""};
+    EXPECT(RoboWeb::XPathToNumber(RoboWeb::EvaluateXPath("count(/root/item)", documentNode, 1, 1, environment)) == 2);
+    EXPECT(RoboWeb::XPathToString(RoboWeb::EvaluateXPath("string(/root/item[2])", documentNode, 1, 1, environment)) == "3");
+    EXPECT(RoboWeb::XPathToNumber(RoboWeb::EvaluateXPath("sum(/root/item)", documentNode, 1, 1, environment)) == 5);
+    EXPECT(RoboWeb::XPathToString(RoboWeb::EvaluateXPath("/root/item[1]/@id", documentNode, 1, 1, environment)) == "a");
+    EXPECT(RoboWeb::XPathToBoolean(RoboWeb::EvaluateXPath("starts-with(/root/item[1], '2')", documentNode, 1, 1, environment)));
+    EXPECT(RoboWeb::XPathToString(RoboWeb::EvaluateXPath("substring('12345', 2, 3)", documentNode, 1, 1, environment)) == "234");
+    EXPECT(RoboWeb::XPathToString(RoboWeb::EvaluateXPath("substring-before('a-b', '-')", documentNode, 1, 1, environment)) == "a");
+    EXPECT(RoboWeb::XPathToString(RoboWeb::EvaluateXPath("substring-after('a-b', '-')", documentNode, 1, 1, environment)) == "b");
+    EXPECT(RoboWeb::XPathToString(RoboWeb::EvaluateXPath("translate('abc', 'ac', 'A')", documentNode, 1, 1, environment)) == "Ab");
+    EXPECT(RoboWeb::XPathToString(RoboWeb::EvaluateXPath("normalize-space('  a   b  ')", documentNode, 1, 1, environment)) == "a b");
+    EXPECT(RoboWeb::XPathToNumber(RoboWeb::EvaluateXPath("floor(1.9)", documentNode, 1, 1, environment)) == 1);
+    EXPECT(RoboWeb::XPathToNumber(RoboWeb::EvaluateXPath("ceiling(1.1)", documentNode, 1, 1, environment)) == 2);
+    EXPECT(RoboWeb::XPathToNumber(RoboWeb::EvaluateXPath("round(1.5)", documentNode, 1, 1, environment)) == 2);
+    EXPECT(RoboWeb::XPathToString(RoboWeb::EvaluateXPath("concat('a', 'b')", documentNode, 1, 1, environment)) == "ab");
+    EXPECT(RoboWeb::XPathToBoolean(RoboWeb::EvaluateXPath("contains('abc', 'b') and not(false())", documentNode, 1, 1, environment)));
+    EXPECT(RoboWeb::XPathToString(RoboWeb::EvaluateXPath("choose(false(), 'a', 'b')", documentNode, 1, 1, environment)) == "b");
+    EXPECT(RoboWeb::XPathToNumber(RoboWeb::EvaluateXPath("count(/root/item[1]/following-sibling::item)", documentNode, 1, 1, environment)) == 1);
+    EXPECT(RoboWeb::XPathToBoolean(RoboWeb::EvaluateXPath("lang('en')", RoboWeb::XPathNode{marked.document.root->children[0].get(), false, "", ""}, 1, 1, environment)));
+    EXPECT(RoboWeb::XPathToString(RoboWeb::EvaluateXPath("local-name(/root/ex:item)", documentNode, 1, 1, environment)) == "item");
+    EXPECT(RoboWeb::XPathToString(RoboWeb::EvaluateXPath("namespace-uri(/root/ex:item)", documentNode, 1, 1, environment)) == "urn:example");
+    EXPECT(RoboWeb::XPathToNumber(RoboWeb::EvaluateXPath("string-length('ab')", documentNode, 1, 1, environment)) == 2);
+    EXPECT(RoboWeb::SerializeText(*marked.document.root).find("<b>") != std::string::npos);
+    const std::string sheet =
+        "<?xml version=\"1.0\"?>"
+        "<xsl:stylesheet version=\"1.0\" xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\" xmlns:exsl=\"http://exslt.org/common\" xmlns:math=\"http://exslt.org/math\" xmlns:set=\"http://exslt.org/sets\" xmlns:str=\"http://exslt.org/strings\" xmlns:regexp=\"http://exslt.org/regular-expressions\">"
+        "<xsl:output method=\"xml\"/>"
+        "<xsl:strip-space elements=\"root\"/>"
+        "<xsl:decimal-format decimal-separator=\".\" grouping-separator=\",\"/>"
+        "<xsl:attribute-set name=\"box\"><xsl:attribute name=\"kind\">row</xsl:attribute></xsl:attribute-set>"
+        "<xsl:key name=\"by-id\" match=\"item\" use=\"@id\"/>"
+        "<xsl:variable name=\"label\" select=\"'Items'\"/>"
+        "<xsl:template match=\"/\">"
+        "<list kind=\"{$label}\">"
+        "<xsl:attribute name=\"count\"><xsl:value-of select=\"count(root/item)\"/></xsl:attribute>"
+        "<xsl:for-each select=\"root/item\"><xsl:sort select=\".\" data-type=\"number\" order=\"descending\"/>"
+        "<row><xsl:value-of select=\".\"/></row></xsl:for-each>"
+        "<xsl:if test=\"count(root/item) &gt; 1\"><many/></xsl:if>"
+        "<xsl:choose><xsl:when test=\"root/item\"><yes/></xsl:when><xsl:otherwise><no/></xsl:otherwise></xsl:choose>"
+        "<xsl:call-template name=\"extra\"><xsl:with-param name=\"n\" select=\"2\"/></xsl:call-template>"
+        "<xsl:element name=\"built\" use-attribute-sets=\"box\"><xsl:value-of select=\"$label\"/></xsl:element>"
+        "<xsl:value-of select=\"format-number(1234.5, '#,##0.00')\"/>"
+        "<xsl:value-of select=\"key('by-id', 'b')\"/>"
+        "<xsl:comment>note</xsl:comment>"
+        "<xsl:processing-instruction name=\"mark\">go</xsl:processing-instruction>"
+        "<xsl:for-each select=\"root/item[1]\"><xsl:number value=\"position()\" format=\"A\"/></xsl:for-each>"
+        "<xsl:value-of select=\"exsl:object-type($label)\"/>"
+        "<xsl:value-of select=\"math:max(root/item)\"/>"
+        "<xsl:value-of select=\"math:min(root/item)\"/>"
+        "<xsl:if test=\"set:has-same-node(root/item[1], root/item[1])\"><same/></xsl:if>"
+        "<xsl:value-of select=\"str:concat(root/item)\"/>"
+        "<xsl:value-of select=\"regexp:replace('a1b', '[0-9]', 'g', '#')\"/>"
+        "<xsl:if test=\"regexp:test('abc', 'b')\"><hit/></xsl:if>"
+        "<xsl:if test=\"function-available('count') and element-available('xsl:if')\"><ready/></xsl:if>"
+        "<xsl:if test=\"system-property('xsl:version') = '1.0'\"><v1/></xsl:if>"
+        "<xsl:message>hello</xsl:message>"
+        "</list></xsl:template>"
+        "<xsl:template name=\"extra\"><xsl:param name=\"n\"/>"
+        "<extra><xsl:value-of select=\"$n\"/></extra></xsl:template>"
+        "</xsl:stylesheet>";
+    RoboWeb::XsltResult transformed = RoboWeb::TransformXml("<root><item id=\"a\">2</item><item id=\"b\">3</item></root>", sheet, "sheet.xsl");
+    EXPECT(transformed.ok);
+    EXPECT(transformed.output.find("<row>3</row>") != std::string::npos);
+    EXPECT(transformed.output.find("<row>2</row>") != std::string::npos);
+    EXPECT(transformed.output.find("<many/>") != std::string::npos);
+    EXPECT(transformed.output.find("<yes/>") != std::string::npos);
+    EXPECT(transformed.output.find("<extra>2</extra>") != std::string::npos);
+    EXPECT(transformed.output.find("kind=\"row\"") != std::string::npos);
+    EXPECT(transformed.output.find("1,234.50") != std::string::npos);
+    EXPECT(transformed.output.find(">3<") != std::string::npos);
+    EXPECT(transformed.output.find("<!--note-->") != std::string::npos);
+    EXPECT(transformed.output.find("<?mark go?>") != std::string::npos);
+    EXPECT(transformed.output.find(">A<") != std::string::npos || transformed.output.find("A") != std::string::npos);
+    EXPECT(transformed.output.find("string") != std::string::npos);
+    EXPECT(transformed.output.find("<same/>") != std::string::npos);
+    EXPECT(transformed.output.find("23") != std::string::npos);
+    EXPECT(transformed.output.find("a#b") != std::string::npos);
+    EXPECT(transformed.output.find("<hit/>") != std::string::npos);
+    EXPECT(transformed.output.find("<ready/>") != std::string::npos);
+    EXPECT(transformed.output.find("<v1/>") != std::string::npos);
+    EXPECT(!transformed.messages.empty());
+    RoboWeb::Diagnostics linkDiagnostics;
+    RoboWeb::XmlParseResult linked = RoboWeb::ParseXml(
+        "<?xml-stylesheet type=\"text/xsl\" href=\"sheet.xsl\"?><root/>", "fixture.xml", linkDiagnostics);
+    EXPECT(linked.wellFormed);
+    EXPECT(linked.stylesheetLinks.size() == 1);
+    EXPECT(linked.stylesheetLinks[0].second == "sheet.xsl");
+    RoboWeb::Diagnostics externalDiagnostics;
+    RoboWeb::ParseXml("<!DOCTYPE root [<!ENTITY ext SYSTEM \"http://example.invalid/secret\">]><root>&ext;</root>", "fixture.xml", externalDiagnostics);
+    EXPECT(externalDiagnostics.ErrorCount() > 0);
+    RoboWeb::Diagnostics twoDiagnostics;
+    RoboWeb::XmlParseResult two = RoboWeb::ParseXml("<a/><b/>", "fixture.xml", twoDiagnostics);
+    EXPECT(!two.wellFormed);
+    environment.sourceRoot = entity.document.root.get();
+    environment.idAttributes = entity.idAttributes;
+    EXPECT(RoboWeb::XPathToString(RoboWeb::EvaluateXPath("string(id('one'))", documentNode, 1, 1, environment)) == "A");
+    const std::string firstId = RoboWeb::XPathToString(RoboWeb::EvaluateXPath("generate-id(/root/item[1])", RoboWeb::XPathNode{marked.document.root.get(), false, "", ""}, 1, 1, environment));
+    const std::string secondId = RoboWeb::XPathToString(RoboWeb::EvaluateXPath("generate-id(/root/item[2])", RoboWeb::XPathNode{marked.document.root.get(), false, "", ""}, 1, 1, environment));
+    EXPECT(!firstId.empty());
+    EXPECT(firstId != secondId);
+    EXPECT(RoboWeb::XPathToNumber(RoboWeb::EvaluateXPath("5 div 2", documentNode, 1, 1, environment)) == 2.5);
+    EXPECT(RoboWeb::XPathToNumber(RoboWeb::EvaluateXPath("5 mod 2", documentNode, 1, 1, environment)) == 1);
+    EXPECT(RoboWeb::XPathToString(RoboWeb::EvaluateXPath("name(/root/item[1]/parent::*)", RoboWeb::XPathNode{marked.document.root.get(), false, "", ""}, 1, 1, environment)) == "root");
+    EXPECT(RoboWeb::XPathToNumber(RoboWeb::EvaluateXPath("count(/root/item[1]/ancestor::root)", RoboWeb::XPathNode{marked.document.root.get(), false, "", ""}, 1, 1, environment)) == 1);
+    EXPECT(RoboWeb::XPathToNumber(RoboWeb::EvaluateXPath("count(/root/item[1]/preceding-sibling::comment())", RoboWeb::XPathNode{marked.document.root.get(), false, "", ""}, 1, 1, environment)) == 1);
+    EXPECT(RoboWeb::XPathToNumber(RoboWeb::EvaluateXPath("count(/root/descendant::item)", RoboWeb::XPathNode{marked.document.root.get(), false, "", ""}, 1, 1, environment)) == 2);
+    EXPECT(RoboWeb::XPathToNumber(RoboWeb::EvaluateXPath("count(/root/namespace::*)", RoboWeb::XPathNode{marked.document.root.get(), false, "", ""}, 1, 1, environment)) >= 1);
+    std::ofstream included("Build/included.xsl");
+    included << "<?xml version=\"1.0\"?><xsl:stylesheet version=\"1.0\" xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\">"
+                "<xsl:template name=\"from-file\"><file>yes</file></xsl:template></xsl:stylesheet>";
+    included.close();
+    std::ofstream imported("Build/imported.xsl");
+    imported << "<?xml version=\"1.0\"?><xsl:stylesheet version=\"1.0\" xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\">"
+                "<xsl:template match=\"item\">imported</xsl:template></xsl:stylesheet>";
+    imported.close();
+    const std::string extraSheet =
+        "<?xml version=\"1.0\"?>"
+        "<xsl:stylesheet version=\"1.0\" xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\" xmlns:out=\"http://www.w3.org/1999/XSL/Transform\" "
+        "xmlns:exsl=\"http://exslt.org/common\" xmlns:math=\"http://exslt.org/math\" xmlns:set=\"http://exslt.org/sets\" "
+        "xmlns:str=\"http://exslt.org/strings\" xmlns:regexp=\"http://exslt.org/regular-expressions\">"
+        "<xsl:import href=\"imported.xsl\"/>"
+        "<xsl:include href=\"included.xsl\"/>"
+        "<xsl:namespace-alias stylesheet-prefix=\"out\" result-prefix=\"xsl\"/>"
+        "<xsl:output method=\"xml\"/>"
+        "<xsl:template match=\"/\">"
+        "<wrap>"
+        "<xsl:copy-of select=\"root/item[1]\"/>"
+        "<xsl:apply-templates select=\"root/item[1]\"/>"
+        "<xsl:call-template name=\"from-file\"/>"
+        "<out:stylesheet/>"
+        "<xsl:value-of select=\"string(set:difference(root/item, root/item[1]))\"/>"
+        "<xsl:value-of select=\"math:highest(root/item)\"/>"
+        "<xsl:value-of select=\"count(str:split('a-b', '-'))\"/>"
+        "<xsl:value-of select=\"count(str:tokenize('a b', ' '))\"/>"
+        "<xsl:value-of select=\"count(regexp:match('a1b2', '[0-9]'))\"/>"
+        "<xsl:variable name=\"frag\"><piece>Z</piece></xsl:variable>"
+        "<xsl:value-of select=\"exsl:node-set($frag)\"/>"
+        "<xsl:unknown><xsl:fallback><fell/></xsl:fallback></xsl:unknown>"
+        "</wrap></xsl:template>"
+        "<xsl:template match=\"item\"><xsl:copy><xsl:value-of select=\"current()/@id\"/></xsl:copy><xsl:apply-imports/></xsl:template>"
+        "</xsl:stylesheet>";
+    RoboWeb::XsltResult extra = RoboWeb::TransformXml("<root><item id=\"a\">2</item><item id=\"b\">3</item></root>", extraSheet, "Build/main.xsl");
+    EXPECT(extra.ok);
+    EXPECT(extra.output.find("<item id=\"a\">2</item>") != std::string::npos);
+    EXPECT(extra.output.find("<item>a</item>") != std::string::npos);
+    EXPECT(extra.output.find("imported") != std::string::npos);
+    EXPECT(extra.output.find("<file>yes</file>") != std::string::npos);
+    EXPECT(extra.output.find("<xsl:stylesheet/>") != std::string::npos);
+    EXPECT(extra.output.find(">3<") != std::string::npos || extra.output.find("32") != std::string::npos);
+    EXPECT(extra.output.find("Z") != std::string::npos);
+    EXPECT(extra.output.find("<fell/>") != std::string::npos);
+    RoboWeb::XsltResult plain = RoboWeb::TransformXml(
+        "<root><item>Hi</item></root>",
+        "<?xml version=\"1.0\"?><xsl:stylesheet version=\"1.0\" xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\"><xsl:output method=\"text\"/>"
+        "<xsl:template match=\"/\"><xsl:value-of select=\"root/item\"/></xsl:template></xsl:stylesheet>",
+        "sheet.xsl");
+    EXPECT(plain.ok);
+    EXPECT(plain.output == "Hi");
+    const std::string entitySource =
+        "<?xml version=\"1.0\"?><!DOCTYPE body [<!ENTITY logo SYSTEM \"logo.png\" NDATA gif>]><body/>";
+    RoboWeb::XsltResult entityUrl = RoboWeb::TransformXml(
+        entitySource,
+        "<?xml version=\"1.0\"?><xsl:stylesheet version=\"1.0\" xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\">"
+        "<xsl:template match=\"/\"><xsl:value-of select=\"unparsed-entity-url('logo')\"/></xsl:template></xsl:stylesheet>",
+        "sheet.xsl");
+    EXPECT(entityUrl.output.find("logo.png") != std::string::npos);
+}
+
 void TestDiagnosticFormat() {
     RoboWeb::Diagnostics diagnostics;
     diagnostics.Error("page.html", 4, 2, "duplicate attribute 'id'");
@@ -4643,6 +4963,7 @@ int main() {
     TestHtmlBehavior();
     TestSvgSpecification();
     TestStaticGeneration();
+    TestXml();
     TestDiagnosticFormat();
     if (gFailed != 0) {
         std::cerr << gFailed << " test assertion(s) failed\n";

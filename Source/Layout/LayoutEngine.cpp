@@ -1285,8 +1285,46 @@ struct Engine {
         ReplacedSize(node, style, containing, width, height);
     }
 
+    // SVG 2 promotes the shape geometry to real CSS properties (cx, cy, r, rx,
+    // ry, x, y, width, height, d, pathLength, textLength). The cascade beats the
+    // presentation attribute, exactly like it does for every other property.
+    bool IsSvgGeometryProperty(const char* name) {
+        static const char* const GEOMETRY_PROPERTIES[] = {"cx", "cy", "r",  "rx",        "ry",        "x",
+                                                          "y",  "width", "height", "d", "pathlength", "textlength"};
+        for (const char* property : GEOMETRY_PROPERTIES) {
+            if (std::string(property) == name) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    std::string SvgGeometryValue(const Node& node, const char* name) {
+        if (IsSvgGeometryProperty(name)) {
+            const std::string css = SvgCssProperty(node, name);
+            if (!css.empty()) {
+                return css;
+            }
+        }
+        return AttributeValue(node, name);
+    }
+
+    // The CSS form of the geometry property wraps path data in path("..."),
+    // while the attribute form carries it bare; both reach the renderer.
+    std::string SvgPathData(const Node& node) {
+        std::string data = SvgGeometryValue(node, "d");
+        const std::string trimmed = TrimSpaces(data);
+        if (ToLowerAscii(trimmed).compare(0, 5, "path(") == 0 && trimmed.back() == ')') {
+            data = TrimSpaces(trimmed.substr(5, trimmed.size() - 6));
+            if (data.size() >= 2 && (data.front() == '"' || data.front() == '\'') && data.back() == data.front()) {
+                data = data.substr(1, data.size() - 2);
+            }
+        }
+        return data;
+    }
+
     int SvgNumber(const Node& node, const char* name, int fallback) {
-        const std::string text = AttributeValue(node, name);
+        const std::string text = SvgGeometryValue(node, name);
         if (text.empty()) {
             return fallback;
         }
@@ -1294,7 +1332,7 @@ struct Engine {
     }
 
     double SvgReal(const Node& node, const char* name, double fallback) {
-        const std::string text = AttributeValue(node, name);
+        const std::string text = SvgGeometryValue(node, name);
         if (text.empty()) {
             return fallback;
         }
@@ -1312,13 +1350,25 @@ struct Engine {
         return 0.5 * std::erfc(distance / (sigma * std::sqrt(2.0)));
     }
 
+    // The Gaussian cumulative distribution; a blurred box edge is the difference
+    // of two of them, which is exact for any pixel position, inside or out.
+    double SvgGaussianCdf(double z) {
+        return 0.5 * std::erfc(-z / std::sqrt(2.0));
+    }
+
     // Coverage of a Gaussian-blurred axis-aligned box at one pixel center.
     double SvgBlurredBoxCoverage(double pixelX, double pixelY, int boxX, int boxY, int boxWidth, int boxHeight, double sigma) {
+        if (!(sigma > 0)) {
+            const double centerX = pixelX + 0.5;
+            const double centerY = pixelY + 0.5;
+            const bool inside = centerX >= boxX && centerX < boxX + boxWidth && centerY >= boxY && centerY < boxY + boxHeight;
+            return inside ? 1.0 : 0.0;
+        }
         const double centerX = pixelX + 0.5;
         const double centerY = pixelY + 0.5;
-        const double insideX = std::min(centerX - boxX, boxX + boxWidth - centerX);
-        const double insideY = std::min(centerY - boxY, boxY + boxHeight - centerY);
-        return SvgGaussianEdge(insideX, sigma) * SvgGaussianEdge(insideY, sigma);
+        const double spanX = SvgGaussianCdf((boxX + boxWidth - centerX) / sigma) - SvgGaussianCdf((boxX - centerX) / sigma);
+        const double spanY = SvgGaussianCdf((boxY + boxHeight - centerY) / sigma) - SvgGaussianCdf((boxY - centerY) / sigma);
+        return spanX * spanY;
     }
 
     void FillEllipseShadow(int centerX, int centerY, int radiusX, int radiusY, int blur, Color color, bool fixed) {
@@ -1713,11 +1763,21 @@ struct Engine {
     }
 
     void SvgStrokeContours(const std::vector<SvgPoint>& run, int thickness, const std::string& join, const std::string& cap, double miterLimit,
-        bool closed, std::vector<std::vector<SvgPoint>>& contours) {
+        bool closed, std::vector<std::vector<SvgPoint>>& contours, bool snapAxis = false) {
         if (run.empty() || thickness <= 0) {
             return;
         }
         const double halfWidth = std::max(1, thickness) / 2.0;
+        // shape-rendering="crispEdges" is the only mode that snaps an odd-width
+        // axis-aligned stroke onto one pixel row or column; the default mode
+        // antialiases it, exactly like a browser.
+        auto axisShift = [&](const SvgPoint& from, const SvgPoint& to, double& shiftX, double& shiftY) {
+            shiftX = 0;
+            shiftY = 0;
+            if (snapAxis) {
+                SvgAxisShift(thickness, from, to, shiftX, shiftY);
+            }
+        };
         if (run.size() == 1) {
             if (cap == "round") {
                 SvgAppendRoundBlob(contours, run[0].x, run[0].y, halfWidth, 0, 0);
@@ -1746,7 +1806,7 @@ struct Engine {
             const double extendTo = lastSegment && cap == "square" ? halfWidth : 0;
             double shiftX = 0;
             double shiftY = 0;
-            SvgAxisShift(thickness, run[index], run[index + 1], shiftX, shiftY);
+            axisShift(run[index], run[index + 1], shiftX, shiftY);
             SvgAppendSegmentQuad(contours, run[index], run[index + 1], halfWidth, extendFrom, extendTo, shiftX, shiftY);
         }
         if (closed) {
@@ -1755,7 +1815,7 @@ struct Engine {
         for (std::size_t index = 1; index + 1 < count; ++index) {
             double shiftX = 0;
             double shiftY = 0;
-            SvgAxisShift(thickness, run[index - 1], run[index], shiftX, shiftY);
+            axisShift(run[index - 1], run[index], shiftX, shiftY);
             SvgAppendJoin(contours, run[index - 1], run[index], run[index + 1], halfWidth, join, miterLimit, shiftX, shiftY);
         }
         if (closed && count > 2) {
@@ -1765,9 +1825,9 @@ struct Engine {
         if (!closed && cap == "round") {
             double shiftX = 0;
             double shiftY = 0;
-            SvgAxisShift(thickness, run[1], run[0], shiftX, shiftY);
+            axisShift(run[1], run[0], shiftX, shiftY);
             SvgAppendRoundBlob(contours, run.front().x, run.front().y, halfWidth, shiftX, shiftY);
-            SvgAxisShift(thickness, run[count - 2], run[count - 1], shiftX, shiftY);
+            axisShift(run[count - 2], run[count - 1], shiftX, shiftY);
             SvgAppendRoundBlob(contours, run.back().x, run.back().y, halfWidth, shiftX, shiftY);
         }
     }
@@ -1925,14 +1985,15 @@ struct Engine {
 
     void StrokePolyline(const std::vector<SvgPoint>& points, int originX, int originY, Color color, bool fixed, bool close, int thickness = 1,
                         const std::string& dashArray = std::string(), double dashOffset = 0, double pathLengthValue = 0,
-                        const std::string& join = std::string("miter"), const std::string& cap = std::string("butt"), double miterLimit = 4) {
+                        const std::string& join = std::string("miter"), const std::string& cap = std::string("butt"), double miterLimit = 4,
+                        bool snapAxis = false) {
         if (points.size() < 2 || color.alpha == 0 || thickness <= 0) {
             return;
         }
         std::vector<double> dashes;
         if (!ParseSvgDashArray(dashArray, dashes)) {
             std::vector<std::vector<SvgPoint>> contours;
-            SvgStrokeContours(points, thickness, join, cap, miterLimit, close, contours);
+            SvgStrokeContours(points, thickness, join, cap, miterLimit, close, contours, snapAxis);
             if (!contours.empty()) {
                 FillContours(contours, originX, originY, color, fixed, false, true);
             }
@@ -1941,7 +2002,7 @@ struct Engine {
         const std::vector<std::vector<SvgPoint>> runs = SvgDashRuns(points, close, dashes, dashOffset, pathLengthValue);
         for (const std::vector<SvgPoint>& run : runs) {
             std::vector<std::vector<SvgPoint>> contours;
-            SvgStrokeContours(run, thickness, join, cap, miterLimit, false, contours);
+            SvgStrokeContours(run, thickness, join, cap, miterLimit, false, contours, snapAxis);
             if (!contours.empty()) {
                 FillContours(contours, originX, originY, color, fixed, false, true);
             }
@@ -2238,7 +2299,8 @@ struct Engine {
                 StrokePolyline(mapped, originX, originY, stroke, fixed, close, thickness, dashArray, dashOffset, pathLengthValue,
                     gradientSpace != nullptr ? gradientSpace->lineJoin : std::string("miter"),
                     gradientSpace != nullptr ? gradientSpace->lineCap : std::string("butt"),
-                    gradientSpace != nullptr ? gradientSpace->miterLimit : 4);
+                    gradientSpace != nullptr ? gradientSpace->miterLimit : 4,
+                    gradientSpace != nullptr && gradientSpace->shapeRendering == 2);
             } else if (gradientNode != nullptr && gradientSpace != nullptr && !gradientSpace->strokeUrl.empty() && mapped.size() >= 2) {
                 std::vector<std::vector<SvgPoint>> gradientRuns;
                 std::vector<double> gradientDashes;
@@ -2250,7 +2312,7 @@ struct Engine {
                 std::vector<std::vector<SvgPoint>> strokeContours;
                 for (std::size_t runIndex = 0; runIndex < gradientRuns.size(); ++runIndex) {
                     SvgStrokeContours(gradientRuns[runIndex], thickness, gradientSpace->lineJoin, gradientSpace->lineCap, gradientSpace->miterLimit,
-                        close && runIndex == 0 && gradientRuns.size() == 1, strokeContours);
+                        close && runIndex == 0 && gradientRuns.size() == 1, strokeContours, gradientSpace->shapeRendering == 2);
                 }
                 if (!strokeContours.empty()) {
                     int left = 1000000;
@@ -3032,7 +3094,7 @@ struct Engine {
         } else if (tag == "polyline" || tag == "polygon") {
             growPath(ParsePointList(AttributeValue(node, "points")));
         } else if (tag == "path") {
-            growPath(StraightPath(AttributeValue(node, "d")));
+            growPath(StraightPath(SvgPathData(node)));
         } else if (tag == "image" || tag == "foreignobject" || tag == "video") {
             grow(SvgReal(node, "x", 0), SvgReal(node, "y", 0));
             grow(SvgReal(node, "x", 0) + SvgReal(node, "width", 0), SvgReal(node, "y", 0) + SvgReal(node, "height", 0));
@@ -3136,7 +3198,7 @@ struct Engine {
                     toUser(point.x, point.y);
                 }
             } else if (childTag == "path") {
-                contour = StraightPath(AttributeValue(*child, "d"), SvgDeviceScale(childSpace));
+                contour = StraightPath(SvgPathData(*child), SvgDeviceScale(childSpace));
                 for (SvgPoint& point : contour) {
                     toUser(point.x, point.y);
                 }
@@ -4436,7 +4498,7 @@ struct Engine {
             return contour.size() >= 3;
         }
         if (tag == "path") {
-            contour = StraightPath(AttributeValue(child, "d"), pixelScale);
+            contour = StraightPath(SvgPathData(child), pixelScale);
             return !contour.empty();
         }
         return false;
@@ -5528,7 +5590,7 @@ struct Engine {
                     }
                     if (!id.empty()) {
                         if (Node* path = FindSvgById(*root, id)) {
-                            pathData = AttributeValue(*path, "d");
+                            pathData = SvgPathData(*path);
                         }
                     }
                 }
@@ -5943,7 +6005,7 @@ struct Engine {
                     rectOutline.push_back(SvgPoint{static_cast<double>(x + width), static_cast<double>(y + height)});
                     rectOutline.push_back(SvgPoint{static_cast<double>(x), static_cast<double>(y + height)});
                     StrokePolyline(rectOutline, 0, 0, stroke, fixed, true, thickness, std::string(), 0, 0, space.lineJoin, space.lineCap,
-                        space.miterLimit);
+                        space.miterLimit, space.shapeRendering == 2);
                 }
             };
             if (!rectPathMode && strokeFirst) {
@@ -6143,15 +6205,18 @@ struct Engine {
                         }
                     }
                 } else {
-                    if (space.shapeRendering == 1) {
-                        const double rawX = space.originX + (SvgReal(node, "x", 0) - space.minX) * space.scaleX;
-                        const double rawY = space.originY + (SvgReal(node, "y", 0) - space.minY) * space.scaleY;
-                        const double rawWidth = SvgReal(node, "width", 0) * space.scaleX;
-                        const double rawHeight = SvgReal(node, "height", 0) * space.scaleY;
+                    const double rawX = space.originX + (SvgReal(node, "x", 0) - space.minX) * space.scaleX;
+                    const double rawY = space.originY + (SvgReal(node, "y", 0) - space.minY) * space.scaleY;
+                    const double rawWidth = SvgReal(node, "width", 0) * space.scaleX;
+                    const double rawHeight = SvgReal(node, "height", 0) * space.scaleY;
+                    const bool wholePixelEdges = rawX == std::floor(rawX) && rawY == std::floor(rawY) &&
+                                                 rawX + rawWidth == std::floor(rawX + rawWidth) &&
+                                                 rawY + rawHeight == std::floor(rawY + rawHeight);
+                    if (!wholePixelEdges && space.shapeRendering != 2) {
+                        // Fractional rectangle edges cover part of their pixels,
+                        // exactly like any other antialiased geometry.
                         FillCoverage(rawX, rawY, rawWidth, rawHeight, shown, fixed);
                     } else if (space.shapeRendering == 2) {
-                        const double rawX = space.originX + (SvgReal(node, "x", 0) - space.minX) * space.scaleX;
-                        const double rawY = space.originY + (SvgReal(node, "y", 0) - space.minY) * space.scaleY;
                         const double rawRight = rawX + SvgReal(node, "width", 0) * space.scaleX;
                         const double rawBottom = rawY + SvgReal(node, "height", 0) * space.scaleY;
                         const int snappedX = static_cast<int>(std::lround(rawX));
@@ -6246,10 +6311,10 @@ struct Engine {
                 shadowPoints.push_back(SvgPoint{linePoints[0].x + lineShadow.shadowDx, linePoints[0].y + lineShadow.shadowDy});
                 shadowPoints.push_back(SvgPoint{linePoints[1].x + lineShadow.shadowDx, linePoints[1].y + lineShadow.shadowDy});
                 StrokePolyline(shadowPoints, 0, 0, lineShadow.floodColor, fixed, false, thickness, dasharray, dashOffset, pathLength, space.lineJoin,
-                    space.lineCap, space.miterLimit);
+                    space.lineCap, space.miterLimit, space.shapeRendering == 2);
             }
             StrokePolyline(linePoints, 0, 0, stroke, fixed, false, thickness, dasharray, dashOffset, pathLength, space.lineJoin, space.lineCap,
-                space.miterLimit);
+                space.miterLimit, space.shapeRendering == 2);
             PaintLineMarkers(node, space, x1, y1, x2, y2, fixed);
             RememberSvgLink(node, std::min(x1, x2), std::min(y1, y2), std::abs(x2 - x1) + thickness, std::abs(y2 - y1) + thickness, fixed);
         } else if (!space.hidden && (tag == "polygon" || tag == "polyline")) {
@@ -6266,7 +6331,7 @@ struct Engine {
                 }
                 if (tag == "polyline" || stroke.alpha != 0) {
                     StrokePolyline(shifted, 0, 0, shapeShadow.floodColor, fixed, tag == "polygon", thickness, std::string(), 0, 0, space.lineJoin,
-                        space.lineCap, space.miterLimit);
+                        space.lineCap, space.miterLimit, space.shapeRendering == 2);
                 }
             }
             if (tag == "polygon") {
@@ -6274,7 +6339,7 @@ struct Engine {
             }
             StrokePolyline(points, 0, 0, stroke, fixed, tag == "polygon", thickness, AttributeValue(node, "stroke-dasharray"),
                 std::atof(AttributeValue(node, "stroke-dashoffset").c_str()), SvgReal(node, "pathlength", 0), space.lineJoin, space.lineCap,
-                space.miterLimit);
+                space.miterLimit, space.shapeRendering == 2);
             if (!SvgProperty(node, "marker-mid").empty()) {
                 const std::size_t last = points.size();
                 for (std::size_t index = 1; last > 1 && index + 1 < last; ++index) {
@@ -6298,10 +6363,10 @@ struct Engine {
         } else         if (!space.hidden && tag == "path") {
             SvgFilter pathShadow;
             if (ResolveFilter(node, space, pathShadow) && pathShadow.dropShadow) {
-                PaintPath(AttributeValue(node, "d"), static_cast<int>(space.originX) + pathShadow.shadowDx, static_cast<int>(space.originY) + pathShadow.shadowDy, pathShadow.floodColor, Color{0, 0, 0, 0}, fixed, thickness,
+                PaintPath(SvgPathData(node), static_cast<int>(space.originX) + pathShadow.shadowDx, static_cast<int>(space.originY) + pathShadow.shadowDy, pathShadow.floodColor, Color{0, 0, 0, 0}, fixed, thickness,
                     space.scaleX, space.scaleY, space.minX, space.minY, space.fillEvenOdd, nullptr, nullptr);
             }
-            PaintPath(AttributeValue(node, "d"), static_cast<int>(space.originX), static_cast<int>(space.originY), fill, stroke, fixed, thickness,
+            PaintPath(SvgPathData(node), static_cast<int>(space.originX), static_cast<int>(space.originY), fill, stroke, fixed, thickness,
                 space.scaleX, space.scaleY, space.minX, space.minY, space.fillEvenOdd, &node, &space,
                 AttributeValue(node, "stroke-dasharray"), std::atof(AttributeValue(node, "stroke-dashoffset").c_str()),
                 SvgNumber(node, "pathlength", 0));
@@ -6400,7 +6465,7 @@ struct Engine {
                 }
                 if (!id.empty()) {
                     if (Node* path = FindSvgById(*root, id)) {
-                        pathData = AttributeValue(*path, "d");
+                        pathData = SvgPathData(*path);
                     }
                 }
             }

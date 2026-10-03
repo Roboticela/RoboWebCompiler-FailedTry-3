@@ -1945,7 +1945,9 @@ bool CssValueOk(const std::string& name, const std::string& value) {
     }
     const char* svgProperties =
         "fill stroke stroke-width stroke-linecap stroke-linejoin stroke-miterlimit fill-opacity stroke-opacity opacity stop-color "
-        "flood-color flood-opacity clip-path mask marker marker-start marker-end marker-mid text-anchor dominant-baseline";
+        "flood-color flood-opacity clip-path mask marker marker-start marker-end marker-mid text-anchor dominant-baseline "
+        // SVG 2 geometry properties are CSS properties too.
+        "cx cy r rx ry x y width height d pathLength textLength";
     return KeywordValue(name, svgProperties) && !Trim(text).empty();
 }
 
@@ -1962,7 +1964,8 @@ bool KnownCssProperty(const std::string& name) {
         "min-width max-width min-height max-height opacity visibility "
         "transition animation-duration animation-name fill stroke stroke-width stroke-linecap stroke-linejoin stroke-miterlimit "
         "fill-opacity stroke-opacity opacity stop-color flood-color flood-opacity clip-path mask marker marker-start marker-end "
-        "marker-mid text-anchor dominant-baseline";
+        "marker-mid text-anchor dominant-baseline "
+        "cx cy r rx ry x y d pathLength textLength";
     return KeywordValue(name, known);
 }
 

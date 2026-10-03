@@ -17,7 +17,7 @@ struct Attribute {
 };
 
 struct Node {
-    enum class Type { Document, Element, Text };
+    enum class Type { Document, Element, Text, Comment, ProcessingInstruction };
 
     Type type = Type::Element;
     ElementKind kind = ElementKind::Unknown;

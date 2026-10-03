@@ -25,6 +25,9 @@ COMPILER_OBJS := \
 	$(OBJDIR)/TreeValidator.o \
 	$(OBJDIR)/CharacterReference.o \
 	$(OBJDIR)/HtmlParser.o \
+	$(OBJDIR)/XmlParser.o \
+	$(OBJDIR)/XPath.o \
+	$(OBJDIR)/Xslt.o \
 	$(OBJDIR)/Document.o \
 	$(OBJDIR)/ImageDecoder.o \
 	$(OBJDIR)/StyleSheet.o \
@@ -39,6 +42,9 @@ TEST_OBJS := \
 	$(OBJDIR)/TreeValidator.o \
 	$(OBJDIR)/CharacterReference.o \
 	$(OBJDIR)/HtmlParser.o \
+	$(OBJDIR)/XmlParser.o \
+	$(OBJDIR)/XPath.o \
+	$(OBJDIR)/Xslt.o \
 	$(OBJDIR)/Document.o \
 	$(OBJDIR)/LayoutEngine.o \
 	$(OBJDIR)/InterFontData.o \
@@ -88,6 +94,15 @@ $(OBJDIR)/CharacterReference.o: Source/Parser/CharacterReference.cpp | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(OBJDIR)/HtmlParser.o: Source/Parser/HtmlParser.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(OBJDIR)/XmlParser.o: Source/Xml/XmlParser.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(OBJDIR)/XPath.o: Source/Xml/XPath.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(OBJDIR)/Xslt.o: Source/Xml/Xslt.cpp | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(OBJDIR)/Document.o: Source/Dom/Document.cpp | $(OBJDIR)
