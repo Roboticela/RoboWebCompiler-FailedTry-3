@@ -639,11 +639,141 @@ std::vector<Node*> FlowChildren(Node& node) {
 }
 
 struct Engine {
+    struct CssColorFilter {
+        int brightnessMilli = 1000;
+        int contrastMilli = 1000;
+        int grayscaleMilli = 0;
+        int invertMilli = 0;
+        int saturateMilli = 1000;
+        int sepiaMilli = 0;
+        int hueRotateDeg = 0;
+        int opacityMilli = 1000;
+    };
+
     Document* document = nullptr;
     LayoutResult* result = nullptr;
     int viewportWidth = 0;
     int viewportHeight = 0;
     std::vector<Node*> overlays;
+    std::vector<CssColorFilter> colorFilters;
+    int paintHidden = 0;
+
+    static int ClampByte(int value) {
+        if (value < 0) {
+            return 0;
+        }
+        if (value > 255) {
+            return 255;
+        }
+        return value;
+    }
+
+    void ApplyCssFilters(Color& color) {
+        if (paintHidden > 0) {
+            color.alpha = 0;
+            return;
+        }
+        for (int index = static_cast<int>(colorFilters.size()) - 1; index >= 0; --index) {
+            const CssColorFilter& filter = colorFilters[static_cast<std::size_t>(index)];
+            int red = color.red;
+            int green = color.green;
+            int blue = color.blue;
+            if (filter.brightnessMilli != 1000) {
+                red = red * filter.brightnessMilli / 1000;
+                green = green * filter.brightnessMilli / 1000;
+                blue = blue * filter.brightnessMilli / 1000;
+            }
+            if (filter.contrastMilli != 1000) {
+                red = (red - 128) * filter.contrastMilli / 1000 + 128;
+                green = (green - 128) * filter.contrastMilli / 1000 + 128;
+                blue = (blue - 128) * filter.contrastMilli / 1000 + 128;
+            }
+            if (filter.grayscaleMilli > 0) {
+                const int gray = (ClampByte(red) * 2126 + ClampByte(green) * 7152 + ClampByte(blue) * 722) / 10000;
+                const int weight = filter.grayscaleMilli > 1000 ? 1000 : filter.grayscaleMilli;
+                red = (red * (1000 - weight) + gray * weight) / 1000;
+                green = (green * (1000 - weight) + gray * weight) / 1000;
+                blue = (blue * (1000 - weight) + gray * weight) / 1000;
+            }
+            if (filter.sepiaMilli > 0) {
+                const int weight = filter.sepiaMilli > 1000 ? 1000 : filter.sepiaMilli;
+                const int sepiaRed = (ClampByte(red) * 393 + ClampByte(green) * 769 + ClampByte(blue) * 189) / 1000;
+                const int sepiaGreen = (ClampByte(red) * 349 + ClampByte(green) * 686 + ClampByte(blue) * 168) / 1000;
+                const int sepiaBlue = (ClampByte(red) * 272 + ClampByte(green) * 534 + ClampByte(blue) * 131) / 1000;
+                red = (red * (1000 - weight) + sepiaRed * weight) / 1000;
+                green = (green * (1000 - weight) + sepiaGreen * weight) / 1000;
+                blue = (blue * (1000 - weight) + sepiaBlue * weight) / 1000;
+            }
+            if (filter.saturateMilli != 1000) {
+                const int amount = filter.saturateMilli < 0 ? 0 : filter.saturateMilli;
+                const int nextRed = (red * (213 + 787 * amount / 1000) + green * (715 - 715 * amount / 1000) + blue * (72 - 72 * amount / 1000)) / 1000;
+                const int nextGreen = (red * (213 - 213 * amount / 1000) + green * (715 + 285 * amount / 1000) + blue * (72 - 72 * amount / 1000)) / 1000;
+                const int nextBlue = (red * (213 - 213 * amount / 1000) + green * (715 - 715 * amount / 1000) + blue * (72 + 928 * amount / 1000)) / 1000;
+                red = nextRed;
+                green = nextGreen;
+                blue = nextBlue;
+            }
+            if (filter.hueRotateDeg % 360 != 0) {
+                const double radians = static_cast<double>(filter.hueRotateDeg) * 3.141592653589793 / 180.0;
+                const double cosine = std::cos(radians);
+                const double sine = std::sin(radians);
+                const double nextRed = red * (0.2126 + cosine * 0.7874 - sine * 0.2126) + green * (0.7152 - cosine * 0.7152 - sine * 0.7152) +
+                    blue * (0.0722 - cosine * 0.0722 + sine * 0.9278);
+                const double nextGreen = red * (0.2126 - cosine * 0.2126 + sine * 0.143) + green * (0.7152 + cosine * 0.2848 + sine * 0.14) +
+                    blue * (0.0722 - cosine * 0.0722 - sine * 0.283);
+                const double nextBlue = red * (0.2126 - cosine * 0.2126 - sine * 0.7874) + green * (0.7152 - cosine * 0.7152 + sine * 0.7152) +
+                    blue * (0.0722 + cosine * 0.9278 + sine * 0.0722);
+                red = static_cast<int>(std::lround(nextRed));
+                green = static_cast<int>(std::lround(nextGreen));
+                blue = static_cast<int>(std::lround(nextBlue));
+            }
+            if (filter.invertMilli > 0) {
+                const int weight = filter.invertMilli > 1000 ? 1000 : filter.invertMilli;
+                red = (ClampByte(red) * (1000 - weight) + (255 - ClampByte(red)) * weight) / 1000;
+                green = (ClampByte(green) * (1000 - weight) + (255 - ClampByte(green)) * weight) / 1000;
+                blue = (ClampByte(blue) * (1000 - weight) + (255 - ClampByte(blue)) * weight) / 1000;
+            }
+            color.red = static_cast<std::uint8_t>(ClampByte(red));
+            color.green = static_cast<std::uint8_t>(ClampByte(green));
+            color.blue = static_cast<std::uint8_t>(ClampByte(blue));
+            if (filter.opacityMilli < 1000) {
+                const int faded = color.alpha * std::max(0, filter.opacityMilli) / 1000;
+                color.alpha = static_cast<std::uint8_t>(ClampByte(faded));
+            }
+        }
+    }
+
+    struct PaintScope {
+        Engine& owner;
+        std::size_t depth;
+        int hidden;
+
+        PaintScope(Engine& owner, const ResolvedStyle& style) : owner(owner), depth(owner.colorFilters.size()), hidden(owner.paintHidden) {
+            const int opacity = style.opacityMilli * style.filterOpacityMilli / 1000;
+            if (style.hasColorFilter || opacity < 1000) {
+                CssColorFilter filter;
+                filter.brightnessMilli = style.brightnessMilli;
+                filter.contrastMilli = style.contrastMilli;
+                filter.grayscaleMilli = style.grayscaleMilli;
+                filter.invertMilli = style.invertMilli;
+                filter.saturateMilli = style.saturateMilli;
+                filter.sepiaMilli = style.sepiaMilli;
+                filter.hueRotateDeg = style.hueRotateDeg;
+                filter.opacityMilli = opacity;
+                owner.colorFilters.push_back(filter);
+            }
+            if (style.visibilityHidden) {
+                owner.paintHidden = 1;
+            } else if (style.visibilityVisible) {
+                owner.paintHidden = 0;
+            }
+        }
+
+        ~PaintScope() {
+            owner.colorFilters.resize(depth);
+            owner.paintHidden = hidden;
+        }
+    };
 
     void AddBox(Node& node, int x, int y, int width, int height, const ResolvedStyle& style, bool fixed) {
         if (width < 0) {
@@ -691,6 +821,7 @@ struct Engine {
 
     void Fill(int x, int y, int width, int height, Color color, bool fixed, bool clipped = false, int clipX = 0, int clipY = 0,
         int clipWidth = 0, int clipHeight = 0) {
+        ApplyCssFilters(color);
         if (color.alpha == 0 || width <= 0 || height <= 0) {
             return;
         }
@@ -767,6 +898,10 @@ struct Engine {
     }
 
     void Stroke(int x, int y, int width, int height, Color color, bool fixed) {
+        ApplyCssFilters(color);
+        if (color.alpha == 0) {
+            return;
+        }
         DrawOp op;
         op.kind = DrawOp::Kind::Stroke;
         op.x = x;
@@ -798,6 +933,10 @@ struct Engine {
         op.letterSpacingPx = style.letterSpacingPx;
         op.wordSpacingPx = style.wordSpacingPx;
         op.color = style.color;
+        ApplyCssFilters(op.color);
+        if (op.color.alpha == 0) {
+            return;
+        }
         op.bold = style.bold;
         op.italic = style.italic;
         op.monospace = style.monospace;
@@ -1162,15 +1301,44 @@ struct Engine {
         return std::strtod(text.c_str(), nullptr);
     }
 
+    // Gaussian edge coverage: the fraction of a half-plane that a 1-D Gaussian
+    // blur leaves at a distance from its edge. A blurred box is the product of
+    // its two edge profiles, and a blurred ring is the difference of two, so a
+    // real normal curve replaces the old linear ramp everywhere.
+    double SvgGaussianEdge(double distance, double sigma) {
+        if (!(sigma > 0)) {
+            return distance >= 0 ? 1.0 : 0.0;
+        }
+        return 0.5 * std::erfc(distance / (sigma * std::sqrt(2.0)));
+    }
+
+    // Coverage of a Gaussian-blurred axis-aligned box at one pixel center.
+    double SvgBlurredBoxCoverage(double pixelX, double pixelY, int boxX, int boxY, int boxWidth, int boxHeight, double sigma) {
+        const double centerX = pixelX + 0.5;
+        const double centerY = pixelY + 0.5;
+        const double insideX = std::min(centerX - boxX, boxX + boxWidth - centerX);
+        const double insideY = std::min(centerY - boxY, boxY + boxHeight - centerY);
+        return SvgGaussianEdge(insideX, sigma) * SvgGaussianEdge(insideY, sigma);
+    }
+
     void FillEllipseShadow(int centerX, int centerY, int radiusX, int radiusY, int blur, Color color, bool fixed) {
         if (blur <= 0) {
             FillEllipse(centerX, centerY, radiusX, radiusY, color, fixed);
             return;
         }
-        for (int extra = blur; extra >= 0; --extra) {
+        // The shadow is a Gaussian-blurred disc, so each co-centric ring carries
+        // the slice of the normal curve between its two radii.
+        const double sigma = static_cast<double>(blur);
+        const int extraMax = std::max(1, static_cast<int>(std::ceil(3.0 * sigma)));
+        for (int extra = extraMax; extra >= 0; --extra) {
             Color layer = color;
-            const int alpha = static_cast<int>(color.alpha) * (blur - extra + 1) / (blur + 1);
+            const double outer = SvgGaussianEdge(static_cast<double>(extra) - 0.5, sigma);
+            const double inner = SvgGaussianEdge(static_cast<double>(extra) + 0.5, sigma);
+            const int alpha = static_cast<int>(color.alpha * std::max(0.0, outer - inner) + 0.5);
             layer.alpha = static_cast<std::uint8_t>(alpha < 0 ? 0 : (alpha > 255 ? 255 : alpha));
+            if (layer.alpha == 0) {
+                continue;
+            }
             FillEllipse(centerX, centerY, radiusX + extra, radiusY + extra, layer, fixed);
         }
     }
@@ -1179,13 +1347,23 @@ struct Engine {
         if (radiusX < 1 || radiusY < 1 || color.alpha == 0) {
             return;
         }
-        for (int row = -radiusY; row <= radiusY; ++row) {
-            const double span = 1.0 - (static_cast<double>(row) * row) / (static_cast<double>(radiusY) * radiusY);
-            if (span <= 0) {
-                continue;
+        // The analytic chord of the ellipse at every sub-scanline gives exact
+        // horizontal coverage, so the rim blends like a browser paints it
+        // instead of snapping to whole pixels.
+        const double radiusRealX = radiusX;
+        const double radiusRealY = radiusY;
+        for (int row = -radiusY - 1; row <= radiusY; ++row) {
+            SvgCoverageRow coverage;
+            for (int sub = 0; sub < SVG_AA_SUBROWS; ++sub) {
+                const double sampleY = static_cast<double>(row) + (static_cast<double>(sub) + 0.5) / SVG_AA_SUBROWS;
+                const double normalized = sampleY / radiusRealY;
+                if (normalized <= -1.0 || normalized >= 1.0) {
+                    continue;
+                }
+                const double half = radiusRealX * std::sqrt(1.0 - normalized * normalized);
+                coverage.AddSpan(centerX - half, centerX + half, 1.0 / SVG_AA_SUBROWS);
             }
-            const int half = std::max(1, static_cast<int>(radiusX * std::sqrt(span)));
-            Fill(centerX - half, centerY + row, half * 2, 1, color, fixed);
+            EmitCoverageRow(coverage, 0, 0, centerY + row, color, fixed);
         }
     }
 
@@ -1194,69 +1372,144 @@ struct Engine {
         double y = 0;
     };
 
+    // Antialiased coverage rasterization. Every pixel row is sampled on
+    // SVG_AA_SUBROWS sub-scanlines; the horizontal overlap each span has with a
+    // pixel column is its area contribution, exactly the coverage a browser
+    // multiplies the paint by. Edges therefore blend with the backdrop instead
+    // of snapping to whole pixels.
+    struct SvgCoverageSpan {
+        double left = 0;
+        double right = 0;
+    };
+
+    struct SvgCoverageRow {
+        int first = 0;
+        int last = -1;
+        std::vector<double> cover;
+
+        void AddSpan(double left, double right, double weight) {
+            if (!(right > left) || !(weight > 0)) {
+                return;
+            }
+            const int firstColumn = static_cast<int>(std::floor(left));
+            const int lastColumn = static_cast<int>(std::ceil(right)) - 1;
+            if (cover.empty()) {
+                first = firstColumn;
+                last = lastColumn;
+                cover.assign(static_cast<std::size_t>(lastColumn - firstColumn + 1), 0.0);
+            } else if (firstColumn < first || lastColumn > last) {
+                // Spans may arrive from any contour, so the buffer grows when a
+                // wider span appears. This keeps one row's coverage contiguous.
+                const int newFirst = std::min(first, firstColumn);
+                const int newLast = std::max(last, lastColumn);
+                std::vector<double> grown(static_cast<std::size_t>(newLast - newFirst + 1), 0.0);
+                for (std::size_t index = 0; index < cover.size(); ++index) {
+                    grown[static_cast<std::size_t>(first + static_cast<int>(index) - newFirst)] = cover[index];
+                }
+                cover.swap(grown);
+                first = newFirst;
+                last = newLast;
+            }
+            for (int column = firstColumn; column <= lastColumn; ++column) {
+                const double overlap = std::min(right, static_cast<double>(column + 1)) - std::max(left, static_cast<double>(column));
+                if (overlap > 0) {
+                    cover[static_cast<std::size_t>(column - first)] += overlap * weight;
+                }
+            }
+        }
+
+        bool Empty() const {
+            return last < first;
+        }
+    };
+
+    // Crossing positions of every contour at one sample line, resolved by the
+    // fill rule. Crossings keep their fractional x so edges stay smooth.
+    void CollectContourSpans(const std::vector<std::vector<SvgPoint>>& contours, double sampleY, bool evenOdd,
+        std::vector<SvgCoverageSpan>& spans) {
+        struct Crossing {
+            double x = 0;
+            int wind = 0;
+        };
+        std::vector<Crossing> crossings;
+        for (const std::vector<SvgPoint>& contour : contours) {
+            if (contour.size() < 2) {
+                continue;
+            }
+            for (std::size_t index = 0; index < contour.size(); ++index) {
+                const SvgPoint& start = contour[index];
+                const SvgPoint& end = contour[(index + 1) % contour.size()];
+                const bool crosses = (start.y <= sampleY && end.y > sampleY) || (end.y <= sampleY && start.y > sampleY);
+                if (!crosses || start.y == end.y) {
+                    continue;
+                }
+                const double distance = (sampleY - start.y) / (end.y - start.y);
+                crossings.push_back(Crossing{start.x + distance * (end.x - start.x), end.y > start.y ? 1 : -1});
+            }
+        }
+        std::sort(crossings.begin(), crossings.end(), [](const Crossing& left, const Crossing& right) { return left.x < right.x; });
+        spans.clear();
+        if (evenOdd) {
+            for (std::size_t index = 0; index + 1 < crossings.size(); index += 2) {
+                if (crossings[index + 1].x > crossings[index].x) {
+                    spans.push_back(SvgCoverageSpan{crossings[index].x, crossings[index + 1].x});
+                }
+            }
+            return;
+        }
+        int wind = 0;
+        double cursor = crossings.empty() ? 0 : crossings.front().x;
+        for (const Crossing& crossing : crossings) {
+            if (wind != 0 && crossing.x > cursor) {
+                spans.push_back(SvgCoverageSpan{cursor, crossing.x});
+            }
+            wind += crossing.wind;
+            cursor = crossing.x;
+        }
+    }
+
+    int SvgCoverageAlpha(int colorAlpha, double coverage) {
+        if (!(coverage > 0)) {
+            return 0;
+        }
+        if (coverage >= 1) {
+            return colorAlpha;
+        }
+        const int scaled = static_cast<int>(colorAlpha * coverage + 0.5);
+        return scaled > 255 ? 255 : scaled;
+    }
+
+    // Paints one row of coverage as horizontal runs; neighbouring pixels that
+    // share a blended alpha are merged so a solid shape costs a few ops a row.
+    void EmitCoverageRow(const SvgCoverageRow& row, int originX, int originY, int pixelRow, Color color, bool fixed) {
+        if (row.Empty() || color.alpha == 0) {
+            return;
+        }
+        int runStart = row.first;
+        int runAlpha = SvgCoverageAlpha(color.alpha, row.cover[0]);
+        for (std::size_t index = 1; index <= row.cover.size(); ++index) {
+            const bool atEnd = index == row.cover.size();
+            const int alpha = atEnd ? -1 : SvgCoverageAlpha(color.alpha, row.cover[index]);
+            if (atEnd || alpha != runAlpha) {
+                if (runAlpha > 0) {
+                    Color paint = color;
+                    paint.alpha = static_cast<std::uint8_t>(runAlpha);
+                    const int runLength = static_cast<int>(index) - (runStart - row.first);
+                    Fill(originX + runStart, originY + pixelRow, runLength, 1, paint, fixed);
+                }
+                runStart = row.first + static_cast<int>(index);
+                runAlpha = alpha;
+            }
+        }
+    }
+
     void FillPolygon(const std::vector<SvgPoint>& points, int originX, int originY, Color color, bool fixed, bool evenOdd = true) {
         if (points.size() < 3 || color.alpha == 0) {
             return;
         }
-        int minY = 1000000;
-        int maxY = -1000000;
-        for (const SvgPoint& point : points) {
-            minY = std::min(minY, static_cast<int>(std::floor(point.y)));
-            maxY = std::max(maxY, static_cast<int>(std::ceil(point.y)));
-        }
-        for (int row = minY; row <= maxY; ++row) {
-            // The crossing test and the crossing position must sample the same
-            // scanline; otherwise gently sloping edges (rounded corners, circles
-            // and flattened arcs) project spans that are off by whole pixels.
-            const double sampleY = static_cast<double>(row) + 0.5;
-            std::vector<int> crossings;
-            for (std::size_t index = 0; index < points.size(); ++index) {
-                const SvgPoint& start = points[index];
-                const SvgPoint& end = points[(index + 1) % points.size()];
-                const bool crosses = (start.y <= sampleY && end.y > sampleY) || (end.y <= sampleY && start.y > sampleY);
-                if (!crosses || start.y == end.y) {
-                    continue;
-                }
-                const double distance = (sampleY - start.y) / (end.y - start.y);
-                crossings.push_back(static_cast<int>(start.x + distance * (end.x - start.x)));
-            }
-            std::sort(crossings.begin(), crossings.end());
-            if (evenOdd) {
-                for (std::size_t index = 0; index + 1 < crossings.size(); index += 2) {
-                    const int left = crossings[index];
-                    const int right = crossings[index + 1];
-                    if (right > left) {
-                        Fill(originX + left, originY + row, right - left, 1, color, fixed);
-                    }
-                }
-                continue;
-            }
-            struct Hit {
-                int x = 0;
-                int wind = 0;
-            };
-            std::vector<Hit> hits;
-            for (std::size_t index = 0; index < points.size(); ++index) {
-                const SvgPoint& start = points[index];
-                const SvgPoint& end = points[(index + 1) % points.size()];
-                const bool crosses = (start.y <= sampleY && end.y > sampleY) || (end.y <= sampleY && start.y > sampleY);
-                if (!crosses || start.y == end.y) {
-                    continue;
-                }
-                const double distance = (sampleY - start.y) / (end.y - start.y);
-                hits.push_back(Hit{static_cast<int>(start.x + distance * (end.x - start.x)), end.y > start.y ? 1 : -1});
-            }
-            std::sort(hits.begin(), hits.end(), [](const Hit& left, const Hit& right) { return left.x < right.x; });
-            int wind = 0;
-            int cursor = hits.empty() ? 0 : hits.front().x;
-            for (const Hit& hit : hits) {
-                if (wind != 0 && hit.x > cursor) {
-                    Fill(originX + cursor, originY + row, hit.x - cursor, 1, color, fixed);
-                }
-                wind += hit.wind;
-                cursor = hit.x;
-            }
-        }
+        std::vector<std::vector<SvgPoint>> contours;
+        contours.push_back(points);
+        FillContours(contours, originX, originY, color, fixed, evenOdd);
     }
 
     // Splits a stroke-dasharray value into dash lengths. Negative values and an
@@ -1831,9 +2084,16 @@ struct Engine {
         return angle;
     }
 
-    void AddQuadratic(std::vector<SvgPoint>& points, double x0, double y0, double x1, double y1, double x2, double y2) {
-        for (int step = 1; step <= 8; ++step) {
-            const double t = static_cast<double>(step) / 8.0;
+    void AddQuadratic(std::vector<SvgPoint>& points, double x0, double y0, double x1, double y1, double x2, double y2,
+        double pixelScale = 1.0) {
+        // The control polygon bounds how far the curve can bow away from the
+        // chord, so one segment per SVG_FLATTEN_UNITS_PER_STEP of its length
+        // keeps the flattened outline within a fraction of a pixel.
+        const double controlLength = std::hypot(x1 - x0, y1 - y0) + std::hypot(x2 - x1, y2 - y1);
+        const int wanted = static_cast<int>(std::ceil(controlLength * std::fabs(pixelScale) / SVG_FLATTEN_UNITS_PER_STEP));
+        const int steps = std::max(8, std::min(SVG_FLATTEN_MAX_STEPS, wanted));
+        for (int step = 1; step <= steps; ++step) {
+            const double t = static_cast<double>(step) / steps;
             const double u = 1.0 - t;
             SvgPoint point;
             point.x = u * u * x0 + 2 * u * t * x1 + t * t * x2;
@@ -1843,7 +2103,7 @@ struct Engine {
     }
 
     void AddArc(std::vector<SvgPoint>& points, double x1, double y1, double radiusX, double radiusY, double rotationDeg, bool largeArc, bool sweep,
-        double x2, double y2) {
+        double x2, double y2, double pixelScale = 1.0) {
         if (std::abs(x1 - x2) < 0.00001 && std::abs(y1 - y2) < 0.00001) {
             return;
         }
@@ -1899,7 +2159,10 @@ struct Engine {
             delta += 2 * pi;
         }
         const double portion = std::abs(delta) / (2 * pi);
-        const int steps = portion < 0.05 ? 4 : (portion > 1 ? 24 : static_cast<int>(portion * 24 + 0.5));
+        int steps = portion < 0.05 ? 4 : (portion > 1 ? 24 : static_cast<int>(portion * 24 + 0.5));
+        const double arcLength = std::abs(delta) * std::max(radiusX, radiusY);
+        const int wanted = static_cast<int>(std::ceil(arcLength * std::fabs(pixelScale) / SVG_FLATTEN_UNITS_PER_STEP));
+        steps = std::max(steps, std::min(SVG_FLATTEN_MAX_STEPS, wanted));
         for (int step = 1; step <= steps; ++step) {
             const double theta = theta1 + delta * (static_cast<double>(step) / steps);
             const double cosTheta = std::cos(theta);
@@ -1911,9 +2174,13 @@ struct Engine {
         }
     }
 
-    void AddCurve(std::vector<SvgPoint>& points, double x0, double y0, double x1, double y1, double x2, double y2, double x3, double y3) {
-        for (int step = 1; step <= 8; ++step) {
-            const double t = static_cast<double>(step) / 8.0;
+    void AddCurve(std::vector<SvgPoint>& points, double x0, double y0, double x1, double y1, double x2, double y2, double x3, double y3,
+        double pixelScale = 1.0) {
+        const double controlLength = std::hypot(x1 - x0, y1 - y0) + std::hypot(x2 - x1, y2 - y1) + std::hypot(x3 - x2, y3 - y2);
+        const int wanted = static_cast<int>(std::ceil(controlLength * std::fabs(pixelScale) / SVG_FLATTEN_UNITS_PER_STEP));
+        const int steps = std::max(8, std::min(SVG_FLATTEN_MAX_STEPS, wanted));
+        for (int step = 1; step <= steps; ++step) {
+            const double t = static_cast<double>(step) / steps;
             const double u = 1.0 - t;
             SvgPoint point;
             point.x = u * u * u * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x3;
@@ -1940,6 +2207,13 @@ struct Engine {
         bool lastWasQuadratic = false;
         std::size_t index = 0;
         char command = 0;
+        // Curves flatten at the scale they are finally painted at, so an
+        // element blown up by a transform or a viewBox gets more segments.
+        double flattenScale = std::max(std::fabs(scaleX), std::fabs(scaleY));
+        if (gradientSpace != nullptr) {
+            const SvgMatrix& flattenMatrix = gradientSpace->matrix;
+            flattenScale *= std::sqrt(std::fabs(flattenMatrix.a * flattenMatrix.d - flattenMatrix.b * flattenMatrix.c));
+        }
         auto mapPoint = [&](const SvgPoint& point) {
             double userX = point.x;
             double userY = point.y;
@@ -2059,7 +2333,7 @@ struct Engine {
                     endX += currentX;
                     endY += currentY;
                 }
-                AddArc(figure, currentX, currentY, radiusX, radiusY, rotation, largeArc >= 0.5, sweep >= 0.5, endX, endY);
+                AddArc(figure, currentX, currentY, radiusX, radiusY, rotation, largeArc >= 0.5, sweep >= 0.5, endX, endY, flattenScale);
                 currentX = endX;
                 currentY = endY;
                 lastWasCubic = false;
@@ -2074,7 +2348,7 @@ struct Engine {
                 const double controlY = lastWasQuadratic ? currentY * 2 - lastControlY : currentY;
                 const double x = relative ? currentX + first : first;
                 const double y = relative ? currentY + second : second;
-                AddQuadratic(figure, currentX, currentY, controlX, controlY, x, y);
+                AddQuadratic(figure, currentX, currentY, controlX, controlY, x, y, flattenScale);
                 lastControlX = controlX;
                 lastControlY = controlY;
                 lastWasQuadratic = true;
@@ -2113,7 +2387,7 @@ struct Engine {
                 const double controlY = relative ? currentY + second : second;
                 const double x = relative ? currentX + third : third;
                 const double y = relative ? currentY + fourth : fourth;
-                AddQuadratic(figure, currentX, currentY, controlX, controlY, x, y);
+                AddQuadratic(figure, currentX, currentY, controlX, controlY, x, y, flattenScale);
                 lastControlX = controlX;
                 lastControlY = controlY;
                 lastWasQuadratic = true;
@@ -2129,7 +2403,7 @@ struct Engine {
                 const double y = relative ? currentY + fourth : fourth;
                 const double reflectedX = lastWasCubic ? currentX * 2 - lastControlX : currentX;
                 const double reflectedY = lastWasCubic ? currentY * 2 - lastControlY : currentY;
-                AddCurve(figure, currentX, currentY, reflectedX, reflectedY, controlX, controlY, x, y);
+                AddCurve(figure, currentX, currentY, reflectedX, reflectedY, controlX, controlY, x, y, flattenScale);
                 lastControlX = controlX;
                 lastControlY = controlY;
                 lastWasCubic = true;
@@ -2149,7 +2423,7 @@ struct Engine {
             const double y2 = relative ? currentY + fourth : fourth;
             const double x = relative ? currentX + fifth : fifth;
             const double y = relative ? currentY + sixth : sixth;
-            AddCurve(figure, currentX, currentY, x1, y1, x2, y2, x, y);
+            AddCurve(figure, currentX, currentY, x1, y1, x2, y2, x, y, flattenScale);
             lastControlX = x2;
             lastControlY = y2;
             lastWasCubic = true;
@@ -2527,6 +2801,15 @@ struct Engine {
         std::string filterUrl;
     };
 
+    // The factor that turns one user unit into one device pixel in a space: the
+    // viewBox/length scale multiplied by the average of the affine matrix. It
+    // drives adaptive curve flattening so transformed shapes keep smooth edges.
+    double SvgDeviceScale(const SvgSpace& space) {
+        const SvgMatrix& matrix = space.matrix;
+        const double matrixScale = std::sqrt(std::fabs(matrix.a * matrix.d - matrix.b * matrix.c));
+        return matrixScale * std::max(std::fabs(space.scaleX), std::fabs(space.scaleY));
+    }
+
     // The clip-path currently guarding every pixel the painter emits. It lives
     // here so markers, patterns, referenced content and gradients painted while
     // a clipped element renders are masked exactly like the element itself.
@@ -2826,7 +3109,7 @@ struct Engine {
                 double radiusX = 0;
                 double radiusY = 0;
                 SvgRectRadii(*child, rectWidth, rectHeight, radiusX, radiusY);
-                contour = StraightPath(SvgRectPath(rectX, rectY, rectWidth, rectHeight, radiusX, radiusY));
+                contour = StraightPath(SvgRectPath(rectX, rectY, rectWidth, rectHeight, radiusX, radiusY), SvgDeviceScale(childSpace));
                 for (SvgPoint& point : contour) {
                     toUser(point.x, point.y);
                 }
@@ -2853,7 +3136,7 @@ struct Engine {
                     toUser(point.x, point.y);
                 }
             } else if (childTag == "path") {
-                contour = StraightPath(AttributeValue(*child, "d"));
+                contour = StraightPath(AttributeValue(*child, "d"), SvgDeviceScale(childSpace));
                 for (SvgPoint& point : contour) {
                     toUser(point.x, point.y);
                 }
@@ -3583,6 +3866,9 @@ struct Engine {
     // browser paints at the edge of a join, cap or dash.
     void FillContours(const std::vector<std::vector<SvgPoint>>& contours, int originX, int originY, Color color, bool fixed, bool evenOdd,
         bool centerSampling = false) {
+        // Coverage antialiasing supersedes the old half-pixel snapping, so the
+        // centerSampling flag is accepted for compatibility and no longer used.
+        (void)centerSampling;
         if (color.alpha == 0) {
             return;
         }
@@ -3594,52 +3880,17 @@ struct Engine {
                 maxY = std::max(maxY, static_cast<int>(std::ceil(point.y)));
             }
         }
-        auto columnAt = [centerSampling](double crossing) {
-            if (centerSampling) {
-                return static_cast<int>(std::ceil(crossing - 0.5));
-            }
-            return static_cast<int>(crossing);
-        };
+        std::vector<SvgCoverageSpan> spans;
         for (int row = minY; row <= maxY; ++row) {
-            const double sampleY = static_cast<double>(row) + 0.5;
-            struct Hit {
-                int x = 0;
-                int wind = 0;
-            };
-            std::vector<Hit> hits;
-            for (const std::vector<SvgPoint>& contour : contours) {
-                if (contour.size() < 2) {
-                    continue;
-                }
-                for (std::size_t index = 0; index < contour.size(); ++index) {
-                    const SvgPoint& start = contour[index];
-                    const SvgPoint& end = contour[(index + 1) % contour.size()];
-                    const bool crosses = (start.y <= sampleY && end.y > sampleY) || (end.y <= sampleY && start.y > sampleY);
-                    if (!crosses || start.y == end.y) {
-                        continue;
-                    }
-                    const double distance = (sampleY - start.y) / (end.y - start.y);
-                    hits.push_back(Hit{columnAt(start.x + distance * (end.x - start.x)), end.y > start.y ? 1 : -1});
+            SvgCoverageRow coverage;
+            for (int sub = 0; sub < SVG_AA_SUBROWS; ++sub) {
+                const double sampleY = static_cast<double>(row) + (static_cast<double>(sub) + 0.5) / SVG_AA_SUBROWS;
+                CollectContourSpans(contours, sampleY, evenOdd, spans);
+                for (const SvgCoverageSpan& span : spans) {
+                    coverage.AddSpan(span.left, span.right, 1.0 / SVG_AA_SUBROWS);
                 }
             }
-            std::sort(hits.begin(), hits.end(), [](const Hit& left, const Hit& right) { return left.x < right.x; });
-            if (evenOdd) {
-                for (std::size_t index = 0; index + 1 < hits.size(); index += 2) {
-                    if (hits[index + 1].x > hits[index].x) {
-                        Fill(originX + hits[index].x, originY + row, hits[index + 1].x - hits[index].x, 1, color, fixed);
-                    }
-                }
-                continue;
-            }
-            int wind = 0;
-            int cursor = hits.empty() ? 0 : hits.front().x;
-            for (const Hit& hit : hits) {
-                if (wind != 0 && hit.x > cursor) {
-                    Fill(originX + cursor, originY + row, hit.x - cursor, 1, color, fixed);
-                }
-                wind += hit.wind;
-                cursor = hit.x;
-            }
+            EmitCoverageRow(coverage, originX, originY, row, color, fixed);
         }
     }
 
@@ -3656,58 +3907,50 @@ struct Engine {
                 maxY = std::max(maxY, static_cast<int>(std::ceil(point.y)));
             }
         }
+        std::vector<SvgCoverageSpan> spans;
         for (int row = minY; row <= maxY; ++row) {
-            struct Hit {
-                int x = 0;
-                int wind = 0;
-            };
-            std::vector<Hit> hits;
-            for (const std::vector<SvgPoint>& contour : contours) {
-                if (contour.size() < 2) {
-                    continue;
-                }
-                for (std::size_t index = 0; index < contour.size(); ++index) {
-                    const SvgPoint& start = contour[index];
-                    const SvgPoint& end = contour[(index + 1) % contour.size()];
-                    const bool crosses = (start.y <= row && end.y > row) || (end.y <= row && start.y > row);
-                    if (!crosses || start.y == end.y) {
-                        continue;
-                    }
-                    const double distance = (static_cast<double>(row) + 0.5 - start.y) / (end.y - start.y);
-                    hits.push_back(Hit{static_cast<int>(start.x + distance * (end.x - start.x)), end.y > start.y ? 1 : -1});
+            SvgCoverageRow coverage;
+            for (int sub = 0; sub < SVG_AA_SUBROWS; ++sub) {
+                const double sampleY = static_cast<double>(row) + (static_cast<double>(sub) + 0.5) / SVG_AA_SUBROWS;
+                CollectContourSpans(contours, sampleY, evenOdd, spans);
+                for (const SvgCoverageSpan& span : spans) {
+                    coverage.AddSpan(span.left, span.right, 1.0 / SVG_AA_SUBROWS);
                 }
             }
-            std::sort(hits.begin(), hits.end(), [](const Hit& left, const Hit& right) { return left.x < right.x; });
-            auto paintSpan = [&](int left, int right) {
-                int runStart = left;
-                Color run = SampleGradient(paint, originX + left, originY + row);
-                for (int column = left + 1; column <= right; ++column) {
-                    const Color next = column == right ? run : SampleGradient(paint, originX + column, originY + row);
-                    if (column == right || next.red != run.red || next.green != run.green || next.blue != run.blue || next.alpha != run.alpha) {
-                        if (run.alpha != 0) {
-                            Fill(originX + runStart, originY + row, column - runStart, 1, run, fixed);
-                        }
-                        runStart = column;
-                        run = next;
-                    }
-                }
-            };
-            if (evenOdd) {
-                for (std::size_t index = 0; index + 1 < hits.size(); index += 2) {
-                    if (hits[index + 1].x > hits[index].x) {
-                        paintSpan(hits[index].x, hits[index + 1].x);
-                    }
-                }
+            EmitCoverageGradientRow(coverage, originX, originY, row, paint, fixed);
+        }
+    }
+
+    // Gradient rows cannot merge neighbouring pixels blindly, so a run ends
+    // wherever the sampled color or the coverage-derived alpha changes.
+    void EmitCoverageGradientRow(const SvgCoverageRow& row, int originX, int originY, int pixelRow, const GradientPaint& paint, bool fixed) {
+        if (row.Empty()) {
+            return;
+        }
+        int runStart = -1;
+        Color runColor;
+        for (std::size_t index = 0; index <= row.cover.size(); ++index) {
+            const bool atEnd = index == row.cover.size();
+            Color next;
+            int alpha = 0;
+            if (!atEnd) {
+                next = SampleGradient(paint, originX + row.first + static_cast<int>(index), originY + pixelRow);
+                alpha = SvgCoverageAlpha(next.alpha, row.cover[index]);
+                next.alpha = static_cast<std::uint8_t>(alpha);
+            }
+            const bool sameRun = runStart >= 0 && !atEnd && alpha > 0 && next.red == runColor.red && next.green == runColor.green &&
+                                 next.blue == runColor.blue && next.alpha == runColor.alpha;
+            if (sameRun) {
                 continue;
             }
-            int wind = 0;
-            int cursor = hits.empty() ? 0 : hits.front().x;
-            for (const Hit& hit : hits) {
-                if (wind != 0 && hit.x > cursor) {
-                    paintSpan(cursor, hit.x);
-                }
-                wind += hit.wind;
-                cursor = hit.x;
+            if (runStart >= 0) {
+                const int runEndColumn = row.first + static_cast<int>(index);
+                Fill(originX + runStart, originY + pixelRow, runEndColumn - runStart, 1, runColor, fixed);
+                runStart = -1;
+            }
+            if (!atEnd && alpha > 0) {
+                runStart = row.first + static_cast<int>(index);
+                runColor = next;
             }
         }
     }
@@ -3851,7 +4094,7 @@ struct Engine {
         return true;
     }
 
-    std::vector<SvgPoint> StraightPath(const std::string& data) {
+    std::vector<SvgPoint> StraightPath(const std::string& data, double pixelScale = 1.0) {
         std::vector<SvgPoint> points;
         std::size_t index = 0;
         char command = 0;
@@ -3921,7 +4164,7 @@ struct Engine {
                     endX += x;
                     endY += y;
                 }
-                AddArc(points, x, y, radiusX, radiusY, rotation, largeArc >= 0.5, sweep >= 0.5, endX, endY);
+                AddArc(points, x, y, radiusX, radiusY, rotation, largeArc >= 0.5, sweep >= 0.5, endX, endY, pixelScale);
                 x = endX;
                 y = endY;
                 lastWasCubic = false;
@@ -3936,7 +4179,7 @@ struct Engine {
                 const double controlY = lastWasQuadratic ? y * 2 - lastControlY : y;
                 const double nextX = relative ? x + first : first;
                 const double nextY = relative ? y + second : second;
-                AddQuadratic(points, x, y, controlX, controlY, nextX, nextY);
+                AddQuadratic(points, x, y, controlX, controlY, nextX, nextY, pixelScale);
                 lastControlX = controlX;
                 lastControlY = controlY;
                 lastWasQuadratic = true;
@@ -3968,7 +4211,7 @@ struct Engine {
                 const double controlY = relative ? y + second : second;
                 const double nextX = relative ? x + third : third;
                 const double nextY = relative ? y + fourth : fourth;
-                AddQuadratic(points, x, y, controlX, controlY, nextX, nextY);
+                AddQuadratic(points, x, y, controlX, controlY, nextX, nextY, pixelScale);
                 lastControlX = controlX;
                 lastControlY = controlY;
                 lastWasQuadratic = true;
@@ -3984,7 +4227,7 @@ struct Engine {
                 const double nextY = relative ? y + fourth : fourth;
                 const double reflectedX = lastWasCubic ? x * 2 - lastControlX : x;
                 const double reflectedY = lastWasCubic ? y * 2 - lastControlY : y;
-                AddCurve(points, x, y, reflectedX, reflectedY, controlX, controlY, nextX, nextY);
+                AddCurve(points, x, y, reflectedX, reflectedY, controlX, controlY, nextX, nextY, pixelScale);
                 lastControlX = controlX;
                 lastControlY = controlY;
                 lastWasCubic = true;
@@ -4004,7 +4247,7 @@ struct Engine {
             const double y2 = relative ? y + fourth : fourth;
             const double nextX = relative ? x + fifth : fifth;
             const double nextY = relative ? y + sixth : sixth;
-            AddCurve(points, x, y, x1, y1, x2, y2, nextX, nextY);
+            AddCurve(points, x, y, x1, y1, x2, y2, nextX, nextY, pixelScale);
             lastControlX = x2;
             lastControlY = y2;
             lastWasCubic = true;
@@ -4164,14 +4407,14 @@ struct Engine {
     // Builds the user-space outline of one mask shape. The mask evaluator
     // supports every basic shape, so a <circle> or <path> masks exactly like it
     // does in a browser instead of only rectangles.
-    bool SvgMaskChildContour(Node& child, const std::string& tag, std::vector<SvgPoint>& contour) {
+    bool SvgMaskChildContour(Node& child, const std::string& tag, std::vector<SvgPoint>& contour, double pixelScale = 1.0) {
         if (tag == "rect") {
             double radiusX = 0;
             double radiusY = 0;
             const double width = SvgReal(child, "width", 0);
             const double height = SvgReal(child, "height", 0);
             SvgRectRadii(child, width, height, radiusX, radiusY);
-            contour = StraightPath(SvgRectPath(SvgReal(child, "x", 0), SvgReal(child, "y", 0), width, height, radiusX, radiusY));
+            contour = StraightPath(SvgRectPath(SvgReal(child, "x", 0), SvgReal(child, "y", 0), width, height, radiusX, radiusY), pixelScale);
             return !contour.empty();
         }
         if (tag == "circle" || tag == "ellipse") {
@@ -4193,7 +4436,7 @@ struct Engine {
             return contour.size() >= 3;
         }
         if (tag == "path") {
-            contour = StraightPath(AttributeValue(child, "d"));
+            contour = StraightPath(AttributeValue(child, "d"), pixelScale);
             return !contour.empty();
         }
         return false;
@@ -4218,7 +4461,7 @@ struct Engine {
                 continue;
             }
             std::vector<SvgPoint> contour;
-            if (!SvgMaskChildContour(*child, childTag, contour)) {
+            if (!SvgMaskChildContour(*child, childTag, contour, SvgDeviceScale(childSpace))) {
                 continue;
             }
             if (objectBox) {
@@ -4732,6 +4975,7 @@ struct Engine {
         int dx = 0;
         int dy = 0;
         int blur = 0;
+        double blurSigma = 0;
         bool dropShadow = false;
         int shadowDx = 0;
         int shadowDy = 0;
@@ -4911,7 +5155,9 @@ struct Engine {
                 }
             } else if (tag == "fegaussianblur") {
                 effect = SvgFilter();
-                effect.blur = std::max(1, static_cast<int>(std::atof(AttributeValue(*child, "stddeviation").c_str()) * std::max(space.scaleX, space.scaleY)));
+                const double deviation = std::atof(AttributeValue(*child, "stddeviation").c_str()) * std::max(space.scaleX, space.scaleY);
+                effect.blurSigma = deviation > 0 ? deviation : 0;
+                effect.blur = deviation > 0 ? std::max(1, static_cast<int>(deviation + 0.5)) : 0;
                 found = true;
             } else if (tag == "fedropshadow") {
                 effect = SvgFilter();
@@ -4924,8 +5170,10 @@ struct Engine {
                 const double scaledDeviation = deviation * std::max(space.scaleX, space.scaleY);
                 if (scaledDeviation > 0 && scaledDeviation < 64) {
                     effect.blur = static_cast<int>(scaledDeviation + 0.5);
+                    effect.blurSigma = scaledDeviation;
                 } else if (scaledDeviation >= 64) {
                     effect.blur = 64;
+                    effect.blurSigma = 64;
                 }
                 effect.floodColor = Color{0, 0, 0, 255};
                 const std::string shadowColor = AttributeValue(*child, "flood-color");
@@ -5285,7 +5533,7 @@ struct Engine {
                     }
                 }
             }
-            const std::vector<SvgPoint> course = MapSvgPoints(StraightPath(pathData), space);
+            const std::vector<SvgPoint> course = MapSvgPoints(StraightPath(pathData, SvgDeviceScale(space)), space);
             if (course.size() < 2) {
                 continue;
             }
@@ -5724,33 +5972,34 @@ struct Engine {
                 if (radius <= 0) {
                     Fill(shadowX, shadowY, width, height, filterEffect.floodColor, fixed);
                 } else {
-                    for (int row = -radius; row < height + radius; ++row) {
-                        for (int column = -radius; column < width + radius; ++column) {
-                            const int outsideX = column < 0 ? -column : (column >= width ? column - width + 1 : 0);
-                            const int outsideY = row < 0 ? -row : (row >= height ? row - height + 1 : 0);
-                            const int distance = std::max(outsideX, outsideY);
-                            if (distance > radius) {
+                    const double sigma = filterEffect.blurSigma > 0 ? filterEffect.blurSigma : static_cast<double>(radius);
+                    const int spread = std::max(1, static_cast<int>(std::ceil(3.0 * sigma)));
+                    for (int row = -spread; row < height + spread; ++row) {
+                        for (int column = -spread; column < width + spread; ++column) {
+                            const double coverage = SvgBlurredBoxCoverage(shadowX + column, shadowY + row, shadowX, shadowY, width, height, sigma);
+                            if (coverage <= 0.002) {
                                 continue;
                             }
                             Color blurred = filterEffect.floodColor;
-                            blurred.alpha = static_cast<std::uint8_t>(filterEffect.floodColor.alpha * (radius - distance + 1) / (radius + 1));
+                            const int alpha = static_cast<int>(filterEffect.floodColor.alpha * coverage + 0.5);
+                            blurred.alpha = static_cast<std::uint8_t>(alpha > 255 ? 255 : (alpha < 0 ? 0 : alpha));
                             Fill(shadowX + column, shadowY + row, 1, 1, blurred, fixed);
                         }
                     }
                 }
                 Fill(x, y, width, height, shown, fixed);
             } else if (!painted && filtered && filterEffect.blur > 0 && shown.alpha != 0 && width > 0 && height > 0) {
-                const int radius = filterEffect.blur;
-                for (int row = -radius; row < height + radius; ++row) {
-                    for (int column = -radius; column < width + radius; ++column) {
-                        const int outsideX = column < 0 ? -column : (column >= width ? column - width + 1 : 0);
-                        const int outsideY = row < 0 ? -row : (row >= height ? row - height + 1 : 0);
-                        const int distance = std::max(outsideX, outsideY);
-                        if (distance > radius) {
+                const double sigma = filterEffect.blurSigma > 0 ? filterEffect.blurSigma : static_cast<double>(filterEffect.blur);
+                const int spread = std::max(1, static_cast<int>(std::ceil(3.0 * sigma)));
+                for (int row = -spread; row < height + spread; ++row) {
+                    for (int column = -spread; column < width + spread; ++column) {
+                        const double coverage = SvgBlurredBoxCoverage(x + column, y + row, x, y, width, height, sigma);
+                        if (coverage <= 0.002) {
                             continue;
                         }
                         Color blurred = shown;
-                        blurred.alpha = static_cast<std::uint8_t>(shown.alpha * (radius - distance + 1) / (radius + 1));
+                        const int alpha = static_cast<int>(shown.alpha * coverage + 0.5);
+                        blurred.alpha = static_cast<std::uint8_t>(alpha > 255 ? 255 : (alpha < 0 ? 0 : alpha));
                         Fill(x + column, y + row, 1, 1, blurred, fixed);
                     }
                 }
@@ -6085,16 +6334,17 @@ struct Engine {
                 if (radius <= 0) {
                     Fill(shadowX, shadowY, op.width, op.height, imageShadow.floodColor, fixed);
                 } else {
-                    for (int row = -radius; row < op.height + radius; ++row) {
-                        for (int column = -radius; column < op.width + radius; ++column) {
-                            const int outsideX = column < 0 ? -column : (column >= op.width ? column - op.width + 1 : 0);
-                            const int outsideY = row < 0 ? -row : (row >= op.height ? row - op.height + 1 : 0);
-                            const int distance = std::max(outsideX, outsideY);
-                            if (distance > radius) {
+                    const double sigma = imageShadow.blurSigma > 0 ? imageShadow.blurSigma : static_cast<double>(radius);
+                    const int spread = std::max(1, static_cast<int>(std::ceil(3.0 * sigma)));
+                    for (int row = -spread; row < op.height + spread; ++row) {
+                        for (int column = -spread; column < op.width + spread; ++column) {
+                            const double coverage = SvgBlurredBoxCoverage(shadowX + column, shadowY + row, shadowX, shadowY, op.width, op.height, sigma);
+                            if (coverage <= 0.002) {
                                 continue;
                             }
                             Color blurred = imageShadow.floodColor;
-                            blurred.alpha = static_cast<std::uint8_t>(imageShadow.floodColor.alpha * (radius - distance + 1) / (radius + 1));
+                            const int alpha = static_cast<int>(imageShadow.floodColor.alpha * coverage + 0.5);
+                            blurred.alpha = static_cast<std::uint8_t>(alpha > 255 ? 255 : (alpha < 0 ? 0 : alpha));
                             Fill(shadowX + column, shadowY + row, 1, 1, blurred, fixed);
                         }
                     }
@@ -6154,7 +6404,7 @@ struct Engine {
                     }
                 }
             }
-            const std::vector<SvgPoint> course = MapSvgPoints(StraightPath(pathData), space);
+            const std::vector<SvgPoint> course = MapSvgPoints(StraightPath(pathData, SvgDeviceScale(space)), space);
             ResolvedStyle textStyle;
             textStyle.color = fill;
             const int fontSize = std::max(1, SvgNumber(node, "font-size", DEFAULT_FONT_SIZE_PX));
@@ -8207,7 +8457,23 @@ struct Engine {
         }
         if (!gridTracks.empty()) {
             const int columns = static_cast<int>(gridTracks.size());
+            std::vector<int> rowTracks;
+            for (const std::string& token : style.gridRows) {
+                int track = 0;
+                CssLengthContext rowContext;
+                rowContext.fontSizePx = std::max(1, style.fontSizePx);
+                rowContext.rootFontSizePx = std::max(1, style.rootFontSizePx);
+                rowContext.viewportWidth = style.viewportWidthPx;
+                rowContext.viewportHeight = style.viewportHeightPx;
+                rowContext.percentBase = style.heightPx > 0 ? style.heightPx : width;
+                if (EvaluateCssPx(token, style.customProperties, rowContext, track) && track > 0) {
+                    rowTracks.push_back(track);
+                } else {
+                    rowTracks.push_back(0);
+                }
+            }
             int column = 0;
+            int rowIndex = 0;
             int rowY = y;
             int rowHeight = 0;
             int columnX = x;
@@ -8228,12 +8494,19 @@ struct Engine {
                 columnX += track;
                 ++column;
                 if (column == columns) {
+                    if (rowIndex < static_cast<int>(rowTracks.size()) && rowTracks[static_cast<std::size_t>(rowIndex)] > rowHeight) {
+                        rowHeight = rowTracks[static_cast<std::size_t>(rowIndex)];
+                    }
                     rowY += rowHeight;
                     rowHeight = 0;
                     column = 0;
+                    ++rowIndex;
                 }
             }
             if (column != 0) {
+                if (rowIndex < static_cast<int>(rowTracks.size()) && rowTracks[static_cast<std::size_t>(rowIndex)] > rowHeight) {
+                    rowHeight = rowTracks[static_cast<std::size_t>(rowIndex)];
+                }
                 rowY += rowHeight;
             }
             return rowY - y;
@@ -8372,10 +8645,17 @@ int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, in
     if (style.display == DisplayKind::None) {
         return 0;
     }
+    PaintScope paintScope(*this, style);
     x += style.translateX;
     y += style.translateY;
     if (style.widthPx > 0) {
         width = std::min(width, style.widthPx);
+    }
+    if (style.maxWidthPx >= 0) {
+        width = std::min(width, style.maxWidthPx);
+    }
+    if (style.minWidthPx >= 0 && width < style.minWidthPx) {
+        width = style.minWidthPx;
     }
     if (node.kind == ElementKind::Frameset) {
         std::vector<Node*> frames;
@@ -8433,33 +8713,55 @@ int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, in
     } else {
         contentHeight = LayoutFlow(node, style, contentX, contentY, contentWidth, fixed, false);
     }
-    if (!style.linearGradient && style.background.alpha != 0) {
-        DrawOp background;
-        background.kind = DrawOp::Kind::Fill;
-        background.x = x;
-        background.y = y;
-        background.width = width;
-        background.height = contentHeight + style.paddingTop + style.paddingBottom + style.border * 2;
-        background.color = style.background;
-        background.fixed = fixed;
-        result->ops.insert(result->ops.begin() + static_cast<std::ptrdiff_t>(backgroundIndex), background);
+    bool paintedBackground = false;
+    if (!style.linearGradient) {
+        Color backgroundColor = style.background;
+        ApplyCssFilters(backgroundColor);
+        if (backgroundColor.alpha != 0) {
+            DrawOp background;
+            background.kind = DrawOp::Kind::Fill;
+            background.x = x;
+            background.y = y;
+            background.width = width;
+            background.height = contentHeight + style.paddingTop + style.paddingBottom + style.border * 2;
+            background.color = backgroundColor;
+            background.fixed = fixed;
+            result->ops.insert(result->ops.begin() + static_cast<std::ptrdiff_t>(backgroundIndex), background);
+            paintedBackground = true;
+        }
     }
     int borderHeight = contentHeight + style.paddingTop + style.paddingBottom + style.border * 2;
     if (style.heightPx > borderHeight) {
         borderHeight = style.heightPx;
-        if (style.background.alpha != 0 && backgroundIndex < result->ops.size()) {
-            result->ops[backgroundIndex].height = borderHeight;
-        }
+    }
+    if (style.minHeightPx > borderHeight) {
+        borderHeight = style.minHeightPx;
+    }
+    if (style.maxHeightPx >= 0 && borderHeight > style.maxHeightPx) {
+        borderHeight = style.maxHeightPx;
+    }
+    if (paintedBackground && backgroundIndex < result->ops.size()) {
+        result->ops[backgroundIndex].height = borderHeight;
     }
     if (style.shadowColor.alpha != 0 && width > 0 && borderHeight > 0) {
         Fill(x + style.shadowDx, y + style.shadowDy, width, borderHeight, style.shadowColor, fixed);
     }
     if (style.blurPx > 0 && style.background.alpha != 0 && width > 0 && borderHeight > 0) {
-        for (int extra = style.blurPx; extra >= 1; --extra) {
-            Color halo = style.background;
-            const int alpha = style.background.alpha * (style.blurPx - extra + 1) / (style.blurPx + 1);
-            halo.alpha = static_cast<std::uint8_t>(alpha < 0 ? 0 : (alpha > 255 ? 255 : alpha));
-            Fill(x - extra, y - extra, width + extra * 2, borderHeight + extra * 2, halo, fixed);
+        // A CSS blur(<length>) is a Gaussian whose standard deviation is that
+        // length, so the halo follows the normal curve rather than a linear ramp.
+        const double sigma = static_cast<double>(style.blurPx);
+        const int spread = std::max(1, static_cast<int>(std::ceil(3.0 * sigma)));
+        for (int row = -spread; row < borderHeight + spread; ++row) {
+            for (int column = -spread; column < width + spread; ++column) {
+                const double coverage = SvgBlurredBoxCoverage(x + column, y + row, x, y, width, borderHeight, sigma);
+                if (coverage <= 0.002) {
+                    continue;
+                }
+                Color halo = style.background;
+                const int alpha = static_cast<int>(style.background.alpha * coverage + 0.5);
+                halo.alpha = static_cast<std::uint8_t>(alpha > 255 ? 255 : (alpha < 0 ? 0 : alpha));
+                Fill(x + column, y + row, 1, 1, halo, fixed);
+            }
         }
     }
     if (style.scaleMilli > 1000 && style.background.alpha != 0 && !style.linearGradient && width > 0 && borderHeight > 0) {
@@ -8522,26 +8824,73 @@ int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, in
             }
         }
     }
-    if (style.linearGradient && borderHeight > 0 && width > 0) {
+    if (style.linearGradient && borderHeight > 0 && width > 0 && style.gradientColors.size() >= 2) {
+        auto sampleGradient = [&](int distance, int span) {
+            std::vector<int> positions(style.gradientColors.size(), -1);
+            const int limit = span > 1 ? span : 1;
+            for (std::size_t index = 0; index < style.gradientColors.size(); ++index) {
+                if (index < style.gradientStopPx.size() && style.gradientStopPx[index] >= 0) {
+                    positions[index] = style.gradientStopPx[index] * 1000 / limit;
+                } else if (index < style.gradientStopMilli.size() && style.gradientStopMilli[index] >= 0) {
+                    positions[index] = style.gradientStopMilli[index];
+                }
+            }
+            if (positions.front() < 0) {
+                positions.front() = 0;
+            }
+            if (positions.back() < 0) {
+                positions.back() = 1000;
+            }
+            for (std::size_t index = 1; index + 1 < positions.size(); ++index) {
+                if (positions[index] >= 0) {
+                    continue;
+                }
+                std::size_t next = index + 1;
+                while (next + 1 < positions.size() && positions[next] < 0) {
+                    ++next;
+                }
+                const int left = positions[index - 1];
+                const int right = positions[next] < 0 ? 1000 : positions[next];
+                const int gap = static_cast<int>(next - (index - 1));
+                positions[index] = left + (right - left) / gap;
+            }
+            int along = limit <= 1 ? 0 : distance * 1000 / limit;
+            if (along < 0) {
+                along = 0;
+            }
+            if (along > 1000) {
+                along = 1000;
+            }
+            std::size_t upper = 1;
+            while (upper + 1 < positions.size() && positions[upper] < along) {
+                ++upper;
+            }
+            const std::size_t lower = upper - 1;
+            const int start = positions[lower];
+            const int end = positions[upper] <= start ? start + 1 : positions[upper];
+            const int weight = std::min(256, (along - start) * 256 / (end - start));
+            const Color& from = style.gradientColors[lower];
+            const Color& to = style.gradientColors[upper];
+            Color color = from;
+            color.red = static_cast<std::uint8_t>((from.red * (256 - weight) + to.red * weight) / 256);
+            color.green = static_cast<std::uint8_t>((from.green * (256 - weight) + to.green * weight) / 256);
+            color.blue = static_cast<std::uint8_t>((from.blue * (256 - weight) + to.blue * weight) / 256);
+            return color;
+        };
         if (style.radialGradient) {
             const int centerX = width / 2;
             const int centerY = borderHeight / 2;
             const int radius = std::max(1, static_cast<int>(std::sqrt(static_cast<double>(centerX * centerX + centerY * centerY))));
+            const int period = style.gradientPeriod > 1 ? style.gradientPeriod : radius;
             for (int row = 0; row < borderHeight; ++row) {
                 for (int column = 0; column < width; ++column) {
                     const int dx = column - centerX;
                     const int dy = row - centerY;
                     int distance = static_cast<int>(std::sqrt(static_cast<double>(dx * dx + dy * dy)));
-                    if (style.gradientPeriod > 1) {
-                        distance = distance % style.gradientPeriod;
+                    if (style.repeatingGradient && style.gradientPeriod > 1) {
+                        distance = distance % period;
                     }
-                    const int limit = style.gradientPeriod > 1 ? style.gradientPeriod : radius;
-                    const int weight = limit <= 1 ? 0 : std::min(256, distance * 256 / limit);
-                    Color color = style.gradientStart;
-                    color.red = static_cast<std::uint8_t>((style.gradientStart.red * (256 - weight) + style.gradientEnd.red * weight) / 256);
-                    color.green = static_cast<std::uint8_t>((style.gradientStart.green * (256 - weight) + style.gradientEnd.green * weight) / 256);
-                    color.blue = static_cast<std::uint8_t>((style.gradientStart.blue * (256 - weight) + style.gradientEnd.blue * weight) / 256);
-                    Fill(x + column, y + row, 1, 1, color, fixed);
+                    Fill(x + column, y + row, 1, 1, sampleGradient(distance, period), fixed);
                 }
             }
         } else {
@@ -8549,12 +8898,7 @@ int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, in
             const int period = style.gradientPeriod > 1 ? style.gradientPeriod : span;
             for (int step = 0; step < span; ++step) {
                 const int local = style.repeatingGradient && style.gradientPeriod > 1 ? step % period : step;
-                const int limit = style.repeatingGradient && style.gradientPeriod > 1 ? period : span;
-                const int weight = limit <= 1 ? 0 : local * 256 / (limit - 1);
-                Color color = style.gradientStart;
-                color.red = static_cast<std::uint8_t>((style.gradientStart.red * (256 - weight) + style.gradientEnd.red * weight) / 256);
-                color.green = static_cast<std::uint8_t>((style.gradientStart.green * (256 - weight) + style.gradientEnd.green * weight) / 256);
-                color.blue = static_cast<std::uint8_t>((style.gradientStart.blue * (256 - weight) + style.gradientEnd.blue * weight) / 256);
+                const Color color = sampleGradient(local, style.repeatingGradient && style.gradientPeriod > 1 ? period : span);
                 if (style.gradientAcross) {
                     Fill(x + step, y, 1, borderHeight, color, fixed);
                 } else {
@@ -8727,6 +9071,24 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
     style.anchorName.clear();
     style.anchorQuery.clear();
     style.anchorLeft = false;
+    style.hasColorFilter = false;
+    style.brightnessMilli = 1000;
+    style.contrastMilli = 1000;
+    style.grayscaleMilli = 0;
+    style.invertMilli = 0;
+    style.saturateMilli = 1000;
+    style.sepiaMilli = 0;
+    style.hueRotateDeg = 0;
+    style.filterOpacityMilli = 1000;
+    style.opacityMilli = 1000;
+    style.minWidthPx = -1;
+    style.maxWidthPx = -1;
+    style.minHeightPx = -1;
+    style.maxHeightPx = -1;
+    style.gradientColors.clear();
+    style.gradientStopMilli.clear();
+    style.gradientStopPx.clear();
+    style.gridRows.clear();
     if (parent.isContainer && percentBase >= 0) {
         style.containerWidthPx = percentBase;
     }
@@ -9092,7 +9454,7 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
             context.containerHeight = target.containerHeightPx;
             if (declaration.name == "font-size") {
                 context.percentBase = context.fontSizePx;
-            } else if (declaration.name == "height") {
+            } else if (declaration.name == "height" || declaration.name == "min-height" || declaration.name == "max-height") {
                 context.percentBase = percentBaseHeight;
             } else {
                 context.percentBase = percentBase;
@@ -9126,6 +9488,14 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
                 target.paddingLeft = std::max(0, pixels);
             } else if (declaration.name == "border" || declaration.name == "border-width") {
                 target.border = std::max(0, pixels);
+            } else if (declaration.name == "min-width") {
+                target.minWidthPx = std::max(0, pixels);
+            } else if (declaration.name == "max-width") {
+                target.maxWidthPx = std::max(0, pixels);
+            } else if (declaration.name == "min-height") {
+                target.minHeightPx = std::max(0, pixels);
+            } else if (declaration.name == "max-height") {
+                target.maxHeightPx = std::max(0, pixels);
             }
         }
         for (const StyleDeclaration& declaration : rule.declarations) {
@@ -9157,9 +9527,12 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
             context.containerWidth = target.containerWidthPx;
             context.containerHeight = target.containerHeightPx;
             context.percentBase = percentBase;
-            if (declaration.name == "grid-template-columns") {
-                target.gridTracks.clear();
-                target.gridColumns.clear();
+            if (declaration.name == "grid-template-columns" || declaration.name == "grid-template-rows") {
+                std::vector<std::string>& tracksOut = declaration.name == "grid-template-rows" ? target.gridRows : target.gridTracks;
+                tracksOut.clear();
+                if (declaration.name == "grid-template-columns") {
+                    target.gridColumns.clear();
+                }
                 const std::string tracks = declaration.value;
                 std::size_t cursor = 0;
                 while (cursor < tracks.size()) {
@@ -9180,7 +9553,7 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
                             count = 1;
                         }
                         for (int copy = 0; copy < count; ++copy) {
-                            target.gridTracks.push_back(inner);
+                            tracksOut.push_back(inner);
                         }
                         cursor = close == std::string::npos ? tracks.size() : close + 1;
                         continue;
@@ -9195,7 +9568,7 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
                         }
                         ++cursor;
                     }
-                    target.gridTracks.push_back(TrimSpaces(tracks.substr(start, cursor - start)));
+                    tracksOut.push_back(TrimSpaces(tracks.substr(start, cursor - start)));
                 }
             }
             if (declaration.name == "transform") {
@@ -9527,33 +9900,139 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
                         }
                     }
                 }
-                if (filter.compare(0, 10, "grayscale(") == 0) {
-                    double amount = std::atof(filter.c_str() + 10);
-                    if (filter.find('%') != std::string::npos) {
+                auto readFilterAmount = [](const std::string& text) {
+                    double amount = std::atof(text.c_str());
+                    if (ToLowerAscii(text).find('%') != std::string::npos) {
                         amount /= 100.0;
                     }
-                    if (amount < 0) {
-                        amount = 0;
+                    return amount;
+                };
+                std::size_t filterCursor = 0;
+                while (filterCursor < filter.size()) {
+                    while (filterCursor < filter.size() && filter[filterCursor] == ' ') {
+                        ++filterCursor;
                     }
-                    if (amount > 1) {
-                        amount = 1;
+                    const std::size_t nameAt = filterCursor;
+                    while (filterCursor < filter.size() && filter[filterCursor] != '(' && filter[filterCursor] != ' ') {
+                        ++filterCursor;
                     }
-                    const int weight = static_cast<int>(amount * 1000);
-                    auto mixGray = [weight](Color color) {
-                        const int gray = (color.red * 2126 + color.green * 7152 + color.blue * 722) / 10000;
-                        color.red = static_cast<std::uint8_t>((color.red * (1000 - weight) + gray * weight) / 1000);
-                        color.green = static_cast<std::uint8_t>((color.green * (1000 - weight) + gray * weight) / 1000);
-                        color.blue = static_cast<std::uint8_t>((color.blue * (1000 - weight) + gray * weight) / 1000);
-                        return color;
-                    };
-                    target.color = mixGray(target.color);
-                    if (target.background.alpha != 0) {
-                        target.background = mixGray(target.background);
+                    if (filterCursor >= filter.size() || filter[filterCursor] != '(') {
+                        break;
                     }
-                    if (target.linearGradient) {
-                        target.gradientStart = mixGray(target.gradientStart);
-                        target.gradientEnd = mixGray(target.gradientEnd);
+                    const std::string function = filter.substr(nameAt, filterCursor - nameAt);
+                    int depth = 1;
+                    const std::size_t innerAt = ++filterCursor;
+                    while (filterCursor < filter.size() && depth > 0) {
+                        if (filter[filterCursor] == '(') {
+                            ++depth;
+                        } else if (filter[filterCursor] == ')') {
+                            --depth;
+                        }
+                        if (depth > 0) {
+                            ++filterCursor;
+                        }
                     }
+                    const std::string inner = filter.substr(innerAt, filterCursor - innerAt);
+                    if (filterCursor < filter.size() && filter[filterCursor] == ')') {
+                        ++filterCursor;
+                    }
+                    if (function == "grayscale") {
+                        double amount = readFilterAmount(inner);
+                        if (amount < 0) {
+                            amount = 0;
+                        }
+                        if (amount > 1) {
+                            amount = 1;
+                        }
+                        target.grayscaleMilli = static_cast<int>(amount * 1000);
+                        target.hasColorFilter = true;
+                    } else if (function == "brightness") {
+                        double amount = readFilterAmount(inner);
+                        if (amount < 0) {
+                            amount = 0;
+                        }
+                        target.brightnessMilli = static_cast<int>(amount * 1000);
+                        target.hasColorFilter = true;
+                    } else if (function == "contrast") {
+                        double amount = readFilterAmount(inner);
+                        if (amount < 0) {
+                            amount = 0;
+                        }
+                        target.contrastMilli = static_cast<int>(amount * 1000);
+                        target.hasColorFilter = true;
+                    } else if (function == "invert") {
+                        double amount = readFilterAmount(inner);
+                        if (amount < 0) {
+                            amount = 0;
+                        }
+                        if (amount > 1) {
+                            amount = 1;
+                        }
+                        target.invertMilli = static_cast<int>(amount * 1000);
+                        target.hasColorFilter = true;
+                    } else if (function == "saturate") {
+                        double amount = readFilterAmount(inner);
+                        if (amount < 0) {
+                            amount = 0;
+                        }
+                        target.saturateMilli = static_cast<int>(amount * 1000);
+                        target.hasColorFilter = true;
+                    } else if (function == "sepia") {
+                        double amount = readFilterAmount(inner);
+                        if (amount < 0) {
+                            amount = 0;
+                        }
+                        if (amount > 1) {
+                            amount = 1;
+                        }
+                        target.sepiaMilli = static_cast<int>(amount * 1000);
+                        target.hasColorFilter = true;
+                    } else if (function == "hue-rotate") {
+                        const std::string angle = ToLowerAscii(inner);
+                        double degrees = std::atof(angle.c_str());
+                        if (angle.find("rad") != std::string::npos) {
+                            degrees = degrees * 180.0 / 3.141592653589793;
+                        } else if (angle.find("turn") != std::string::npos) {
+                            degrees *= 360.0;
+                        } else if (angle.find("grad") != std::string::npos) {
+                            degrees *= 0.9;
+                        }
+                        target.hueRotateDeg = static_cast<int>(std::lround(degrees));
+                        target.hasColorFilter = true;
+                    } else if (function == "opacity") {
+                        double amount = readFilterAmount(inner);
+                        if (amount < 0) {
+                            amount = 0;
+                        }
+                        if (amount > 1) {
+                            amount = 1;
+                        }
+                        target.filterOpacityMilli = static_cast<int>(amount * 1000);
+                        target.hasColorFilter = true;
+                    }
+                }
+            }
+            if (declaration.name == "opacity") {
+                double amount = std::atof(declaration.value.c_str());
+                if (ToLowerAscii(declaration.value).find('%') != std::string::npos) {
+                    amount /= 100.0;
+                }
+                if (amount < 0) {
+                    amount = 0;
+                }
+                if (amount > 1) {
+                    amount = 1;
+                }
+                target.opacityMilli = static_cast<int>(amount * 1000);
+            }
+            if (declaration.name == "visibility") {
+                const std::string visibility = ToLowerAscii(TrimSpaces(declaration.value));
+                if (visibility == "hidden" || visibility == "collapse") {
+                    target.visibilityHidden = true;
+                    target.visibilityVisible = false;
+                } else if (visibility == "visible") {
+                    target.visibilityHidden = false;
+                    target.visibilityVisible = true;
                 }
             }
             if (declaration.name == "background" || declaration.name == "background-image") {
@@ -9578,33 +10057,67 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
                             inner = TrimSpaces(inner.substr(1));
                         }
                     }
-                    const std::size_t comma = inner.find(',');
-                    if (comma != std::string::npos) {
+                    std::vector<std::string> stops;
+                    std::string currentStop;
+                    int depth = 0;
+                    for (char character : inner) {
+                        if (character == '(') {
+                            ++depth;
+                        } else if (character == ')' && depth > 0) {
+                            --depth;
+                        }
+                        if (character == ',' && depth == 0) {
+                            stops.push_back(TrimSpaces(currentStop));
+                            currentStop.clear();
+                        } else {
+                            currentStop.push_back(character);
+                        }
+                    }
+                    if (!TrimSpaces(currentStop).empty()) {
+                        stops.push_back(TrimSpaces(currentStop));
+                    }
+                    target.gradientColors.clear();
+                    target.gradientStopMilli.clear();
+                    target.gradientStopPx.clear();
+                    int period = 0;
+                    for (const std::string& stop : stops) {
+                        std::string colorText = stop;
+                        int milli = -1;
+                        int pixels = -1;
+                        const std::size_t space = stop.find_last_of(' ');
+                        if (space != std::string::npos) {
+                            const std::string position = TrimSpaces(stop.substr(space + 1));
+                            if (!position.empty() && position.back() == '%') {
+                                milli = static_cast<int>(std::atof(position.c_str()) * 10.0);
+                                colorText = TrimSpaces(stop.substr(0, space));
+                            } else {
+                                int resolved = 0;
+                                if (EvaluateCssPx(position, target.customProperties, context, resolved) && resolved >= 0) {
+                                    pixels = resolved;
+                                    period = resolved;
+                                    colorText = TrimSpaces(stop.substr(0, space));
+                                }
+                            }
+                        }
                         std::uint8_t red = 0;
                         std::uint8_t green = 0;
                         std::uint8_t blue = 0;
-                        std::uint8_t redEnd = 0;
-                        std::uint8_t greenEnd = 0;
-                        std::uint8_t blueEnd = 0;
-                        std::string endText = TrimSpaces(inner.substr(comma + 1));
-                        const std::size_t space = endText.find_last_of(' ');
-                        int period = 0;
-                        if (space != std::string::npos && EvaluateCssPx(endText.substr(space + 1), target.customProperties, context, period) && period > 0) {
-                            endText = TrimSpaces(endText.substr(0, space));
-                        } else {
-                            period = 0;
+                        if (!EvaluateCssColor(colorText, target.customProperties, red, green, blue)) {
+                            continue;
                         }
-                        if (EvaluateCssColor(TrimSpaces(inner.substr(0, comma)), target.customProperties, red, green, blue) &&
-                            EvaluateCssColor(endText, target.customProperties, redEnd, greenEnd, blueEnd)) {
-                            target.linearGradient = true;
-                            target.radialGradient = radial;
-                            target.repeatingGradient = repeating || lower.compare(0, 26, "repeating-radial-gradient(") == 0;
-                            target.gradientPeriod = period;
-                            target.gradientAcross = across || radial;
-                            target.gradientStart = Color{red, green, blue, 255};
-                            target.gradientEnd = Color{redEnd, greenEnd, blueEnd, 255};
-                            target.background = target.gradientStart;
-                        }
+                        target.gradientColors.push_back(Color{red, green, blue, 255});
+                        target.gradientStopMilli.push_back(milli);
+                        target.gradientStopPx.push_back(pixels);
+                    }
+                    if (target.gradientColors.size() >= 2) {
+                        target.linearGradient = true;
+                        target.radialGradient = radial;
+                        target.repeatingGradient = repeating || lower.compare(0, 26, "repeating-radial-gradient(") == 0;
+                        target.gradientPeriod = period;
+                        target.gradientAcross = across || radial;
+                        target.gradientStart = target.gradientColors.front();
+                        target.gradientEnd = target.gradientColors.back();
+                        target.background = target.gradientStart;
                     }
                 }
             }
@@ -9873,6 +10386,16 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
         int toHeight = 0;
         if (keyframeLength(fromRule, "height", fromHeight) && keyframeLength(toRule, "height", toHeight)) {
             style.heightPx = fromHeight + static_cast<int>(std::lround((toHeight - fromHeight) * progress));
+        }
+        if (fromRule != nullptr && toRule != nullptr && fromRule->hasBackground && toRule->hasBackground) {
+            auto mixChannel = [&](int from, int to) {
+                return static_cast<std::uint8_t>(std::lround(from + (to - from) * progress));
+            };
+            style.background = Color{
+                mixChannel(fromRule->backgroundRed, toRule->backgroundRed),
+                mixChannel(fromRule->backgroundGreen, toRule->backgroundGreen),
+                mixChannel(fromRule->backgroundBlue, toRule->backgroundBlue),
+                255};
         }
     }
     return style;

@@ -657,7 +657,9 @@ void TestCssFunctions() {
         "animation-timing-function:linear", "animation-timing-function:ease", "animation-timing-function:ease-in",
         "animation-timing-function:ease-out", "animation-timing-function:ease-in-out", "animation-timing-function:step-start",
         "animation-timing-function:step-end", "animation-timing-function:cubic-bezier(0, 0, 1, 1)", "animation-timing-function:steps(4)",
-        "anchor-name:--a", "left:anchor(--a right)"};
+        "anchor-name:--a", "left:anchor(--a right)", "opacity:0.5", "opacity:50%", "visibility:visible", "visibility:hidden",
+        "min-width:10px", "max-width:20px", "min-height:10px", "max-height:20px", "filter:brightness(0.5)", "filter:contrast(2)",
+        "filter:invert(1)", "filter:saturate(2)", "filter:sepia(1)", "filter:hue-rotate(90deg)", "filter:opacity(0.5)"};
     for (const char* declaration : validValues) {
         RoboWeb::Diagnostics validDiagnostics;
         RoboWeb::Document valid = Parse(std::string("<!DOCTYPE html><div style='") + declaration + "'></div>", validDiagnostics);
@@ -688,7 +690,7 @@ void TestCssFunctions() {
         "font-weight:heavy", "text-align:middle", "text-transform:small-caps", "white-space:collapse",
         "text-decoration:blink", "container-type:block", "color:not-a-color", "background:sparkle",
         "filter:smear(1)", "transform:spin(1)", "grid-template-columns:sideways", "animation-timing-function:bounce",
-        "animation-duration:later", "left:beside", "anchor-name:a"};
+        "animation-duration:later", "left:beside", "anchor-name:a", "opacity:clear", "visibility:gone", "min-width:wide"};
     for (const char* declaration : invalidValues) {
         RoboWeb::Diagnostics invalidDiagnostics;
         RoboWeb::Document invalid = Parse(std::string("<!DOCTYPE html><div style='") + declaration + "'></div>", invalidDiagnostics);
@@ -764,6 +766,147 @@ void TestCssFunctions() {
     if (turnedBox != nullptr) {
         EXPECT(RoboWeb::PixelRed(turnedFrame, turnedBox->x + 10, turnedBox->y - 2) == 255);
     }
+    struct PaintedDiv {
+        RoboWeb::Framebuffer frame;
+        int x = 0;
+        int y = 0;
+        bool ok = false;
+    };
+    auto paintDiv = [&](const std::string& css) {
+        PaintedDiv painted;
+        RoboWeb::Document page = Parse("<!DOCTYPE html><div style='width:16px;height:10px;background:#ff0000;" + css + "'></div>", diagnostics);
+        RoboWeb::LayoutResult layout = RoboWeb::LayoutDocument(page, 240, 120);
+        const RoboWeb::ElementBox* box = RoboWeb::FindBox(layout, "div");
+        painted.ok = box != nullptr;
+        if (box != nullptr) {
+            painted.x = box->x;
+            painted.y = box->y;
+        }
+        painted.frame = RoboWeb::RenderDocument(layout, 0);
+        return painted;
+    };
+    PaintedDiv bright = paintDiv("filter:brightness(0)");
+    EXPECT(bright.ok);
+    if (bright.ok) {
+        EXPECT(RoboWeb::PixelRed(bright.frame, bright.x + 2, bright.y + 2) == 0);
+    }
+    PaintedDiv contrast = paintDiv("filter:contrast(0)");
+    EXPECT(contrast.ok);
+    if (contrast.ok) {
+        const int gray = RoboWeb::PixelRed(contrast.frame, contrast.x + 2, contrast.y + 2);
+        EXPECT(gray > 110);
+        EXPECT(gray < 150);
+        EXPECT(gray == RoboWeb::PixelGreen(contrast.frame, contrast.x + 2, contrast.y + 2));
+    }
+    PaintedDiv inverted = paintDiv("filter:invert(1)");
+    EXPECT(inverted.ok);
+    if (inverted.ok) {
+        EXPECT(RoboWeb::PixelRed(inverted.frame, inverted.x + 2, inverted.y + 2) == 0);
+        EXPECT(RoboWeb::PixelGreen(inverted.frame, inverted.x + 2, inverted.y + 2) == 255);
+        EXPECT(RoboWeb::PixelBlue(inverted.frame, inverted.x + 2, inverted.y + 2) == 255);
+    }
+    PaintedDiv sepia = paintDiv("filter:sepia(1)");
+    EXPECT(sepia.ok);
+    if (sepia.ok) {
+        const int sepiaRed = RoboWeb::PixelRed(sepia.frame, sepia.x + 2, sepia.y + 2);
+        const int sepiaGreen = RoboWeb::PixelGreen(sepia.frame, sepia.x + 2, sepia.y + 2);
+        const int sepiaBlue = RoboWeb::PixelBlue(sepia.frame, sepia.x + 2, sepia.y + 2);
+        EXPECT(sepiaRed > 90);
+        EXPECT(sepiaRed < 120);
+        EXPECT(sepiaGreen < sepiaRed);
+        EXPECT(sepiaBlue < sepiaGreen);
+    }
+    PaintedDiv hue = paintDiv("filter:hue-rotate(180deg)");
+    EXPECT(hue.ok);
+    if (hue.ok) {
+        EXPECT(RoboWeb::PixelRed(hue.frame, hue.x + 2, hue.y + 2) < 30);
+        EXPECT(RoboWeb::PixelGreen(hue.frame, hue.x + 2, hue.y + 2) > 80);
+        EXPECT(RoboWeb::PixelBlue(hue.frame, hue.x + 2, hue.y + 2) > 80);
+    }
+    PaintedDiv flat = paintDiv("filter:saturate(0)");
+    EXPECT(flat.ok);
+    if (flat.ok) {
+        const int flatRed = RoboWeb::PixelRed(flat.frame, flat.x + 2, flat.y + 2);
+        EXPECT(flatRed == RoboWeb::PixelGreen(flat.frame, flat.x + 2, flat.y + 2));
+        EXPECT(flatRed == RoboWeb::PixelBlue(flat.frame, flat.x + 2, flat.y + 2));
+        EXPECT(flatRed < 80);
+    }
+    PaintedDiv faded = paintDiv("opacity:0.5");
+    EXPECT(faded.ok);
+    if (faded.ok) {
+        EXPECT(RoboWeb::PixelRed(faded.frame, faded.x + 2, faded.y + 2) > 240);
+        const int fadedGreen = RoboWeb::PixelGreen(faded.frame, faded.x + 2, faded.y + 2);
+        EXPECT(fadedGreen > 100);
+        EXPECT(fadedGreen < 160);
+    }
+    RoboWeb::Document hiddenBox = Parse(
+        "<!DOCTYPE html><div style='width:16px;height:10px;background:#ff0000;visibility:hidden'></div>", diagnostics);
+    RoboWeb::LayoutResult hiddenLayout = RoboWeb::LayoutDocument(hiddenBox, 240, 120);
+    const RoboWeb::ElementBox* hiddenPaint = RoboWeb::FindBox(hiddenLayout, "div");
+    EXPECT(hiddenPaint != nullptr);
+    if (hiddenPaint != nullptr) {
+        EXPECT(hiddenPaint->height == 10);
+        RoboWeb::Framebuffer hiddenFrame = RoboWeb::RenderDocument(hiddenLayout, 0);
+        EXPECT(RoboWeb::PixelRed(hiddenFrame, hiddenPaint->x + 2, hiddenPaint->y + 2) == 255);
+        EXPECT(RoboWeb::PixelGreen(hiddenFrame, hiddenPaint->x + 2, hiddenPaint->y + 2) == 255);
+    }
+    RoboWeb::Document minimum = Parse(
+        "<!DOCTYPE html><div style='width:40px'><div id='grown' style='min-width:80px;height:8px'></div></div>", diagnostics);
+    int grownWidth = -1;
+    for (const RoboWeb::ElementBox& box : RoboWeb::LayoutDocument(minimum, 240, 120).boxes) {
+        if (box.node != nullptr && RoboWeb::AttributeValue(*box.node, "id") == "grown") {
+            grownWidth = box.width;
+        }
+    }
+    EXPECT(grownWidth == 80);
+    RoboWeb::Document capped = Parse("<!DOCTYPE html><div style='height:40px;max-height:15px'></div>", diagnostics);
+    const RoboWeb::ElementBox* cappedBox = RoboWeb::FindBox(RoboWeb::LayoutDocument(capped, 240, 120), "div");
+    EXPECT(cappedBox != nullptr);
+    if (cappedBox != nullptr) {
+        EXPECT(cappedBox->height == 15);
+    }
+    RoboWeb::Document rowGrid = Parse(
+        "<!DOCTYPE html><div style='display:grid;width:20px;grid-template-columns:20px;grid-template-rows:30px 12px'><div id='top' style='height:8px'></div><div id='bottom' style='height:8px'></div></div>",
+        diagnostics);
+    int topY = -1;
+    int bottomY = -1;
+    for (const RoboWeb::ElementBox& box : RoboWeb::LayoutDocument(rowGrid, 240, 120).boxes) {
+        if (box.node == nullptr) {
+            continue;
+        }
+        if (RoboWeb::AttributeValue(*box.node, "id") == "top") {
+            topY = box.y;
+        }
+        if (RoboWeb::AttributeValue(*box.node, "id") == "bottom") {
+            bottomY = box.y;
+        }
+    }
+    EXPECT(bottomY - topY == 30);
+    RoboWeb::Document threeStops = Parse(
+        "<!DOCTYPE html><div style='width:30px;height:8px;background:linear-gradient(to right, #ff0000, #00ff00, #0000ff)'></div>", diagnostics);
+    RoboWeb::LayoutResult threeLayout = RoboWeb::LayoutDocument(threeStops, 240, 120);
+    RoboWeb::Framebuffer threeFrame = RoboWeb::RenderDocument(threeLayout, 0);
+    const RoboWeb::ElementBox* threeBox = RoboWeb::FindBox(threeLayout, "div");
+    EXPECT(threeBox != nullptr);
+    if (threeBox != nullptr) {
+        EXPECT(RoboWeb::PixelRed(threeFrame, threeBox->x, threeBox->y + 2) == 255);
+        EXPECT(RoboWeb::PixelGreen(threeFrame, threeBox->x + 15, threeBox->y + 2) > 200);
+        EXPECT(RoboWeb::PixelBlue(threeFrame, threeBox->x + 28, threeBox->y + 2) > 200);
+    }
+    RoboWeb::SetSvgAnimationTime(1);
+    RoboWeb::Document colorGrow = Parse(
+        "<!DOCTYPE html><style>@keyframes ink { from { background: #ff0000 } to { background: #0000ff } }</style><div style='animation-name:ink;animation-duration:2s;animation-timing-function:linear;width:12px;height:8px'></div>",
+        diagnostics);
+    RoboWeb::LayoutResult colorLayout = RoboWeb::LayoutDocument(colorGrow, 240, 120);
+    RoboWeb::Framebuffer colorFrame = RoboWeb::RenderDocument(colorLayout, 0);
+    const RoboWeb::ElementBox* colorBox = RoboWeb::FindBox(colorLayout, "div");
+    EXPECT(colorBox != nullptr);
+    if (colorBox != nullptr) {
+        EXPECT(RoboWeb::PixelRed(colorFrame, colorBox->x + 2, colorBox->y + 2) > 100);
+        EXPECT(RoboWeb::PixelBlue(colorFrame, colorBox->x + 2, colorBox->y + 2) > 100);
+        EXPECT(RoboWeb::PixelGreen(colorFrame, colorBox->x + 2, colorBox->y + 2) < 20);
+    }
+    RoboWeb::SetSvgAnimationTime(0);
 }
 
 void TestScriptAndPresentation() {

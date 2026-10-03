@@ -1836,7 +1836,8 @@ bool CssValueOk(const std::string& name, const std::string& value) {
     if (name == "width" || name == "height" || name == "margin-top" || name == "margin-right" || name == "margin-bottom" ||
         name == "margin-left" || name == "padding-top" || name == "padding-right" || name == "padding-bottom" || name == "padding-left" ||
         name == "font-size" || name == "border" || name == "border-width" || name == "letter-spacing" || name == "text-underline-offset" ||
-        name == "left" || name == "top" || name == "right" || name == "bottom") {
+        name == "left" || name == "top" || name == "right" || name == "bottom" || name == "min-width" || name == "max-width" ||
+        name == "min-height" || name == "max-height") {
         if (ToLowerAscii(text).compare(0, 7, "anchor(") == 0) {
             return text.back() == ')';
         }
@@ -1890,6 +1891,27 @@ bool CssValueOk(const std::string& name, const std::string& value) {
     if (name == "container-type") {
         return KeywordValue(text, "normal size inline-size");
     }
+    if (name == "visibility") {
+        return KeywordValue(text, "visible hidden collapse");
+    }
+    if (name == "opacity") {
+        const std::string lower = ToLowerAscii(text);
+        if (lower.find("var(") != std::string::npos || lower == "0" || lower == "1") {
+            return true;
+        }
+        if (!lower.empty() && lower.back() == '%') {
+            return IsCssLength(lower, false);
+        }
+        int dots = 0;
+        for (char character : lower) {
+            if (character == '.') {
+                ++dots;
+            } else if (character < '0' || character > '9') {
+                return false;
+            }
+        }
+        return !lower.empty() && dots <= 1;
+    }
     if (name == "anchor-name") {
         const std::string trimmed = Trim(text);
         return trimmed.size() >= 2 && trimmed[0] == '-' && trimmed[1] == '-';
@@ -1937,6 +1959,7 @@ bool KnownCssProperty(const std::string& name) {
         "padding padding-top padding-right padding-bottom padding-left text-align text-underline-offset text-decoration-color "
         "text-decoration text-decoration-line white-space border border-width transform filter grid-template-columns grid-template-rows "
         "container-type position left top right bottom anchor-name animation-timing-function transition-timing-function animation "
+        "min-width max-width min-height max-height opacity visibility "
         "transition animation-duration animation-name fill stroke stroke-width stroke-linecap stroke-linejoin stroke-miterlimit "
         "fill-opacity stroke-opacity opacity stop-color flood-color flood-opacity clip-path mask marker marker-start marker-end "
         "marker-mid text-anchor dominant-baseline";

@@ -34,9 +34,16 @@ constexpr int HR_THICKNESS_PX = 2;
 constexpr unsigned COLOR_CHANNELS = 4;
 constexpr int SVG_CLIP_CIRCLE_STEPS = 180;
 constexpr int SVG_CLIP_CIRCLE_MAX_STEPS = 720;
+// Antialiasing samples each pixel row on this many sub-scanlines; horizontal
+// coverage is analytic, so this is the vertical sample rate of the rasterizer.
+constexpr int SVG_AA_SUBROWS = 4;
 constexpr int SVG_STROKE_ROUND_MIN_STEPS = 12;
 constexpr int SVG_STROKE_ROUND_MAX_STEPS = 64;
 constexpr double SVG_STROKE_FLAT_EPSILON = 0.000001;
+// Adaptive curve flattening: one segment per this many on-screen pixels of
+// control polygon, never below the historic base rate and never above the cap.
+constexpr double SVG_FLATTEN_UNITS_PER_STEP = 3.0;
+constexpr int SVG_FLATTEN_MAX_STEPS = 192;
 
 constexpr unsigned TRAIT_VOID = 1u << 0;
 constexpr unsigned TRAIT_OBSOLETE = 1u << 1;

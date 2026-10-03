@@ -161,6 +161,26 @@ struct ResolvedStyle {
     std::string anchorName;
     std::string anchorQuery;
     bool anchorLeft = false;
+    bool hasColorFilter = false;
+    int brightnessMilli = 1000;
+    int contrastMilli = 1000;
+    int grayscaleMilli = 0;
+    int invertMilli = 0;
+    int saturateMilli = 1000;
+    int sepiaMilli = 0;
+    int hueRotateDeg = 0;
+    int filterOpacityMilli = 1000;
+    int opacityMilli = 1000;
+    bool visibilityHidden = false;
+    bool visibilityVisible = false;
+    int minWidthPx = -1;
+    int maxWidthPx = -1;
+    int minHeightPx = -1;
+    int maxHeightPx = -1;
+    std::vector<Color> gradientColors;
+    std::vector<int> gradientStopMilli;
+    std::vector<int> gradientStopPx;
+    std::vector<std::string> gridRows;
 };
 
 int LineHeightPx(int fontSizePx);
