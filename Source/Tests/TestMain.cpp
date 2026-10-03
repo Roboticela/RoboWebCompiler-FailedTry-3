@@ -1095,20 +1095,17 @@ void TestCssProperties() {
     }
 
     // pointer-events: none takes the element out of hit testing, so a click
-    // lands on the button underneath it rather than on the overlay. The overlay
-    // is a block that covers the button, so the button is only reachable when
-    // the overlay is skipped.
+    // lands on the control underneath it rather than on the overlay. Both
+    // boxes are absolutely positioned over the same pixels, so the control is
+    // only reachable when the overlay is skipped.
     {
-        // The button is absolutely positioned under the overlay so the two boxes
-        // cover the same pixels; the click can only reach the button when the
-        // overlay is skipped.
-        RoboWeb::Document page = Parse(
+        const std::string pointerMarkup =
             "<!DOCTYPE html><div id='over' style='position:absolute;left:0px;top:0px;width:80px;height:40px;pointer-events:none'></div>"
-            "<button id='under' style='position:absolute;left:0px;top:0px;width:80px;height:40px'></button>",
-            diagnostics);
+            "<input id='under' style='position:absolute;left:0px;top:0px;width:80px;height:40px'>";
+        RoboWeb::Document page = Parse(pointerMarkup, diagnostics);
         RoboWeb::LayoutResult layout = RoboWeb::LayoutDocument(page, 240, 120);
         const RoboWeb::ElementBox* overlay = nullptr;
-        const RoboWeb::ElementBox* button = nullptr;
+        const RoboWeb::ElementBox* control = nullptr;
         for (const RoboWeb::ElementBox& box : layout.boxes) {
             if (box.node == nullptr) {
                 continue;
@@ -1117,17 +1114,47 @@ void TestCssProperties() {
             if (id == "over") {
                 overlay = &box;
             } else if (id == "under") {
-                button = &box;
+                control = &box;
             }
         }
         EXPECT(overlay != nullptr);
-        EXPECT(button != nullptr);
-        if (overlay != nullptr && button != nullptr) {
-            // The two boxes really do overlap, or the assertion below proves nothing.
-            EXPECT(button->y < overlay->y + overlay->height && button->y + button->height > overlay->y);
-            RoboWeb::DispatchClick(page, layout, overlay->x + 4, overlay->y + 4);
+        EXPECT(control != nullptr);
+        if (overlay != nullptr && control != nullptr) {
+            // The two boxes really do overlap, or the assertions below prove nothing.
+            EXPECT(control->x < overlay->x + overlay->width && control->x + control->width > overlay->x);
+            EXPECT(control->y < overlay->y + overlay->height && control->y + control->height > overlay->y);
+            const int clickX = overlay->x + 4;
+            const int clickY = overlay->y + 4;
+            RoboWeb::DispatchClick(page, layout, clickX, clickY);
             EXPECT(page.focus != nullptr);
             EXPECT(page.focus != nullptr && RoboWeb::AttributeValue(*page.focus, "id") == "under");
+            // A cursor shape over the same pixels with the overlay still skipping:
+            // with the overlay skipping, plus the control's own hand cursor wins.
+            EXPECT(RoboWeb::PointerAt(layout, clickX, clickY, 0) == RoboWeb::PointerShape::Text);
+            // The same markup without pointer-events: none still hits the overlay,
+            // so the test above is really measuring the skip.
+            std::string coveredMarkup = pointerMarkup;
+            const std::size_t skip = coveredMarkup.find("pointer-events:none");
+            EXPECT(skip != std::string::npos);
+            if (skip != std::string::npos) {
+                coveredMarkup.replace(skip, std::string("pointer-events:none").size(), "pointer-events:auto");
+                RoboWeb::Document covered = Parse(coveredMarkup, diagnostics);
+                RoboWeb::LayoutResult coveredLayout = RoboWeb::LayoutDocument(covered, 240, 120);
+                const RoboWeb::ElementBox* coveredControl = nullptr;
+                for (const RoboWeb::ElementBox& box : coveredLayout.boxes) {
+                    if (box.node != nullptr && RoboWeb::AttributeValue(*box.node, "id") == "under") {
+                        coveredControl = &box;
+                    }
+                }
+                EXPECT(coveredControl != nullptr);
+                if (coveredControl != nullptr) {
+                    RoboWeb::DispatchClick(covered, coveredLayout, coveredControl->x + 4, coveredControl->y + 4);
+                    EXPECT(covered.focus == nullptr || RoboWeb::AttributeValue(*covered.focus, "id") != "under");
+                    // The overlay keeps the default cursor, so the input's text
+                    // cursor is really hidden by the covering box.
+                    EXPECT(RoboWeb::PointerAt(coveredLayout, coveredControl->x + 4, coveredControl->y + 4, 0) == RoboWeb::PointerShape::Arrow);
+                }
+            }
         }
     }
     // cursor: pointer reports the hand shape over the element's own box.
