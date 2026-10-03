@@ -221,6 +221,9 @@ void Refresh(App& app, FrameCause cause, Node* previousHover) {
             KillTimer(app.window, 2);
         }
     }
+    if (app.present.scrollDelta != 0) {
+        ScrollWindowEx(app.window, 0, -app.present.scrollDelta, nullptr, nullptr, nullptr, nullptr, 0);
+    }
     if (app.present.paint) {
         RECT dirty;
         if (app.present.full) {

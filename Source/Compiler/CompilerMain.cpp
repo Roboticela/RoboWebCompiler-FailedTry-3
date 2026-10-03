@@ -36,8 +36,10 @@ std::string Argument(int argc, char** argv, const std::string& name) {
 }
 
 const char* kRuntimeSources[] = {
+    "Diagnostics/Diagnostics.cpp",
     "Dom/Document.cpp",
     "Catalog/ElementCatalog.cpp",
+    "Catalog/SvgCatalog.cpp",
     "Layout/LayoutEngine.cpp",
     "Render/BitmapFont.cpp",
     "Render/ImageDecoder.cpp",
@@ -45,6 +47,7 @@ const char* kRuntimeSources[] = {
     "Render/StyleSheet.cpp",
     "Runtime/Interaction.cpp",
     "Runtime/MiniScript.cpp",
+    "Runtime/FramePlan.cpp",
     "Runtime/HostLoop.cpp",
     "Runtime/Win32Host.cpp",
 };

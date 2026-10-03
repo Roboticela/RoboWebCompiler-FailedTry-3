@@ -66,12 +66,22 @@ void ClearRect(Framebuffer& framebuffer, const PaintClip& dirty) {
     }
 }
 
+bool MayHit(int x, int y, int width, int height, const PaintClip* dirty) {
+    if (dirty == nullptr) {
+        return true;
+    }
+    return width > 0 && height > 0 && x < dirty->x + dirty->width && x + width > dirty->x && y < dirty->y + dirty->height && y + height > dirty->y;
+}
+
 void PaintOps(Framebuffer& framebuffer, const LayoutResult& layout, int scrollY, bool settled, const PaintClip* dirty) {
     for (const DrawOp& op : layout.ops) {
         const int originY = op.fixed ? 0 : scrollY;
         const int x = op.x;
         const int y = op.y - originY;
         if (op.kind == DrawOp::Kind::Fill) {
+            if (!MayHit(x, y, op.width, op.height, dirty)) {
+                continue;
+            }
             for (int row = 0; row < op.height; ++row) {
                 for (int column = 0; column < op.width; ++column) {
                     if (InsideClip(op, originY, x + column, y + row, framebuffer.width, framebuffer.height, dirty)) {
@@ -80,6 +90,9 @@ void PaintOps(Framebuffer& framebuffer, const LayoutResult& layout, int scrollY,
                 }
             }
         } else if (op.kind == DrawOp::Kind::Stroke) {
+            if (!MayHit(x, y, op.width, op.height, dirty)) {
+                continue;
+            }
             for (int column = 0; column < op.width; ++column) {
                 if (InsideClip(op, originY, x + column, y, framebuffer.width, framebuffer.height, dirty)) {
                     Blend(framebuffer, x + column, y, op.color);
@@ -97,6 +110,11 @@ void PaintOps(Framebuffer& framebuffer, const LayoutResult& layout, int scrollY,
                 }
             }
         } else if (op.kind == DrawOp::Kind::Text) {
+            const int line = LineHeightPx(op.fontSizePx);
+            const int textReach = line + (op.underlineOffsetPx < 0 ? -op.underlineOffsetPx : op.underlineOffsetPx) + 2;
+            if (dirty != nullptr && (y >= dirty->y + dirty->height || y + textReach <= dirty->y || x >= dirty->x + dirty->width)) {
+                continue;
+            }
             int clipLeft = 0;
             int clipTop = 0;
             int clipRight = framebuffer.width;
@@ -116,7 +134,6 @@ void PaintOps(Framebuffer& framebuffer, const LayoutResult& layout, int scrollY,
             DrawTextPx(framebuffer.pixels.data(), framebuffer.width, framebuffer.height, x, y, op.text, op.fontSizePx, op.color,
                 op.bold, op.italic, clipLeft, clipTop, clipRight, clipBottom, op.fontFamily, op.letterSpacingPx, op.wordSpacingPx);
             const int textWidth = MeasureTextPx(op.text, op.fontSizePx, op.bold, op.italic, op.fontFamily, op.letterSpacingPx, op.wordSpacingPx);
-            const int line = LineHeightPx(op.fontSizePx);
             const Color lineColor = op.hasDecorationColor ? op.decorationColor : op.color;
             if (op.underline) {
                 for (int column = 0; column < textWidth; ++column) {
@@ -134,6 +151,9 @@ void PaintOps(Framebuffer& framebuffer, const LayoutResult& layout, int scrollY,
             }
         } else if (op.kind == DrawOp::Kind::Image) {
             if (op.deferImage && !settled) {
+                continue;
+            }
+            if (!MayHit(x, y, op.width, op.height, dirty)) {
                 continue;
             }
             DecodedImage image = DecodeImageFile(op.imagePath);

@@ -6,7 +6,7 @@ C++ also repaints, resizes, and handles hover. Those events are required. The ge
 - A resize runs arithmetic or `LayoutDocument` only because the viewport changed, then paints the new frame.
 - A hover that changes color sets the hover node and repaints that control's rectangle from the cached draw records. It does not call `LayoutDocument`, measure text, or raster the whole window.
 - A caret blink toggles the cached caret record and repaints that caret rectangle. It does not call `LayoutDocument`.
-- A scroll repaints from the cached layout. It does not call `LayoutDocument`.
+- A scroll moves the cached frame and paints only the newly exposed band. It does not call `LayoutDocument`. A fixed element keeps a full-frame paint.
 - A click, a text edit, a marquee tick, or an animation changes live content, so a new layout is allowed.
 - Unchanged regions are not walked, restyled, or remeasured.
 

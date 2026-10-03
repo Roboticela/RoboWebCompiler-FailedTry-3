@@ -21,12 +21,14 @@ struct FrameUpdate {
     int y = 0;
     int width = 0;
     int height = 0;
+    int scrollDelta = 0;
 };
 
 struct ViewCache {
     int width = -1;
     int height = -1;
     int contentStamp = 0;
+    int scrollY = 0;
     bool ready = false;
     LayoutResult layout;
     Framebuffer frame;

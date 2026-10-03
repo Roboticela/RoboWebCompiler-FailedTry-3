@@ -5020,11 +5020,13 @@ void TestFastFrame() {
     RoboWeb::AdvanceFrame(tallCache, tall, 200, 40, RoboWeb::FrameCause::Viewport, nullptr, true);
     const int layoutsBeforeScroll = RoboWeb::FrameStatistics().layoutCount;
     const int fullBeforeScroll = RoboWeb::FrameStatistics().fullRasterCount;
+    const int dirtyBeforeScroll = RoboWeb::FrameStatistics().dirtyRasterCount;
     tall.scrollY = 30;
     RoboWeb::FrameUpdate scrolled = RoboWeb::AdvanceFrame(tallCache, tall, 200, 40, RoboWeb::FrameCause::Scroll, nullptr, true);
     EXPECT(RoboWeb::FrameStatistics().layoutCount == layoutsBeforeScroll);
-    EXPECT(RoboWeb::FrameStatistics().fullRasterCount == fullBeforeScroll + 1);
-    EXPECT(scrolled.full);
+    EXPECT(RoboWeb::FrameStatistics().fullRasterCount == fullBeforeScroll);
+    EXPECT(RoboWeb::FrameStatistics().dirtyRasterCount == dirtyBeforeScroll + 1);
+    EXPECT(!scrolled.full && scrolled.scrollDelta == 30);
     EXPECT(SameFrame(tallCache.frame, RoboWeb::RenderDocument(tallCache.layout, tall.scrollY, true)));
     RoboWeb::Diagnostics slow;
     RoboWeb::Document interpreted = Parse("<!DOCTYPE html><script>eval(\"no\")</script><p>Hi</p>", slow);

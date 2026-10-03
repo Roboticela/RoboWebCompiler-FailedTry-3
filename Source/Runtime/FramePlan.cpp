@@ -3,6 +3,7 @@
 #include "Core/Utf8.h"
 
 #include <algorithm>
+#include <cstring>
 #include <vector>
 
 namespace RoboWeb {
@@ -200,6 +201,37 @@ FrameUpdate FullUpdate(const ViewCache& cache) {
     return update;
 }
 
+bool HasFixedPaint(const LayoutResult& layout) {
+    for (const DrawOp& op : layout.ops) {
+        if (!op.fixed) {
+            continue;
+        }
+        const bool pageBackground = op.kind == DrawOp::Kind::Fill && op.x == 0 && op.y == 0 && op.width == layout.viewportWidth &&
+                                    op.height == layout.viewportHeight;
+        if (!pageBackground) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void ShiftFrame(Framebuffer& frame, int delta) {
+    if (delta == 0 || frame.width <= 0 || frame.height <= 0) {
+        return;
+    }
+    const int distance = delta < 0 ? -delta : delta;
+    if (distance >= frame.height) {
+        return;
+    }
+    const std::size_t stride = static_cast<std::size_t>(frame.width * 4);
+    unsigned char* pixels = frame.pixels.data();
+    if (delta > 0) {
+        std::memmove(pixels, pixels + static_cast<std::size_t>(delta) * stride, static_cast<std::size_t>(frame.height - delta) * stride);
+    } else {
+        std::memmove(pixels + static_cast<std::size_t>(distance) * stride, pixels, static_cast<std::size_t>(frame.height - distance) * stride);
+    }
+}
+
 }  // namespace
 
 FrameStats& FrameStatistics() {
@@ -221,9 +253,11 @@ int ContentStamp(const Document& document) {
 
 FrameUpdate AdvanceFrame(
     ViewCache& cache, Document& document, int width, int height, FrameCause cause, Node* previousHover, bool settled) {
-    const int stamp = ContentStamp(document);
     const bool viewportChanged = !cache.ready || cache.width != width || cache.height != height;
-    const bool contentChanged = !cache.ready || cache.contentStamp != stamp;
+    const bool cheapCause = cache.ready && !viewportChanged &&
+                            (cause == FrameCause::Hover || cause == FrameCause::Scroll || cause == FrameCause::Caret);
+    const int stamp = cheapCause ? cache.contentStamp : ContentStamp(document);
+    const bool contentChanged = !cheapCause && (!cache.ready || cache.contentStamp != stamp);
     const bool hoverLayout = cause == FrameCause::Hover && (AnchorNeedsLayout(previousHover) || AnchorNeedsLayout(document.hover));
     const bool layout = cause == FrameCause::Viewport || cause == FrameCause::Content || viewportChanged || contentChanged || hoverLayout;
     if (layout) {
@@ -233,14 +267,36 @@ FrameUpdate AdvanceFrame(
         cache.width = cache.layout.viewportWidth;
         cache.height = cache.layout.viewportHeight;
         cache.contentStamp = ContentStamp(document);
+        cache.scrollY = document.scrollY;
         ++gStats.layoutCount;
         ++gStats.fullRasterCount;
         return FullUpdate(cache);
     }
     if (cause == FrameCause::Scroll) {
-        cache.frame = RenderDocument(cache.layout, document.scrollY, settled);
-        ++gStats.fullRasterCount;
-        return FullUpdate(cache);
+        const int delta = document.scrollY - cache.scrollY;
+        const bool shift = delta != 0 && !HasFixedPaint(cache.layout) && cache.frame.height > 0 && delta > -cache.frame.height &&
+                           delta < cache.frame.height;
+        if (!shift) {
+            if (delta != 0) {
+                cache.frame = RenderDocument(cache.layout, document.scrollY, settled);
+                ++gStats.fullRasterCount;
+            }
+            cache.scrollY = document.scrollY;
+            return delta == 0 ? FrameUpdate{} : FullUpdate(cache);
+        }
+        ShiftFrame(cache.frame, delta);
+        const int bandHeight = delta < 0 ? -delta : delta;
+        const int bandY = delta > 0 ? cache.frame.height - delta : 0;
+        RenderDirty(cache.layout, document.scrollY, cache.frame, 0, bandY, cache.frame.width, bandHeight, settled);
+        cache.scrollY = document.scrollY;
+        ++gStats.dirtyRasterCount;
+        FrameUpdate update;
+        update.paint = true;
+        update.y = bandY;
+        update.width = cache.frame.width;
+        update.height = bandHeight;
+        update.scrollDelta = delta;
+        return update;
     }
     if (cause == FrameCause::Hover) {
         const bool previousChrome = previousHover != nullptr && ChromeNode(*previousHover);
