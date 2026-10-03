@@ -28,6 +28,7 @@ struct ViewCache {
     int width = -1;
     int height = -1;
     int contentStamp = 0;
+    int geometryStamp = 0;
     int scrollY = 0;
     bool ready = false;
     LayoutResult layout;

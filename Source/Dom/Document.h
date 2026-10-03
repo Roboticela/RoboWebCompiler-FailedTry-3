@@ -152,6 +152,7 @@ struct Document {
     int scrollY = 0;
     bool stylesLoaded = false;
     bool scriptsRan = false;
+    void (*compiledScript)(Document&) = nullptr;
     std::vector<ElementStyle> styleRules;
 };
 

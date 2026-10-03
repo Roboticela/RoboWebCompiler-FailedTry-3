@@ -7,7 +7,9 @@ C++ also repaints, resizes, and handles hover. Those events are required. The ge
 - A hover that changes color sets the hover node and repaints that control's rectangle from the cached draw records. It does not call `LayoutDocument`, measure text, or raster the whole window.
 - A caret blink toggles the cached caret record and repaints that caret rectangle. It does not call `LayoutDocument`.
 - A scroll moves the cached frame and paints only the newly exposed band. It does not call `LayoutDocument`. A fixed element keeps a full-frame paint.
-- A click, a text edit, a marquee tick, or an animation changes live content, so a new layout is allowed.
+- A text edit inside a field, a checkbox, or a radio button rewrites that control's cached records and repaints its rectangle. It does not call `LayoutDocument`.
+- A click that opens, hides, or restyles content, a marquee tick, or an animation changes geometry, so a new layout is allowed.
+- The first frame and a resize call `LayoutDocument` because block widths follow the window. Later events reuse that result until the geometry changes.
 - Unchanged regions are not walked, restyled, or remeasured.
 
 `AdvanceFrame` in `Source/Runtime/FramePlan.h` is the only window refresh path. `LayoutDocument` remains the reference engine for tests and for a viewport or content change. A color hover, a caret blink, and a scroll must increment `dirtyRasterCount` or `fullRasterCount` without incrementing `layoutCount`.

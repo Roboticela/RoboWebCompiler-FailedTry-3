@@ -406,13 +406,13 @@ void TestStaticGeneration() {
     RoboWeb::Diagnostics diagnostics;
     RoboWeb::Document document = Parse("<!DOCTYPE html><div><p id='lead'>Hello</p></div>", diagnostics);
     const std::string cpp = RoboWeb::GenerateCpp(document);
-    EXPECT(cpp.find("BuildCompiledDocument") != std::string::npos);
-    EXPECT(cpp.find("MakeElement") != std::string::npos);
-    EXPECT(cpp.find("MakeText") != std::string::npos);
+    EXPECT(cpp.find("kCompiledDocument") != std::string::npos);
+    EXPECT(cpp.find("StaticNode") != std::string::npos);
+    EXPECT(cpp.find("BuildFromStatic") != std::string::npos);
+    EXPECT(cpp.find("MakeElement") == std::string::npos);
     EXPECT(cpp.find("Hello") != std::string::npos);
     EXPECT(cpp.find("RunDocument") != std::string::npos);
     EXPECT(cpp.find("Performance contract") != std::string::npos);
-    EXPECT(cpp.find("StaticNode") == std::string::npos);
     std::unique_ptr<RoboWeb::Node> rebuilt = RoboWeb::RebuildStatic(document);
     EXPECT(rebuilt != nullptr);
     EXPECT(RoboWeb::GatherText(*rebuilt).find("Hello") != std::string::npos);
@@ -5028,6 +5028,68 @@ void TestFastFrame() {
     EXPECT(RoboWeb::FrameStatistics().dirtyRasterCount == dirtyBeforeScroll + 1);
     EXPECT(!scrolled.full && scrolled.scrollDelta == 30);
     EXPECT(SameFrame(tallCache.frame, RoboWeb::RenderDocument(tallCache.layout, tall.scrollY, true)));
+    RoboWeb::Document fieldPage = Parse("<!DOCTYPE html><input value=\"ab\"><input type=\"checkbox\">", diagnostics);
+    RoboWeb::ViewCache fieldCache;
+    RoboWeb::ResetFrameStatistics();
+    RoboWeb::AdvanceFrame(fieldCache, fieldPage, 320, 120, RoboWeb::FrameCause::Viewport, nullptr, true);
+    RoboWeb::Node* textField = FindKind(*fieldPage.root, RoboWeb::ElementKind::Input);
+    EXPECT(textField != nullptr);
+    fieldPage.focus = textField;
+    textField->liveValue = "abc";
+    fieldPage.caretOffset = 3;
+    fieldPage.caretOn = true;
+    const int layoutsBeforeType = RoboWeb::FrameStatistics().layoutCount;
+    RoboWeb::AdvanceFrame(fieldCache, fieldPage, 320, 120, RoboWeb::FrameCause::Content, nullptr, true);
+    EXPECT(RoboWeb::FrameStatistics().layoutCount == layoutsBeforeType);
+    RoboWeb::Document typedReference = Parse("<!DOCTYPE html><input value=\"ab\"><input type=\"checkbox\">", diagnostics);
+    RoboWeb::Node* typedField = FindKind(*typedReference.root, RoboWeb::ElementKind::Input);
+    typedReference.focus = typedField;
+    typedField->liveValue = "abc";
+    typedReference.caretOffset = 3;
+    typedReference.caretOn = true;
+    EXPECT(SameFrame(fieldCache.frame, RoboWeb::RenderDocument(RoboWeb::LayoutDocument(typedReference, 320, 120), 0, true)));
+    RoboWeb::Node* check = textField->parent;
+    while (check != nullptr && !(check->kind == RoboWeb::ElementKind::Input && RoboWeb::AttributeValue(*check, "type") == "checkbox")) {
+        if (check->kind == RoboWeb::ElementKind::Input && check != textField) {
+            break;
+        }
+        check = nullptr;
+    }
+    RoboWeb::Node* checkBox = nullptr;
+    std::vector<RoboWeb::Node*> checkStack{fieldPage.root.get()};
+    while (!checkStack.empty()) {
+        RoboWeb::Node* current = checkStack.back();
+        checkStack.pop_back();
+        if (current->kind == RoboWeb::ElementKind::Input && RoboWeb::AttributeValue(*current, "type") == "checkbox") {
+            checkBox = current;
+        }
+        for (const std::unique_ptr<RoboWeb::Node>& child : current->children) {
+            checkStack.push_back(child.get());
+        }
+    }
+    EXPECT(checkBox != nullptr);
+    checkBox->checked = true;
+    fieldPage.status = "checked";
+    const int layoutsBeforeCheck = RoboWeb::FrameStatistics().layoutCount;
+    RoboWeb::AdvanceFrame(fieldCache, fieldPage, 320, 120, RoboWeb::FrameCause::Content, nullptr, true);
+    EXPECT(RoboWeb::FrameStatistics().layoutCount == layoutsBeforeCheck);
+    RoboWeb::Document checkedReference = Parse("<!DOCTYPE html><input value=\"ab\"><input type=\"checkbox\" checked>", diagnostics);
+    RoboWeb::Node* checkedField = FindKind(*checkedReference.root, RoboWeb::ElementKind::Input);
+    checkedReference.focus = checkedField;
+    checkedField->liveValue = "abc";
+    checkedReference.caretOffset = 3;
+    checkedReference.caretOn = true;
+    checkedReference.status = "checked";
+    EXPECT(SameFrame(fieldCache.frame, RoboWeb::RenderDocument(RoboWeb::LayoutDocument(checkedReference, 320, 120), 0, true)));
+    RoboWeb::Diagnostics scripted;
+    RoboWeb::Document scriptPage = Parse("<!DOCTYPE html><script>document.title = \"Hi\";</script><p id=\"lead\"></p>", scripted);
+    const std::string scriptCpp = RoboWeb::GenerateCpp(scriptPage);
+    EXPECT(scriptCpp.find("document.title = \"Hi\"") != std::string::npos);
+    EXPECT(scriptCpp.find("compiledScript") != std::string::npos);
+    scriptPage.compiledScript = [](RoboWeb::Document& page) { page.title = "FromCpp"; };
+    scriptPage.scriptsRan = false;
+    RoboWeb::LayoutDocument(scriptPage, 80, 40);
+    EXPECT(scriptPage.title == "FromCpp");
     RoboWeb::Diagnostics slow;
     RoboWeb::Document interpreted = Parse("<!DOCTYPE html><script>eval(\"no\")</script><p>Hi</p>", slow);
     RoboWeb::WarnSlowPaths(interpreted, slow);

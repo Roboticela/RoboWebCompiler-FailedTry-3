@@ -272,6 +272,10 @@ void RunDocumentScripts(Document& document) {
         return;
     }
     document.scriptsRan = true;
+    if (document.compiledScript != nullptr) {
+        document.compiledScript(document);
+        return;
+    }
     WalkScripts(document, *document.root);
 }
 
