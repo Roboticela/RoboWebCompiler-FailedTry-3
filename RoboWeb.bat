@@ -27,7 +27,7 @@ set HEIGHT=640
 if not "%~3"=="" set WIDTH=%~3
 if not "%~4"=="" set HEIGHT=%~4
 set PAGE=Build\%~n2.exe
-Build\RoboWebCompiler.exe "%~2" -o "%PAGE%" --source-dir "%~dp0Source" --object-dir "%~dp0Build\Objects"
+Build\RoboWebCompiler.exe "%~2" -o "%PAGE%" --source-dir "%~dp0Source" --object-dir "%~dp0Build\Objects" --width %WIDTH% --height %HEIGHT%
 if errorlevel 1 exit /b 1
 "%PAGE%" --width %WIDTH% --height %HEIGHT%
 exit /b %ERRORLEVEL%

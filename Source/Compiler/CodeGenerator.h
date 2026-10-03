@@ -12,7 +12,9 @@ namespace RoboWeb {
 std::string GenerateCpp(
     const Document& document,
     const std::vector<CompiledWebFont>& fonts = {},
-    const std::vector<CompiledImage>& images = {});
+    const std::vector<CompiledImage>& images = {},
+    int viewportWidth = 0,
+    int viewportHeight = 0);
 std::unique_ptr<Node> RebuildStatic(const Document& document);
 
 }

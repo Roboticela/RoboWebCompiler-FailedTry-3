@@ -1,6 +1,8 @@
 #include "Compiler/CodeGenerator.h"
 
 #include "Core/Utf8.h"
+#include "Layout/LayoutEngine.h"
+#include "Runtime/FramePlan.h"
 
 #include <cstdio>
 #include <sstream>
@@ -272,11 +274,15 @@ bool LowerStatement(const std::string& statement, std::ostringstream& body) {
     if (equal == std::string::npos) {
         return false;
     }
-    const std::string property = TrimCopy(rest.substr(0, equal));
+    const std::string property = ToLowerAscii(TrimCopy(rest.substr(0, equal)));
     std::string rawValue = TrimCopy(rest.substr(equal + 1));
+    if (!rawValue.empty() && rawValue.back() == ';') {
+        rawValue.pop_back();
+        rawValue = TrimCopy(rawValue);
+    }
     body << "    if (document.root != nullptr) {\n";
     body << "        if (RoboWeb::Node* target = RoboWeb::FindElementById(*document.root, \"" << Escape(id) << "\")) {\n";
-    if (property == "textContent" || property == "innerText") {
+    if (property == "textcontent" || property == "innertext") {
         std::size_t cursor = 0;
         std::string value;
         if (!ReadCppString(rawValue, cursor, value)) {
@@ -293,6 +299,24 @@ bool LowerStatement(const std::string& statement, std::ostringstream& body) {
     } else if (property == "hidden") {
         const bool hidden = rawValue != "false" && rawValue != "0";
         body << "            target->hiddenByScript = " << (hidden ? "true" : "false") << ";\n";
+    } else if (property == "style.color" || property == "style.backgroundcolor" || property == "style.background") {
+        std::size_t cursor = 0;
+        std::string value;
+        if (!ReadCppString(rawValue, cursor, value)) {
+            value = rawValue;
+        }
+        const char* cssName = property == "style.color" ? "color:" : "background-color:";
+        body << "            std::string style = RoboWeb::AttributeValue(*target, \"style\");\n";
+        body << "            if (!style.empty() && style.back() != ';') style.push_back(';');\n";
+        body << "            style += \"" << cssName << Escape(value) << "\";\n";
+        body << "            bool found = false;\n";
+        body << "            for (RoboWeb::Attribute& attribute : target->attributes) {\n";
+        body << "                if (attribute.name == \"style\" || attribute.name == \"Style\") {\n";
+        body << "                    attribute.value = style;\n";
+        body << "                    found = true;\n";
+        body << "                }\n";
+        body << "            }\n";
+        body << "            if (!found) target->attributes.push_back(RoboWeb::Attribute{\"style\", style, target->line, target->column});\n";
     } else {
         return false;
     }
@@ -480,10 +504,93 @@ void WriteCompiledStyles(
     output << "}\n\n";
 }
 
-std::string GenerateCpp(const Document& document, const std::vector<CompiledWebFont>& fonts, const std::vector<CompiledImage>& images) {
+void WriteBool(std::ostringstream& output, bool value) {
+    output << (value ? "true" : "false");
+}
+
+void WriteBakedDraw(std::ostringstream& output, const BakedDraw& draw) {
+    const char* text = draw.text != nullptr ? draw.text : "";
+    const char* image = draw.imagePath != nullptr ? draw.imagePath : "";
+    const char* family = draw.fontFamily != nullptr ? draw.fontFamily : "";
+    output << "    {" << draw.kind << ", " << draw.nodeIndex << ", " << draw.x << ", " << draw.y << ", " << draw.width << ", " << draw.height << ", "
+           << static_cast<int>(draw.red) << ", " << static_cast<int>(draw.green) << ", " << static_cast<int>(draw.blue) << ", "
+           << static_cast<int>(draw.alpha) << ", \"" << Escape(text) << "\", \"" << Escape(image) << "\", ";
+    WriteBool(output, draw.smoothImage);
+    output << ", ";
+    WriteBool(output, draw.deferImage);
+    output << ", " << draw.fontSizePx << ", " << draw.letterSpacingPx << ", " << draw.wordSpacingPx << ", ";
+    WriteBool(output, draw.bold);
+    output << ", ";
+    WriteBool(output, draw.italic);
+    output << ", ";
+    WriteBool(output, draw.monospace);
+    output << ", ";
+    WriteBool(output, draw.underline);
+    output << ", ";
+    WriteBool(output, draw.strike);
+    output << ", " << static_cast<int>(draw.decorationRed) << ", " << static_cast<int>(draw.decorationGreen) << ", "
+           << static_cast<int>(draw.decorationBlue) << ", " << static_cast<int>(draw.decorationAlpha) << ", ";
+    WriteBool(output, draw.hasDecorationColor);
+    output << ", " << draw.underlineOffsetPx << ", ";
+    WriteBool(output, draw.fixed);
+    output << ", \"" << Escape(family) << "\", ";
+    WriteBool(output, draw.clipped);
+    output << ", " << draw.clipX << ", " << draw.clipY << ", " << draw.clipWidth << ", " << draw.clipHeight << ", ";
+    WriteBool(output, draw.caret);
+    output << "}";
+}
+
+void WriteBakedFrame(std::ostringstream& output, const BakedFrame& frame) {
+    output << "static const RoboWeb::BakedDraw kBakedOps[] = {\n";
+    if (frame.opCount <= 0) {
+        output << "    {0, -1, 0, 0, 0, 0, 0, 0, 0, 0, \"\", \"\", false, false, 16, 0, 0, false, false, false, false, false, 0, 0, 0, 255, false, 0, false, \"\", false, 0, 0, 0, 0, false}\n";
+    }
+    for (int index = 0; index < frame.opCount; ++index) {
+        WriteBakedDraw(output, frame.ops[index]);
+        output << ",\n";
+    }
+    output << "};\n\n";
+    output << "static const RoboWeb::BakedBox kBakedBoxes[] = {\n";
+    if (frame.boxCount <= 0) {
+        output << "    {-1, \"\", 0, 0, 0, 0, false, 16, false, false, false, false, false, 0, \"\"}\n";
+    }
+    for (int index = 0; index < frame.boxCount; ++index) {
+        const BakedBox& box = frame.boxes[index];
+        const char* tag = box.tag != nullptr ? box.tag : "";
+        const char* family = box.fontFamily != nullptr ? box.fontFamily : "";
+        output << "    {" << box.nodeIndex << ", \"" << Escape(tag) << "\", " << box.x << ", " << box.y << ", " << box.width << ", " << box.height << ", ";
+        WriteBool(output, box.fixed);
+        output << ", " << box.fontSizePx << ", ";
+        WriteBool(output, box.bold);
+        output << ", ";
+        WriteBool(output, box.italic);
+        output << ", ";
+        WriteBool(output, box.monospace);
+        output << ", ";
+        WriteBool(output, box.underline);
+        output << ", ";
+        WriteBool(output, box.strike);
+        output << ", " << box.display << ", \"" << Escape(family) << "\"},\n";
+    }
+    output << "};\n\n";
+    output << "static const RoboWeb::BakedDraw kBakedCaret = ";
+    WriteBakedDraw(output, frame.caret);
+    output << ";\n\n";
+    output << "static const RoboWeb::BakedFrame kBakedFrame = {" << frame.width << ", " << frame.height << ", " << frame.contentWidth << ", "
+           << frame.contentHeight << ", " << frame.geometryStamp << ", ";
+    WriteBool(output, frame.dependsOnViewportHeight);
+    output << ", ";
+    WriteBool(output, frame.reflowsWithWidth);
+    output << ", kBakedOps, " << frame.opCount << ", kBakedBoxes, " << frame.boxCount << ", ";
+    WriteBool(output, frame.caretPresent);
+    output << ", kBakedCaret};\n\n";
+}
+
+std::string GenerateCpp(
+    const Document& document, const std::vector<CompiledWebFont>& fonts, const std::vector<CompiledImage>& images, int viewportWidth, int viewportHeight) {
     std::ostringstream output;
     output << "// Performance contract: hover, caret blink, and scroll repaint cached draw records.\n";
-    output << "// LayoutDocument runs for the first frame and for a viewport or geometry change.\n";
+    output << "// The baked frame paints the launch size. LayoutDocument runs when the width changes line breaks or the geometry is new.\n";
     output << "#include \"Runtime/HostLoop.h\"\n";
     output << "#include \"Render/BitmapFont.h\"\n";
     output << "#include \"Render/ImageDecoder.h\"\n\n";
@@ -491,7 +598,22 @@ std::string GenerateCpp(const Document& document, const std::vector<CompiledWebF
     output << "#include <vector>\n\n";
     WriteCompiledStyles(output, document, fonts, images);
     output << "namespace {\n\n";
-    WriteFrozenTables(output, Freeze(document));
+    const FrozenDocument frozen = Freeze(document);
+    WriteFrozenTables(output, frozen);
+    bool baked = false;
+    if (viewportWidth > 0 && viewportHeight > 0) {
+        Document laidOut;
+        laidOut.root = Materialize(frozen, 0);
+        laidOut.quirks = document.quirks;
+        laidOut.sourcePath = document.sourcePath;
+        laidOut.stylesLoaded = document.stylesLoaded;
+        laidOut.styleRules = document.styleRules;
+        const LayoutResult layout = LayoutDocument(laidOut, viewportWidth, viewportHeight);
+        BakedStorage storage;
+        CaptureBakedFrame(laidOut, layout, GeometryStamp(laidOut), storage);
+        WriteBakedFrame(output, storage.frame);
+        baked = true;
+    }
     const bool compiledScript = WriteCompiledScript(output, document);
     output << "}  // namespace\n\n";
     output << "int main(int argc, char** argv) {\n";
@@ -501,6 +623,9 @@ std::string GenerateCpp(const Document& document, const std::vector<CompiledWebF
     output << "    document.root = RoboWeb::BuildFromStatic(kCompiledDocument);\n";
     if (compiledScript) {
         output << "    document.compiledScript = RunCompiledPage;\n";
+    }
+    if (baked) {
+        output << "    document.baked = &kBakedFrame;\n";
     }
     output << "    RoboWeb::CollectDocumentInfo(document);\n";
     output << "    InstallCompiledStyles(document);\n";

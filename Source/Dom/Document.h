@@ -138,6 +138,79 @@ struct ElementStyle {
     bool hasUnderlineOffset = false;
 };
 
+struct BakedDraw {
+    int kind = 0;
+    int nodeIndex = -1;
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+    std::uint8_t red = 0;
+    std::uint8_t green = 0;
+    std::uint8_t blue = 0;
+    std::uint8_t alpha = 255;
+    const char* text = "";
+    const char* imagePath = "";
+    bool smoothImage = false;
+    bool deferImage = false;
+    int fontSizePx = 16;
+    int letterSpacingPx = 0;
+    int wordSpacingPx = 0;
+    bool bold = false;
+    bool italic = false;
+    bool monospace = false;
+    bool underline = false;
+    bool strike = false;
+    std::uint8_t decorationRed = 0;
+    std::uint8_t decorationGreen = 0;
+    std::uint8_t decorationBlue = 0;
+    std::uint8_t decorationAlpha = 255;
+    bool hasDecorationColor = false;
+    int underlineOffsetPx = 0;
+    bool fixed = false;
+    const char* fontFamily = "";
+    bool clipped = false;
+    int clipX = 0;
+    int clipY = 0;
+    int clipWidth = 0;
+    int clipHeight = 0;
+    bool caret = false;
+};
+
+struct BakedBox {
+    int nodeIndex = -1;
+    const char* tag = "";
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+    bool fixed = false;
+    int fontSizePx = 16;
+    bool bold = false;
+    bool italic = false;
+    bool monospace = false;
+    bool underline = false;
+    bool strike = false;
+    int display = 0;
+    const char* fontFamily = "";
+};
+
+struct BakedFrame {
+    int width = 0;
+    int height = 0;
+    int contentWidth = 0;
+    int contentHeight = 0;
+    int geometryStamp = 0;
+    bool dependsOnViewportHeight = true;
+    bool reflowsWithWidth = true;
+    const BakedDraw* ops = nullptr;
+    int opCount = 0;
+    const BakedBox* boxes = nullptr;
+    int boxCount = 0;
+    bool caretPresent = false;
+    BakedDraw caret{};
+};
+
 struct Document {
     std::unique_ptr<Node> root;
     std::string sourcePath;
@@ -153,6 +226,7 @@ struct Document {
     bool stylesLoaded = false;
     bool scriptsRan = false;
     void (*compiledScript)(Document&) = nullptr;
+    const BakedFrame* baked = nullptr;
     std::vector<ElementStyle> styleRules;
 };
 

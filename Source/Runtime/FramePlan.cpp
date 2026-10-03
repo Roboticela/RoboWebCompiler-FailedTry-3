@@ -1,8 +1,10 @@
 #include "Runtime/FramePlan.h"
 
+#include "Catalog/SvgCatalog.h"
 #include "Core/Constants.h"
 #include "Core/Utf8.h"
 #include "Render/BitmapFont.h"
+#include "Runtime/MiniScript.h"
 
 #include <algorithm>
 #include <cstring>
@@ -39,6 +41,7 @@ void StampNode(const Node& node, int& hash, bool geometry) {
     }
     if (!geometry) {
         hash = Mix(hash, node.checked ? 1 : 0);
+        hash = Mix(hash, node.visited ? 1 : 0);
     }
     hash = Mix(hash, node.selected ? 1 : 0);
     hash = Mix(hash, node.open ? 1 : 0);
@@ -46,7 +49,6 @@ void StampNode(const Node& node, int& hash, bool geometry) {
     hash = Mix(hash, node.selectExpanded ? 1 : 0);
     hash = Mix(hash, node.hiddenByScript ? 1 : 0);
     hash = Mix(hash, node.scriptText ? 1 : 0);
-    hash = Mix(hash, node.visited ? 1 : 0);
     hash = Mix(hash, node.marqueeOffset);
     for (const Attribute& attribute : node.attributes) {
         hash = MixText(hash, attribute.name);
@@ -539,6 +541,478 @@ bool DocumentDependsOnViewportHeight(const Document& document, const LayoutResul
     return false;
 }
 
+bool WidthSensitiveText(const std::string& text) {
+    const std::string lower = ToLowerAscii(text);
+    if (lower.find('%') != std::string::npos || lower.find("vw") != std::string::npos) {
+        return true;
+    }
+    if (lower.find("flex") != std::string::npos || lower.find("grid") != std::string::npos) {
+        return true;
+    }
+    if (lower.find("text-align") != std::string::npos && (lower.find("center") != std::string::npos || lower.find("right") != std::string::npos || lower.find("justify") != std::string::npos)) {
+        return true;
+    }
+    return false;
+}
+
+bool NodeReflowsWithWidth(const Node& node) {
+    if (node.kind == ElementKind::Svg || node.kind == ElementKind::Table || IsTablePart(node.kind)) {
+        return true;
+    }
+    for (const Attribute& attribute : node.attributes) {
+        const std::string name = ToLowerAscii(attribute.name);
+        if (name == "align") {
+            const std::string value = ToLowerAscii(attribute.value);
+            if (value == "center" || value == "right" || value == "justify") {
+                return true;
+            }
+        }
+        if (WidthSensitiveText(attribute.value) && name != "id" && name != "class" && name != "href" && name != "src") {
+            if (name == "style" || name == "width" || name == "size") {
+                return true;
+            }
+        }
+    }
+    for (const std::unique_ptr<Node>& child : node.children) {
+        if (NodeReflowsWithWidth(*child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool PageReflowsWithWidth(const Document& document, const LayoutResult& layout) {
+    if (document.root != nullptr && NodeReflowsWithWidth(*document.root)) {
+        return true;
+    }
+    for (const ElementStyle& rule : document.styleRules) {
+        if (WidthSensitiveText(rule.selector)) {
+            continue;
+        }
+        for (const StyleDeclaration& declaration : rule.declarations) {
+            if (WidthSensitiveText(declaration.name + ":" + declaration.value)) {
+                return true;
+            }
+        }
+    }
+    for (std::size_t first = 0; first < layout.ops.size(); ++first) {
+        const DrawOp& start = layout.ops[first];
+        if (start.kind != DrawOp::Kind::Text || start.owner == nullptr) {
+            continue;
+        }
+        for (std::size_t second = first + 1; second < layout.ops.size(); ++second) {
+            const DrawOp& next = layout.ops[second];
+            if (next.kind == DrawOp::Kind::Text && next.owner == start.owner && next.y > start.y) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+int HexNibble(char character) {
+    if (character >= '0' && character <= '9') {
+        return character - '0';
+    }
+    if (character >= 'a' && character <= 'f') {
+        return character - 'a' + 10;
+    }
+    if (character >= 'A' && character <= 'F') {
+        return character - 'A' + 10;
+    }
+    return -1;
+}
+
+bool ReadLinkColor(const std::string& text, Color& color) {
+    const std::string value = ToLowerAscii(text);
+    if (value.size() == 7 && value[0] == '#') {
+        int channels[3] = {};
+        for (int index = 0; index < 3; ++index) {
+            const int high = HexNibble(value[static_cast<std::size_t>(1 + index * 2)]);
+            const int low = HexNibble(value[static_cast<std::size_t>(2 + index * 2)]);
+            if (high < 0 || low < 0) {
+                return false;
+            }
+            channels[index] = high * 16 + low;
+        }
+        color = Color{static_cast<std::uint8_t>(channels[0]), static_cast<std::uint8_t>(channels[1]), static_cast<std::uint8_t>(channels[2]), 255};
+        return true;
+    }
+    std::uint8_t red = 0;
+    std::uint8_t green = 0;
+    std::uint8_t blue = 0;
+    if (!LookupSvgColorKeyword(value, red, green, blue)) {
+        return false;
+    }
+    color = Color{red, green, blue, 255};
+    return true;
+}
+
+Color AnchorColor(const Node& node, bool visited) {
+    Color color{0, 0, 238, 255};
+    const Node* body = nullptr;
+    for (const Node* ancestor = node.parent; ancestor != nullptr; ancestor = ancestor->parent) {
+        if (ancestor->kind == ElementKind::Body) {
+            body = ancestor;
+            break;
+        }
+    }
+    if (body == nullptr) {
+        return color;
+    }
+    Color parsed;
+    const char* which = visited ? "vlink" : "link";
+    if (ReadLinkColor(AttributeValue(*body, which), parsed) || ReadLinkColor(AttributeValue(*body, "link"), parsed)) {
+        return parsed;
+    }
+    return color;
+}
+
+const Node* AnchorAt(const LayoutResult& layout, const DrawOp& op) {
+    if (op.owner != nullptr) {
+        for (const Node* node = op.owner; node != nullptr; node = node->parent) {
+            if (node->kind == ElementKind::A) {
+                return node;
+            }
+        }
+    }
+    for (const ElementBox& box : layout.boxes) {
+        if (box.node == nullptr || box.node->kind != ElementKind::A) {
+            continue;
+        }
+        const int sampleX = op.x;
+        const int sampleY = op.y;
+        if (sampleX >= box.x && sampleX < box.x + std::max(1, box.width) && sampleY >= box.y && sampleY < box.y + std::max(1, box.height)) {
+            return box.node;
+        }
+    }
+    return nullptr;
+}
+
+void RetintLinks(LayoutResult& layout, const Document& document, Dirty& dirty) {
+    for (DrawOp& op : layout.ops) {
+        if (op.caret || (op.kind != DrawOp::Kind::Text && op.kind != DrawOp::Kind::Stroke)) {
+            continue;
+        }
+        const Node* anchor = AnchorAt(layout, op);
+        if (anchor == nullptr) {
+            continue;
+        }
+        const Color idle = AnchorColor(*anchor, false);
+        const Color visited = AnchorColor(*anchor, true);
+        const Color next = anchor->visited ? visited : idle;
+        if (!(op.color == idle) && !(op.color == visited)) {
+            continue;
+        }
+        if (op.color == next) {
+            continue;
+        }
+        op.color = next;
+        IncludeNode(dirty, layout, anchor, document.scrollY);
+    }
+}
+
+void RememberLayout(ViewCache& cache) {
+    if (!cache.ready) {
+        return;
+    }
+    for (ViewCache::SavedLayout& saved : cache.saved) {
+        if (saved.width == cache.width && saved.height == cache.height && saved.geometryStamp == cache.geometryStamp) {
+            saved.dependsOnViewportHeight = cache.dependsOnViewportHeight;
+            saved.reflowsWithWidth = cache.reflowsWithWidth;
+            saved.layout = cache.layout;
+            return;
+        }
+    }
+    if (cache.saved.size() == 4) {
+        cache.saved.erase(cache.saved.begin());
+    }
+    ViewCache::SavedLayout saved;
+    saved.width = cache.width;
+    saved.height = cache.height;
+    saved.geometryStamp = cache.geometryStamp;
+    saved.dependsOnViewportHeight = cache.dependsOnViewportHeight;
+    saved.reflowsWithWidth = cache.reflowsWithWidth;
+    saved.layout = cache.layout;
+    cache.saved.push_back(std::move(saved));
+}
+
+bool RecallLayout(ViewCache& cache, int width, int height, int geometry) {
+    for (const ViewCache::SavedLayout& saved : cache.saved) {
+        if (saved.width != width || saved.height != height || saved.geometryStamp != geometry) {
+            continue;
+        }
+        cache.layout = saved.layout;
+        cache.width = saved.width;
+        cache.height = saved.height;
+        cache.geometryStamp = saved.geometryStamp;
+        cache.dependsOnViewportHeight = saved.dependsOnViewportHeight;
+        cache.reflowsWithWidth = saved.reflowsWithWidth;
+        cache.layout.dependsOnViewportHeight = saved.dependsOnViewportHeight;
+        cache.ready = true;
+        return true;
+    }
+    return false;
+}
+
+bool TryStretchWidth(ViewCache& cache, int newWidth) {
+    const ElementBox* body = nullptr;
+    for (const ElementBox& box : cache.layout.boxes) {
+        if (box.node != nullptr && box.node->kind == ElementKind::Body) {
+            body = &box;
+            break;
+        }
+    }
+    if (body == nullptr) {
+        return false;
+    }
+    const int oldWidth = cache.width;
+    const int delta = newWidth - oldWidth;
+    if (delta == 0) {
+        return true;
+    }
+    if (delta < 0) {
+        for (const DrawOp& op : cache.layout.ops) {
+            if (op.kind == DrawOp::Kind::Text && op.x + op.width > newWidth) {
+                return false;
+            }
+        }
+    }
+    const int oldRight = body->x + body->width;
+    for (ElementBox& box : cache.layout.boxes) {
+        if (box.x + box.width == oldRight) {
+            box.width += delta;
+        }
+    }
+    for (DrawOp& op : cache.layout.ops) {
+        if (op.kind == DrawOp::Kind::Text) {
+            continue;
+        }
+        if ((op.x == 0 && op.width == oldWidth) || op.x + op.width == oldRight) {
+            op.width += delta;
+        }
+    }
+    if (cache.layout.caretPresent) {
+        DrawOp& caret = cache.layout.caret;
+        if (caret.kind != DrawOp::Kind::Text && ((caret.x == 0 && caret.width == oldWidth) || caret.x + caret.width == oldRight)) {
+            caret.width += delta;
+        }
+    }
+    cache.layout.viewportWidth = newWidth;
+    cache.layout.contentWidth = newWidth;
+    cache.width = newWidth;
+    return true;
+}
+
+void AppendNodeOrder(Node* node, std::vector<Node*>& nodes) {
+    if (node == nullptr) {
+        return;
+    }
+    nodes.push_back(node);
+    for (const std::unique_ptr<Node>& child : node->children) {
+        AppendNodeOrder(child.get(), nodes);
+    }
+}
+
+int NodeIndexOf(const std::vector<Node*>& nodes, const Node* node) {
+    if (node == nullptr) {
+        return -1;
+    }
+    for (std::size_t index = 0; index < nodes.size(); ++index) {
+        if (nodes[index] == node) {
+            return static_cast<int>(index);
+        }
+    }
+    return -1;
+}
+
+const char* InternText(BakedStorage& storage, const std::string& text) {
+    storage.heap.push_back(text);
+    return storage.heap.back().c_str();
+}
+
+BakedDraw BakeDraw(BakedStorage& storage, const DrawOp& op, const std::vector<Node*>& nodes) {
+    BakedDraw baked;
+    baked.kind = static_cast<int>(op.kind);
+    baked.nodeIndex = NodeIndexOf(nodes, op.owner);
+    baked.x = op.x;
+    baked.y = op.y;
+    baked.width = op.width;
+    baked.height = op.height;
+    baked.red = op.color.red;
+    baked.green = op.color.green;
+    baked.blue = op.color.blue;
+    baked.alpha = op.color.alpha;
+    baked.text = InternText(storage, op.text);
+    baked.imagePath = InternText(storage, op.imagePath);
+    baked.smoothImage = op.smoothImage;
+    baked.deferImage = op.deferImage;
+    baked.fontSizePx = op.fontSizePx;
+    baked.letterSpacingPx = op.letterSpacingPx;
+    baked.wordSpacingPx = op.wordSpacingPx;
+    baked.bold = op.bold;
+    baked.italic = op.italic;
+    baked.monospace = op.monospace;
+    baked.underline = op.underline;
+    baked.strike = op.strike;
+    baked.decorationRed = op.decorationColor.red;
+    baked.decorationGreen = op.decorationColor.green;
+    baked.decorationBlue = op.decorationColor.blue;
+    baked.decorationAlpha = op.decorationColor.alpha;
+    baked.hasDecorationColor = op.hasDecorationColor;
+    baked.underlineOffsetPx = op.underlineOffsetPx;
+    baked.fixed = op.fixed;
+    baked.fontFamily = InternText(storage, op.fontFamily);
+    baked.clipped = op.clipped;
+    baked.clipX = op.clipX;
+    baked.clipY = op.clipY;
+    baked.clipWidth = op.clipWidth;
+    baked.clipHeight = op.clipHeight;
+    baked.caret = op.caret;
+    return baked;
+}
+
+DrawOp UnbakeDraw(const BakedDraw& baked, const std::vector<Node*>& nodes) {
+    DrawOp op;
+    op.kind = static_cast<DrawOp::Kind>(baked.kind);
+    if (baked.nodeIndex >= 0 && baked.nodeIndex < static_cast<int>(nodes.size())) {
+        op.owner = nodes[static_cast<std::size_t>(baked.nodeIndex)];
+    }
+    op.x = baked.x;
+    op.y = baked.y;
+    op.width = baked.width;
+    op.height = baked.height;
+    op.color = Color{baked.red, baked.green, baked.blue, baked.alpha};
+    op.text = baked.text != nullptr ? baked.text : "";
+    op.imagePath = baked.imagePath != nullptr ? baked.imagePath : "";
+    op.smoothImage = baked.smoothImage;
+    op.deferImage = baked.deferImage;
+    op.fontSizePx = baked.fontSizePx;
+    op.letterSpacingPx = baked.letterSpacingPx;
+    op.wordSpacingPx = baked.wordSpacingPx;
+    op.bold = baked.bold;
+    op.italic = baked.italic;
+    op.monospace = baked.monospace;
+    op.underline = baked.underline;
+    op.strike = baked.strike;
+    op.decorationColor = Color{baked.decorationRed, baked.decorationGreen, baked.decorationBlue, baked.decorationAlpha};
+    op.hasDecorationColor = baked.hasDecorationColor;
+    op.underlineOffsetPx = baked.underlineOffsetPx;
+    op.fixed = baked.fixed;
+    op.fontFamily = baked.fontFamily != nullptr ? baked.fontFamily : "";
+    op.clipped = baked.clipped;
+    op.clipX = baked.clipX;
+    op.clipY = baked.clipY;
+    op.clipWidth = baked.clipWidth;
+    op.clipHeight = baked.clipHeight;
+    op.caret = baked.caret;
+    return op;
+}
+
+void CaptureBakedFrame(const Document& document, const LayoutResult& layout, int geometryStamp, BakedStorage& storage) {
+    storage.heap.clear();
+    storage.ops.clear();
+    storage.boxes.clear();
+    storage.heap.reserve(static_cast<std::size_t>(layout.ops.size() * 3 + layout.boxes.size() * 2 + 8));
+    std::vector<Node*> nodes;
+    if (document.root != nullptr) {
+        AppendNodeOrder(document.root.get(), nodes);
+    }
+    for (const DrawOp& op : layout.ops) {
+        storage.ops.push_back(BakeDraw(storage, op, nodes));
+    }
+    for (const ElementBox& box : layout.boxes) {
+        BakedBox baked;
+        baked.nodeIndex = NodeIndexOf(nodes, box.node);
+        baked.tag = InternText(storage, box.tag);
+        baked.x = box.x;
+        baked.y = box.y;
+        baked.width = box.width;
+        baked.height = box.height;
+        baked.fixed = box.fixed;
+        baked.fontSizePx = box.fontSizePx;
+        baked.bold = box.bold;
+        baked.italic = box.italic;
+        baked.monospace = box.monospace;
+        baked.underline = box.underline;
+        baked.strike = box.strike;
+        baked.display = static_cast<int>(box.display);
+        baked.fontFamily = InternText(storage, box.fontFamily);
+        storage.boxes.push_back(baked);
+    }
+    storage.frame = BakedFrame{};
+    storage.frame.width = layout.viewportWidth;
+    storage.frame.height = layout.viewportHeight;
+    storage.frame.contentWidth = layout.contentWidth;
+    storage.frame.contentHeight = layout.contentHeight;
+    storage.frame.geometryStamp = geometryStamp;
+    storage.frame.dependsOnViewportHeight = DocumentDependsOnViewportHeight(document, layout);
+    storage.frame.reflowsWithWidth = PageReflowsWithWidth(document, layout);
+    storage.frame.ops = storage.ops.empty() ? nullptr : storage.ops.data();
+    storage.frame.opCount = static_cast<int>(storage.ops.size());
+    storage.frame.boxes = storage.boxes.empty() ? nullptr : storage.boxes.data();
+    storage.frame.boxCount = static_cast<int>(storage.boxes.size());
+    storage.frame.caretPresent = layout.caretPresent;
+    if (layout.caretPresent) {
+        storage.frame.caret = BakeDraw(storage, layout.caret, nodes);
+    }
+}
+
+void InstallBakedFrame(ViewCache& cache, Document& document, const BakedFrame& baked, bool settled) {
+    std::vector<Node*> nodes;
+    if (document.root != nullptr) {
+        AppendNodeOrder(document.root.get(), nodes);
+    }
+    LayoutResult layout;
+    layout.viewportWidth = baked.width;
+    layout.viewportHeight = baked.height;
+    layout.contentWidth = baked.contentWidth;
+    layout.contentHeight = baked.contentHeight;
+    layout.caretPresent = baked.caretPresent;
+    layout.dependsOnViewportHeight = baked.dependsOnViewportHeight;
+    layout.ops.reserve(static_cast<std::size_t>(std::max(0, baked.opCount)));
+    for (int index = 0; index < baked.opCount; ++index) {
+        layout.ops.push_back(UnbakeDraw(baked.ops[index], nodes));
+    }
+    layout.boxes.reserve(static_cast<std::size_t>(std::max(0, baked.boxCount)));
+    for (int index = 0; index < baked.boxCount; ++index) {
+        const BakedBox& source = baked.boxes[index];
+        ElementBox box;
+        if (source.nodeIndex >= 0 && source.nodeIndex < static_cast<int>(nodes.size())) {
+            box.node = nodes[static_cast<std::size_t>(source.nodeIndex)];
+        }
+        box.tag = source.tag != nullptr ? source.tag : "";
+        box.x = source.x;
+        box.y = source.y;
+        box.width = source.width;
+        box.height = source.height;
+        box.fixed = source.fixed;
+        box.fontSizePx = source.fontSizePx;
+        box.bold = source.bold;
+        box.italic = source.italic;
+        box.monospace = source.monospace;
+        box.underline = source.underline;
+        box.strike = source.strike;
+        box.display = static_cast<DisplayKind>(source.display);
+        box.fontFamily = source.fontFamily != nullptr ? source.fontFamily : "";
+        layout.boxes.push_back(std::move(box));
+    }
+    if (baked.caretPresent) {
+        layout.caret = UnbakeDraw(baked.caret, nodes);
+    }
+    cache.layout = std::move(layout);
+    cache.frame = RenderDocument(cache.layout, document.scrollY, settled);
+    cache.ready = true;
+    cache.width = baked.width;
+    cache.height = baked.height;
+    cache.contentStamp = ContentStamp(document);
+    cache.geometryStamp = baked.geometryStamp;
+    cache.scrollY = document.scrollY;
+    cache.dependsOnViewportHeight = baked.dependsOnViewportHeight;
+    cache.reflowsWithWidth = baked.reflowsWithWidth;
+    cache.layout.dependsOnViewportHeight = baked.dependsOnViewportHeight;
+}
+
 FrameUpdate ResizeViewportHeight(ViewCache& cache, Document& document, int height, bool settled) {
     const int oldHeight = cache.frame.height;
     const int width = cache.frame.width;
@@ -586,6 +1060,39 @@ FrameUpdate AdvanceFrame(
     const bool hoverLayout = cause == FrameCause::Hover && (AnchorNeedsLayout(previousHover) || AnchorNeedsLayout(document.hover));
     const bool layout = !cache.ready || widthChanged || geometryChanged || hoverLayout || (heightChanged && cache.dependsOnViewportHeight);
     if (layout) {
+        if (cache.ready) {
+            RememberLayout(cache);
+        }
+        const bool reused = cache.ready && RecallLayout(cache, clampedWidth, clampedHeight, geometry);
+        const bool stretched = !reused && cache.ready && widthChanged && !geometryChanged && !hoverLayout && !cache.reflowsWithWidth &&
+                               !(heightChanged && cache.dependsOnViewportHeight) && TryStretchWidth(cache, clampedWidth);
+        if (reused || stretched) {
+            if (reused) {
+                Dirty dirty;
+                ApplyChrome(cache.layout, document);
+                SyncControls(cache.layout, document, dirty);
+                RetintLinks(cache.layout, document, dirty);
+                ApplyCaret(cache.layout, document);
+            }
+            cache.frame = RenderDocument(cache.layout, document.scrollY, settled);
+            cache.contentStamp = ContentStamp(document);
+            cache.geometryStamp = geometry;
+            cache.scrollY = document.scrollY;
+            cache.height = cache.layout.viewportHeight;
+            ++gStats.fullRasterCount;
+            if (stretched && heightChanged) {
+                return ResizeViewportHeight(cache, document, clampedHeight, settled);
+            }
+            return FullUpdate(cache);
+        }
+        if (!cache.ready && document.baked != nullptr && document.baked->width == clampedWidth && document.baked->height == clampedHeight) {
+            RunDocumentScripts(document);
+            if (GeometryStamp(document) == document.baked->geometryStamp) {
+                InstallBakedFrame(cache, document, *document.baked, settled);
+                ++gStats.fullRasterCount;
+                return FullUpdate(cache);
+            }
+        }
         cache.layout = LayoutDocument(document, width, height);
         cache.frame = RenderDocument(cache.layout, document.scrollY, settled);
         cache.ready = true;
@@ -595,6 +1102,7 @@ FrameUpdate AdvanceFrame(
         cache.geometryStamp = GeometryStamp(document);
         cache.scrollY = document.scrollY;
         cache.dependsOnViewportHeight = DocumentDependsOnViewportHeight(document, cache.layout);
+        cache.reflowsWithWidth = PageReflowsWithWidth(document, cache.layout);
         cache.layout.dependsOnViewportHeight = cache.dependsOnViewportHeight;
         ++gStats.layoutCount;
         ++gStats.fullRasterCount;
@@ -633,6 +1141,7 @@ FrameUpdate AdvanceFrame(
         Dirty dirty;
         ApplyChrome(cache.layout, document);
         SyncControls(cache.layout, document, dirty);
+        RetintLinks(cache.layout, document, dirty);
         IncludeCaret(dirty, cache.layout, document.scrollY);
         ApplyCaret(cache.layout, document);
         IncludeCaret(dirty, cache.layout, document.scrollY);

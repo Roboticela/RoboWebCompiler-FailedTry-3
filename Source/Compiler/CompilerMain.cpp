@@ -83,6 +83,10 @@ int main(int argc, char** argv) {
     const std::string outputPath = Argument(argc, argv, "-o");
     const std::string sourceDir = Argument(argc, argv, "--source-dir");
     const std::string objectDir = Argument(argc, argv, "--object-dir");
+    const std::string widthText = Argument(argc, argv, "--width");
+    const std::string heightText = Argument(argc, argv, "--height");
+    const int viewportWidth = widthText.empty() ? 0 : std::atoi(widthText.c_str());
+    const int viewportHeight = heightText.empty() ? 0 : std::atoi(heightText.c_str());
     if (outputPath.empty() || sourceDir.empty()) {
         std::cerr << "RoboWebCompiler: error: missing -o or --source-dir\n";
         return 1;
@@ -122,7 +126,7 @@ int main(int argc, char** argv) {
         std::cerr << "RoboWebCompiler: compilation failed with 1 error\n";
         return 1;
     }
-    const std::string generated = RoboWeb::GenerateCpp(document, fonts, images);
+    const std::string generated = RoboWeb::GenerateCpp(document, fonts, images, viewportWidth, viewportHeight);
     const std::string generatedPath = outputPath + ".cpp";
     if (!WriteFile(generatedPath, generated)) {
         std::cerr << "RoboWebCompiler: error: cannot write '" << generatedPath << "'\n";

@@ -30,8 +30,14 @@ COMPILER_OBJS := \
 	$(OBJDIR)/XPath.o \
 	$(OBJDIR)/Xslt.o \
 	$(OBJDIR)/Document.o \
+	$(OBJDIR)/LayoutEngine.o \
+	$(OBJDIR)/InterFontData.o \
+	$(OBJDIR)/BitmapFont.o \
 	$(OBJDIR)/ImageDecoder.o \
+	$(OBJDIR)/Renderer.o \
 	$(OBJDIR)/StyleSheet.o \
+	$(OBJDIR)/MiniScript.o \
+	$(OBJDIR)/FramePlan.o \
 	$(OBJDIR)/CodeGenerator.o \
 	$(OBJDIR)/FastPath.o \
 	$(OBJDIR)/CompilerMain.o
