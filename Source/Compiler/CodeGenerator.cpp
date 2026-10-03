@@ -307,6 +307,10 @@ void WriteCompiledStyles(
         if (rule.borderPx >= 0) {
             output << "        rule.borderPx = " << rule.borderPx << ";\n";
         }
+        for (const StyleDeclaration& declaration : rule.declarations) {
+            output << "        rule.declarations.push_back(RoboWeb::StyleDeclaration{\"" << Escape(declaration.name) << "\", \""
+                   << Escape(declaration.value) << "\"});\n";
+        }
         output << "        document.styleRules.push_back(rule);\n";
         output << "    }\n";
     }

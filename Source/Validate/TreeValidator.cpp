@@ -1,6 +1,7 @@
 #include "Validate/TreeValidator.h"
 
 #include "Catalog/AttributeCatalog.h"
+#include "Catalog/SvgCatalog.h"
 #include "Core/Utf8.h"
 
 #include <initializer_list>
@@ -163,11 +164,22 @@ void ValidateNode(const Document& document, Diagnostics& diagnostics, const Node
                     document.sourcePath, attribute.line, attribute.column, "unknown event handler '" + name + "'");
             }
             const bool svgContext = node.kind == ElementKind::Svg || ToLowerAscii(node.tagName) == "svg" || NestedSvg(node);
-            const bool svgAttribute = svgContext && (IsSvgAttribute(name) || name == "width" || name == "height" || name == "xmlns");
-            if (!IsKnownAttribute(name) && !svgAttribute) {
+            if (svgContext) {
+                const SvgElementKind svgKind = FindSvgElement(ToLowerAscii(node.tagName));
+                if (IsSvgAttributeName(name)) {
+                    if (svgKind != SvgElementKind::Unknown && !SvgAttributeAppliesTo(name, svgKind)) {
+                        diagnostics.Warning(
+                            document.sourcePath, attribute.line, attribute.column,
+                            "attribute '" + name + "' is not allowed on element '" + node.tagName + "'");
+                    }
+                } else if (!IsKnownAttribute(name)) {
+                    diagnostics.Warning(
+                        document.sourcePath, attribute.line, attribute.column, "unknown attribute '" + name + "'");
+                }
+            } else if (!IsKnownAttribute(name)) {
                 diagnostics.Warning(
                     document.sourcePath, attribute.line, attribute.column, "unknown attribute '" + name + "'");
-            } else if (!svgAttribute && !AttributeAppliesTo(name, node.kind == ElementKind::Unknown ? ElementKind::Span : node.kind)) {
+            } else if (!AttributeAppliesTo(name, node.kind == ElementKind::Unknown ? ElementKind::Span : node.kind)) {
                 diagnostics.Warning(
                     document.sourcePath, attribute.line, attribute.column,
                     "attribute '" + name + "' is not allowed on element '" + node.tagName + "'");

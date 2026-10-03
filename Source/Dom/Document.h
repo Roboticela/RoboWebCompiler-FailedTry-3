@@ -72,8 +72,16 @@ struct StaticDocument {
     const char* sourcePath;
 };
 
+struct StyleDeclaration {
+    std::string name;
+    std::string value;
+};
+
 struct ElementStyle {
     std::string selector;
+    // Raw declarations kept so SVG presentation properties (fill, stroke,
+    // stroke-width, text-anchor, ...) resolve through the CSS cascade.
+    std::vector<StyleDeclaration> declarations;
     std::string fontFamily;
     int fontWeight = -1;
     int fontStyle = -1;

@@ -32,6 +32,11 @@ constexpr int MAX_GEOLOCATION_CONTROLS = 3;
 constexpr int TAB_WIDTH_COLUMNS = 8;
 constexpr int HR_THICKNESS_PX = 2;
 constexpr unsigned COLOR_CHANNELS = 4;
+constexpr int SVG_CLIP_CIRCLE_STEPS = 180;
+constexpr int SVG_CLIP_CIRCLE_MAX_STEPS = 720;
+constexpr int SVG_STROKE_ROUND_MIN_STEPS = 12;
+constexpr int SVG_STROKE_ROUND_MAX_STEPS = 64;
+constexpr double SVG_STROKE_FLAT_EPSILON = 0.000001;
 
 constexpr unsigned TRAIT_VOID = 1u << 0;
 constexpr unsigned TRAIT_OBSOLETE = 1u << 1;

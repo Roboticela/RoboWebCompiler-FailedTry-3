@@ -5,6 +5,7 @@ OBJDIR := Build/Objects
 RUNTIME_OBJS := \
 	$(OBJDIR)/Document.o \
 	$(OBJDIR)/ElementCatalog.o \
+	$(OBJDIR)/SvgCatalog.o \
 	$(OBJDIR)/LayoutEngine.o \
 	$(OBJDIR)/InterFontData.o \
 	$(OBJDIR)/BitmapFont.o \
@@ -20,6 +21,7 @@ COMPILER_OBJS := \
 	$(OBJDIR)/Diagnostics.o \
 	$(OBJDIR)/ElementCatalog.o \
 	$(OBJDIR)/AttributeCatalog.o \
+	$(OBJDIR)/SvgCatalog.o \
 	$(OBJDIR)/TreeValidator.o \
 	$(OBJDIR)/CharacterReference.o \
 	$(OBJDIR)/HtmlParser.o \
@@ -33,6 +35,7 @@ TEST_OBJS := \
 	$(OBJDIR)/Diagnostics.o \
 	$(OBJDIR)/ElementCatalog.o \
 	$(OBJDIR)/AttributeCatalog.o \
+	$(OBJDIR)/SvgCatalog.o \
 	$(OBJDIR)/TreeValidator.o \
 	$(OBJDIR)/CharacterReference.o \
 	$(OBJDIR)/HtmlParser.o \
@@ -73,6 +76,9 @@ $(OBJDIR)/ElementCatalog.o: Source/Catalog/ElementCatalog.cpp | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(OBJDIR)/AttributeCatalog.o: Source/Catalog/AttributeCatalog.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(OBJDIR)/SvgCatalog.o: Source/Catalog/SvgCatalog.cpp | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(OBJDIR)/TreeValidator.o: Source/Validate/TreeValidator.cpp | $(OBJDIR)

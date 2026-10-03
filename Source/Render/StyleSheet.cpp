@@ -472,6 +472,12 @@ void ParseDeclarations(const std::string& body, ElementStyle& rule) {
             continue;
         }
         ApplyDeclaration(rule, piece.substr(0, colon), piece.substr(colon + 1));
+        StyleDeclaration declaration;
+        declaration.name = ToLowerAscii(Trim(piece.substr(0, colon)));
+        declaration.value = Trim(piece.substr(colon + 1));
+        if (!declaration.name.empty() && !declaration.value.empty()) {
+            rule.declarations.push_back(declaration);
+        }
     }
 }
 
@@ -699,7 +705,7 @@ void AddRule(Document& document, const std::string& selector, const std::string&
         rule.marginRightPx >= 0 || rule.marginBottomPx >= 0 || rule.marginLeftPx >= 0 || rule.paddingTopPx >= 0 ||
         rule.paddingRightPx >= 0 || rule.paddingBottomPx >= 0 || rule.paddingLeftPx >= 0 || rule.textAlign >= 0 ||
         rule.decoration >= 0 || rule.whiteSpace >= 0 || rule.borderPx >= 0 || rule.hasLetterSpacing || rule.hasWordSpacing || rule.hasLineHeight ||
-            rule.hasTextIndent || rule.hasTextTransform || rule.hasDecorationColor || rule.hasUnderlineOffset) {
+            rule.hasTextIndent || rule.hasTextTransform || rule.hasDecorationColor || rule.hasUnderlineOffset || !rule.declarations.empty()) {
         document.styleRules.push_back(rule);
     }
 }

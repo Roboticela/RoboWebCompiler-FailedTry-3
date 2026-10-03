@@ -1,5 +1,6 @@
 #include "Catalog/AttributeCatalog.h"
 #include "Catalog/ElementCatalog.h"
+#include "Catalog/SvgCatalog.h"
 #include "Compiler/CodeGenerator.h"
 #include "Diagnostics/Diagnostics.h"
 #include "Dom/Document.h"
@@ -612,8 +613,11 @@ void TestHtmlBehavior() {
     const RoboWeb::ElementBox* joinPathBox = RoboWeb::FindBox(joinPathLayout, "svg");
     EXPECT(joinPathBox != nullptr);
     if (joinPathBox != nullptr) {
-        EXPECT(RoboWeb::PixelGreen(joinPathFrame, joinPathBox->x + 31, joinPathBox->y + 4) == 0);
-        EXPECT(RoboWeb::PixelRed(joinPathFrame, joinPathBox->x + 31, joinPathBox->y + 4) == 255);
+        // The miter tip is the outer corner of the offset rectangle: the 90°
+        // corner of an 8px stroke reaches four pixels past the vertex.
+        EXPECT(RoboWeb::PixelGreen(joinPathFrame, joinPathBox->x + 32, joinPathBox->y + 6) == 0);
+        EXPECT(RoboWeb::PixelRed(joinPathFrame, joinPathBox->x + 32, joinPathBox->y + 6) == 255);
+        EXPECT(RoboWeb::PixelGreen(joinPathFrame, joinPathBox->x + 31, joinPathBox->y + 4) == 255);
         EXPECT(RoboWeb::PixelGreen(joinPathFrame, joinPathBox->x + 2, joinPathBox->y + 2) == 255);
     }
     RoboWeb::Document capPath = Parse(
@@ -624,8 +628,11 @@ void TestHtmlBehavior() {
     const RoboWeb::ElementBox* capPathBox = RoboWeb::FindBox(capPathLayout, "svg");
     EXPECT(capPathBox != nullptr);
     if (capPathBox != nullptr) {
-        EXPECT(RoboWeb::PixelGreen(capPathFrame, capPathBox->x + 30, capPathBox->y + 12) == 0);
-        EXPECT(RoboWeb::PixelRed(capPathFrame, capPathBox->x + 30, capPathBox->y + 12) == 255);
+        // A square cap extends the stroke by half its width: 8..24 becomes
+        // 4..28, so column 27 is the last painted one.
+        EXPECT(RoboWeb::PixelGreen(capPathFrame, capPathBox->x + 27, capPathBox->y + 12) == 0);
+        EXPECT(RoboWeb::PixelRed(capPathFrame, capPathBox->x + 27, capPathBox->y + 12) == 255);
+        EXPECT(RoboWeb::PixelGreen(capPathFrame, capPathBox->x + 29, capPathBox->y + 12) == 255);
         EXPECT(RoboWeb::PixelGreen(capPathFrame, capPathBox->x + 2, capPathBox->y + 2) == 255);
     }
     RoboWeb::Document scaled = Parse(
@@ -1129,7 +1136,8 @@ void TestHtmlBehavior() {
     const RoboWeb::ElementBox* cappedBox = RoboWeb::FindBox(cappedLayout, "svg");
     EXPECT(cappedBox != nullptr);
     if (cappedBox != nullptr) {
-        EXPECT(RoboWeb::PixelGreen(cappedFrame, cappedBox->x + 10, cappedBox->y + 8) == 0);
+        EXPECT(RoboWeb::PixelGreen(cappedFrame, cappedBox->x + 13, cappedBox->y + 8) == 0);
+        EXPECT(RoboWeb::PixelGreen(cappedFrame, cappedBox->x + 10, cappedBox->y + 8) == 255);
     }
     RoboWeb::Document wideMarker = Parse(
         "<!DOCTYPE html><svg width='50' height='20'><defs><marker id='wide' markerWidth='12' markerHeight='12'><rect width='2' height='2' fill='red'/></marker></defs><line x1='4' y1='4' x2='20' y2='4' stroke='black' marker-end='url(#wide)'/></svg>",
@@ -1984,8 +1992,11 @@ void TestHtmlBehavior() {
     const RoboWeb::ElementBox* miterBox = RoboWeb::FindBox(miterSharpLayout, "svg");
     EXPECT(miterBox != nullptr);
     if (miterBox != nullptr) {
-        EXPECT(RoboWeb::PixelGreen(miterSharpFrame, miterBox->x + 20, miterBox->y + 10) == 0);
-        EXPECT(RoboWeb::PixelGreen(miterCutFrame, miterBox->x + 20, miterBox->y + 10) == 255);
+        // The 73.7° vertex miters to (20,11); with miterlimit 1 the join is
+        // beveled and its cut edge sits at y=12.8, leaving row 11 empty.
+        EXPECT(RoboWeb::PixelGreen(miterSharpFrame, miterBox->x + 19, miterBox->y + 11) == 0);
+        EXPECT(RoboWeb::PixelGreen(miterCutFrame, miterBox->x + 19, miterBox->y + 11) == 255);
+        EXPECT(RoboWeb::PixelGreen(miterSharpFrame, miterBox->x + 20, miterBox->y + 10) == 255);
     }
     RoboWeb::Document stitched = Parse(
         "<!DOCTYPE html><svg width='16' height='8'><defs><filter id='n'><feTurbulence baseFrequency='1' seed='3' stitchTiles='stitch'/></filter></defs><rect width='16' height='8' filter='url(#n)'/></svg>",
@@ -3590,6 +3601,482 @@ void TestHtmlBehavior() {
     EXPECT(RoboWeb::FindBox(RoboWeb::LayoutDocument(frames, 300, 200), "frame") != nullptr);
 }
 
+// Covers the SVG specification surface the runtime implements: the element and
+// attribute catalogs, the color syntaxes CSS shares with SVG, shape geometry
+// (rounded corners and dashed strokes), the affine transform stack, the
+// presentation-attribute cascade, gradient and marker transforms, and the
+// clip-path engine that masks every fill, stroke and text draw.
+void TestSvgSpecification() {
+    RoboWeb::Diagnostics diagnostics;
+    struct SvgFrame {
+        RoboWeb::LayoutResult layout;
+        RoboWeb::Framebuffer framebuffer;
+        int originX = 0;
+        int originY = 0;
+    };
+    auto render = [&](const std::string& markup, int width, int height) {
+        RoboWeb::Document document = Parse("<!DOCTYPE html>" + markup, diagnostics);
+        SvgFrame frame;
+        frame.layout = RoboWeb::LayoutDocument(document, width, height);
+        frame.framebuffer = RoboWeb::RenderDocument(frame.layout, 0);
+        const RoboWeb::ElementBox* box = RoboWeb::FindBox(frame.layout, "svg");
+        if (box != nullptr) {
+            frame.originX = box->x;
+            frame.originY = box->y;
+        }
+        return frame;
+    };
+    auto pixelRed = [](const SvgFrame& frame, int x, int y) {
+        return static_cast<int>(RoboWeb::PixelRed(frame.framebuffer, frame.originX + x, frame.originY + y));
+    };
+    auto pixelGreen = [](const SvgFrame& frame, int x, int y) {
+        return static_cast<int>(RoboWeb::PixelGreen(frame.framebuffer, frame.originX + x, frame.originY + y));
+    };
+    auto pixelBlue = [](const SvgFrame& frame, int x, int y) {
+        return static_cast<int>(RoboWeb::PixelBlue(frame.framebuffer, frame.originX + x, frame.originY + y));
+    };
+    auto near = [](int value, int wanted, int tolerance) { return value >= wanted - tolerance && value <= wanted + tolerance; };
+    auto matches = [&](const SvgFrame& frame, int x, int y, int red, int green, int blue, int tolerance) {
+        return near(pixelRed(frame, x, y), red, tolerance) && near(pixelGreen(frame, x, y), green, tolerance) &&
+               near(pixelBlue(frame, x, y), blue, tolerance);
+    };
+    auto isRed = [&](const SvgFrame& frame, int x, int y) { return matches(frame, x, y, 255, 0, 0, 2); };
+    auto isGreen = [&](const SvgFrame& frame, int x, int y) { return matches(frame, x, y, 0, 255, 0, 2); };
+    auto isBlue = [&](const SvgFrame& frame, int x, int y) { return matches(frame, x, y, 0, 0, 255, 2); };
+    auto isWhite = [&](const SvgFrame& frame, int x, int y) { return matches(frame, x, y, 255, 255, 255, 2); };
+    auto redPixels = [&](const SvgFrame& frame) {
+        int count = 0;
+        for (int y = 0; y < frame.framebuffer.height; ++y) {
+            for (int x = 0; x < frame.framebuffer.width; ++x) {
+                if (RoboWeb::PixelRed(frame.framebuffer, x, y) > 200 && RoboWeb::PixelGreen(frame.framebuffer, x, y) < 60 &&
+                    RoboWeb::PixelBlue(frame.framebuffer, x, y) < 60) {
+                    ++count;
+                }
+            }
+        }
+        return count;
+    };
+    auto differs = [&](const SvgFrame& first, const SvgFrame& second) {
+        if (first.framebuffer.pixels.size() != second.framebuffer.pixels.size()) {
+            return true;
+        }
+        for (std::size_t index = 0; index < first.framebuffer.pixels.size(); ++index) {
+            if (first.framebuffer.pixels[index] != second.framebuffer.pixels[index]) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // Element, attribute and color catalogs.
+    {
+        std::string catalogError;
+        EXPECT(RoboWeb::SvgCatalogSelfCheck(catalogError));
+        EXPECT(RoboWeb::SvgAttributeCatalogSelfCheck(catalogError));
+        EXPECT(RoboWeb::SvgElementCount() > 60);
+        EXPECT(RoboWeb::SvgAttributeCount() > 100);
+        EXPECT(RoboWeb::FindSvgElement("fegaussianblur") == RoboWeb::SvgElementKind::FeGaussianBlur);
+        EXPECT(RoboWeb::FindSvgElement("lineargradient") == RoboWeb::SvgElementKind::LinearGradient);
+        EXPECT(RoboWeb::FindSvgElement("clippath") == RoboWeb::SvgElementKind::ClipPath);
+        EXPECT(RoboWeb::FindSvgElement("notanelement") == RoboWeb::SvgElementKind::Unknown);
+        EXPECT(RoboWeb::IsSvgElementName("foreignobject"));
+        EXPECT(!RoboWeb::IsSvgElementName("div"));
+        EXPECT(RoboWeb::SvgElementNeverRendered(RoboWeb::SvgElementKind::ClipPath));
+        EXPECT(RoboWeb::SvgElementNeverRendered(RoboWeb::SvgElementKind::Filter));
+        EXPECT(!RoboWeb::SvgElementNeverRendered(RoboWeb::SvgElementKind::Rect));
+        EXPECT(RoboWeb::IsSvgAttributeName("stroke-dasharray"));
+        EXPECT(RoboWeb::IsSvgPresentationAttribute("fill-opacity"));
+        EXPECT(!RoboWeb::IsSvgPresentationAttribute("d"));
+        EXPECT(RoboWeb::SvgAttributeAppliesTo("d", RoboWeb::SvgElementKind::Path));
+        EXPECT(RoboWeb::SvgAttributeAppliesTo("r", RoboWeb::SvgElementKind::Circle));
+        EXPECT(!RoboWeb::SvgAttributeAppliesTo("r", RoboWeb::SvgElementKind::Rect));
+        std::uint8_t red = 0;
+        std::uint8_t green = 0;
+        std::uint8_t blue = 0;
+        EXPECT(RoboWeb::LookupSvgColorKeyword("rebeccapurple", red, green, blue) && red == 102 && green == 51 && blue == 153);
+        EXPECT(RoboWeb::LookupSvgColorKeyword("cornflowerblue", red, green, blue) && red == 100 && green == 149 && blue == 237);
+        EXPECT(!RoboWeb::LookupSvgColorKeyword("notacolor", red, green, blue));
+    }
+
+    // Color syntaxes shared with CSS Color 4.
+    {
+        SvgFrame hslFrame = render("<svg width='20' height='20'><rect width='20' height='20' fill='hsl(120, 100%, 50%)'/></svg>", 80, 48);
+        EXPECT(matches(hslFrame, 10, 10, 0, 255, 0, 2));
+        SvgFrame turnFrame = render("<svg width='20' height='20'><rect width='20' height='20' fill='hsl(0.5turn, 100%, 50%)'/></svg>", 80, 48);
+        EXPECT(matches(turnFrame, 10, 10, 0, 255, 255, 2));
+        SvgFrame percentFrame = render("<svg width='20' height='20'><rect width='20' height='20' fill='rgb(100%, 0%, 0%)'/></svg>", 80, 48);
+        EXPECT(isRed(percentFrame, 10, 10));
+        SvgFrame shortHex = render("<svg width='20' height='20'><rect width='20' height='20' fill='#0f0'/></svg>", 80, 48);
+        EXPECT(isGreen(shortHex, 10, 10));
+        SvgFrame alphaHex = render("<svg width='20' height='20'><rect width='20' height='20' fill='#0000ff80'/></svg>", 80, 48);
+        EXPECT(matches(alphaHex, 10, 10, 127, 127, 255, 2));
+        SvgFrame shortAlphaHex = render("<svg width='20' height='20'><rect width='20' height='20' fill='#0f08'/></svg>", 80, 48);
+        EXPECT(matches(shortAlphaHex, 10, 10, 119, 255, 119, 2));
+        SvgFrame rgbaFrame = render("<svg width='20' height='20'><rect width='20' height='20' fill='rgba(255, 0, 0, 0.5)'/></svg>", 80, 48);
+        EXPECT(matches(rgbaFrame, 10, 10, 255, 127, 127, 2));
+        SvgFrame transparentFrame = render("<svg width='20' height='20'><rect width='20' height='20' fill='transparent'/></svg>", 80, 48);
+        EXPECT(isWhite(transparentFrame, 10, 10));
+        SvgFrame keywordFrame = render("<svg width='20' height='20'><rect width='20' height='20' fill='rebeccapurple'/></svg>", 80, 48);
+        EXPECT(matches(keywordFrame, 10, 10, 102, 51, 153, 2));
+        SvgFrame currentColorFrame = render("<svg width='20' height='20'><rect width='20' height='20' color='blue' fill='currentColor'/></svg>", 80, 48);
+        EXPECT(isBlue(currentColorFrame, 10, 10));
+    }
+
+    // Rounded rectangle geometry, radii defaults and clamping.
+    {
+        SvgFrame rounded = render("<svg width='20' height='20'><rect width='20' height='20' rx='6' ry='6' fill='red'/></svg>", 80, 48);
+        EXPECT(isRed(rounded, 10, 10));
+        EXPECT(isRed(rounded, 10, 1));
+        EXPECT(isRed(rounded, 1, 10));
+        EXPECT(isWhite(rounded, 0, 0));
+        EXPECT(isWhite(rounded, 19, 0));
+        EXPECT(isWhite(rounded, 0, 19));
+        EXPECT(isWhite(rounded, 19, 19));
+        SvgFrame autoRadius = render("<svg width='20' height='20'><rect width='20' height='20' rx='6' fill='red'/></svg>", 80, 48);
+        EXPECT(isWhite(autoRadius, 0, 0) && isRed(autoRadius, 10, 10) && isRed(autoRadius, 10, 0));
+        SvgFrame clamped = render("<svg width='20' height='10'><rect width='20' height='10' ry='20' fill='red'/></svg>", 80, 48);
+        EXPECT(isWhite(clamped, 0, 0));
+        EXPECT(isRed(clamped, 0, 5));
+        EXPECT(isRed(clamped, 10, 5));
+        EXPECT(isRed(clamped, 18, 5));
+        EXPECT(isWhite(clamped, 19, 5));
+        SvgFrame oval = render("<svg width='20' height='20'><rect width='20' height='20' rx='10' ry='4' fill='red'/></svg>", 80, 48);
+        EXPECT(isWhite(oval, 0, 0));
+        EXPECT(isRed(oval, 0, 10));
+        EXPECT(isRed(oval, 10, 1));
+        SvgFrame roundedStroke = render("<svg width='20' height='20'><rect width='20' height='20' rx='6' fill='none' stroke='red' stroke-width='2'/></svg>", 80, 48);
+        EXPECT(isWhite(roundedStroke, 19, 19));
+        EXPECT(isWhite(roundedStroke, 0, 19));
+        EXPECT(isRed(roundedStroke, 10, 0));
+        EXPECT(isRed(roundedStroke, 0, 10));
+    }
+
+    // Dashed strokes: the pattern walks the outline in pixels, odd lists are
+    // duplicated, and non-positive patterns mean "no dashes".
+    {
+        SvgFrame solidLine = render("<svg width='40' height='8'><line x1='0' y1='4' x2='40' y2='4' stroke='red' stroke-width='2'/></svg>", 120, 40);
+        SvgFrame dashedLine = render(
+            "<svg width='40' height='8'><line x1='0' y1='4' x2='40' y2='4' stroke='red' stroke-width='2' stroke-dasharray='10 10'/></svg>", 120, 40);
+        EXPECT(isRed(solidLine, 12, 4));
+        EXPECT(isRed(dashedLine, 2, 4));
+        EXPECT(isWhite(dashedLine, 12, 4));
+        EXPECT(isRed(dashedLine, 22, 4));
+        EXPECT(redPixels(dashedLine) > 0 && redPixels(dashedLine) < redPixels(solidLine));
+        SvgFrame oddLine = render(
+            "<svg width='40' height='8'><line x1='0' y1='4' x2='40' y2='4' stroke='red' stroke-width='2' stroke-dasharray='5 5 5'/></svg>", 120, 40);
+        EXPECT(isRed(oddLine, 2, 4));
+        EXPECT(isWhite(oddLine, 7, 4));
+        EXPECT(isRed(oddLine, 12, 4));
+        SvgFrame negativeLine = render(
+            "<svg width='40' height='8'><line x1='0' y1='4' x2='40' y2='4' stroke='red' stroke-width='2' stroke-dasharray='-5 5'/></svg>", 120, 40);
+        EXPECT(isRed(negativeLine, 12, 4));
+        SvgFrame zeroLine = render(
+            "<svg width='40' height='8'><line x1='0' y1='4' x2='40' y2='4' stroke='red' stroke-width='2' stroke-dasharray='0 0'/></svg>", 120, 40);
+        EXPECT(isRed(zeroLine, 12, 4));
+        SvgFrame shiftedLine = render(
+            "<svg width='40' height='8'><line x1='0' y1='4' x2='40' y2='4' stroke='red' stroke-width='2' stroke-dasharray='10 10' stroke-dashoffset='10'/></svg>", 120, 40);
+        EXPECT(isWhite(shiftedLine, 2, 4));
+        EXPECT(isRed(shiftedLine, 12, 4));
+        SvgFrame solidRect = render("<svg width='40' height='8'><rect width='40' height='8' fill='none' stroke='red' stroke-width='2'/></svg>", 120, 40);
+        SvgFrame dashedRect = render(
+            "<svg width='40' height='8'><rect width='40' height='8' fill='none' stroke='red' stroke-width='2' stroke-dasharray='6 6'/></svg>", 120, 40);
+        EXPECT(redPixels(dashedRect) > 0 && redPixels(dashedRect) < redPixels(solidRect));
+        SvgFrame solidCircle = render("<svg width='20' height='20'><circle cx='10' cy='10' r='8' fill='none' stroke='red' stroke-width='2'/></svg>", 80, 48);
+        SvgFrame dashedCircle = render(
+            "<svg width='20' height='20'><circle cx='10' cy='10' r='8' fill='none' stroke='red' stroke-width='2' stroke-dasharray='4 6'/></svg>", 80, 48);
+        EXPECT(redPixels(dashedCircle) > 0 && redPixels(dashedCircle) < redPixels(solidCircle));
+        SvgFrame dashedPath = render(
+            "<svg width='40' height='8'><path d='M2 4 L38 4' fill='none' stroke='red' stroke-width='2' stroke-dasharray='6 6'/></svg>", 120, 40);
+        EXPECT(redPixels(dashedPath) > 0 && redPixels(dashedPath) < redPixels(solidLine));
+    }
+
+    // The affine transform stack, including skew and combined lists.
+    {
+        SvgFrame translated = render("<svg width='40' height='20'><rect width='10' height='10' fill='red' transform='translate(20 2)'/></svg>", 120, 48);
+        EXPECT(isWhite(translated, 4, 4));
+        EXPECT(isRed(translated, 24, 6));
+        SvgFrame matrixTranslated = render("<svg width='40' height='20'><rect width='10' height='10' fill='red' transform='matrix(1 0 0 1 20 2)'/></svg>", 120, 48);
+        EXPECT(isWhite(matrixTranslated, 4, 4));
+        EXPECT(isRed(matrixTranslated, 24, 6));
+        SvgFrame scaled = render("<svg width='40' height='20'><rect width='10' height='10' fill='red' transform='scale(2)'/></svg>", 120, 48);
+        EXPECT(isRed(scaled, 18, 18));
+        SvgFrame skewed = render("<svg width='40' height='20'><rect width='10' height='10' fill='red' transform='skewX(45)'/></svg>", 120, 48);
+        EXPECT(isWhite(skewed, 2, 9));
+        EXPECT(isRed(skewed, 14, 9));
+        SvgFrame skewedY = render("<svg width='40' height='20'><rect width='10' height='10' fill='red' transform='skewY(45)'/></svg>", 120, 48);
+        EXPECT(isWhite(skewedY, 9, 4));
+        EXPECT(isRed(skewedY, 9, 14));
+        SvgFrame rotatedSquare = render("<svg width='20' height='20'><rect width='10' height='10' fill='red' transform='rotate(90 5 5)'/></svg>", 80, 48);
+        EXPECT(isRed(rotatedSquare, 1, 1) && isRed(rotatedSquare, 5, 5) && isRed(rotatedSquare, 8, 8));
+        SvgFrame combined = render("<svg width='40' height='20'><rect width='10' height='10' fill='red' transform='translate(10 0) scale(2)'/></svg>", 120, 48);
+        EXPECT(isWhite(combined, 4, 4));
+        EXPECT(isRed(combined, 14, 4));
+        EXPECT(isWhite(combined, 34, 4));
+    }
+
+    // Presentation attributes are the weakest source; stylesheets and inline
+    // styles override them, and !important overrides a normal inline style.
+    {
+        SvgFrame ruleWins = render(
+            "<style>rect.hot { fill: lime }</style><svg width='20' height='20'><rect class='hot' width='20' height='20' fill='red'/></svg>", 80, 48);
+        EXPECT(isGreen(ruleWins, 10, 10));
+        SvgFrame cssGreen = render("<svg width='20' height='20'><rect width='20' height='20' fill='green'/></svg>", 80, 48);
+        EXPECT(matches(cssGreen, 10, 10, 0, 128, 0, 2));
+        SvgFrame inlineWins = render(
+            "<style>rect.hot { fill: lime }</style><svg width='20' height='20'><rect class='hot' style='fill: blue' width='20' height='20' fill='red'/></svg>", 80, 48);
+        EXPECT(isBlue(inlineWins, 10, 10));
+        SvgFrame importantWins = render(
+            "<style>rect.hot { fill: lime !important }</style><svg width='20' height='20'><rect class='hot' style='fill: blue' width='20' height='20' fill='red'/></svg>",
+            80, 48);
+        EXPECT(isGreen(importantWins, 10, 10));
+        SvgFrame attributeDefault = render("<svg width='20' height='20'><rect width='20' height='20' fill='red'/></svg>", 80, 48);
+        EXPECT(isRed(attributeDefault, 10, 10));
+        SvgFrame strokeRule = render(
+            "<style>rect { stroke: lime; stroke-width: 4 }</style><svg width='20' height='20'><rect width='20' height='20' fill='none' stroke='red' stroke-width='1'/></svg>",
+            80, 48);
+        EXPECT(isGreen(strokeRule, 10, 1));
+        SvgFrame hiddenShape = render(
+            "<style>rect { visibility: hidden }</style><svg width='20' height='20'><rect width='20' height='20' fill='red'/></svg>", 80, 48);
+        EXPECT(isWhite(hiddenShape, 10, 10));
+        SvgFrame displayNone = render("<svg width='20' height='20'><rect width='20' height='20' fill='red' display='none'/></svg>", 80, 48);
+        EXPECT(isWhite(displayNone, 10, 10));
+    }
+
+    // Gradient transforms reshape the gradient axis in gradient space.
+    {
+        SvgFrame plainGradient = render(
+            "<svg width='20' height='20'><defs><linearGradient id='g'><stop offset='0' stop-color='red'/><stop offset='1' stop-color='blue'/></linearGradient></defs>"
+            "<rect width='20' height='20' fill='url(#g)'/></svg>",
+            80, 48);
+        EXPECT(pixelRed(plainGradient, 1, 10) > pixelBlue(plainGradient, 1, 10));
+        EXPECT(pixelBlue(plainGradient, 18, 10) > pixelRed(plainGradient, 18, 10));
+        EXPECT(pixelBlue(plainGradient, 1, 1) < 200);
+        SvgFrame turnedGradient = render(
+            "<svg width='20' height='20'><defs><linearGradient id='g' gradientTransform='rotate(90 0.5 0.5)'><stop offset='0' stop-color='red'/>"
+            "<stop offset='1' stop-color='blue'/></linearGradient></defs><rect width='20' height='20' fill='url(#g)'/></svg>",
+            80, 48);
+        EXPECT(pixelRed(turnedGradient, 10, 1) > pixelBlue(turnedGradient, 10, 1));
+        EXPECT(pixelBlue(turnedGradient, 10, 18) > pixelRed(turnedGradient, 10, 18));
+        SvgFrame plainRadial = render(
+            "<svg width='20' height='20'><defs><radialGradient id='r'><stop offset='0' stop-color='red'/><stop offset='1' stop-color='blue'/></radialGradient></defs>"
+            "<rect width='20' height='20' fill='url(#r)'/></svg>",
+            80, 48);
+        EXPECT(pixelBlue(plainRadial, 18, 18) > pixelRed(plainRadial, 18, 18));
+        SvgFrame stretchedRadial = render(
+            "<svg width='20' height='20'><defs><radialGradient id='r' gradientTransform='scale(2 2)'><stop offset='0' stop-color='red'/>"
+            "<stop offset='1' stop-color='blue'/></radialGradient></defs><rect width='20' height='20' fill='url(#r)'/></svg>",
+            80, 48);
+        EXPECT(pixelRed(stretchedRadial, 18, 18) > pixelRed(plainRadial, 18, 18));
+    }
+
+    // Marker orientation and the markerUnits scaling.
+    {
+        SvgFrame autoMarkers = render(
+            "<svg width='40' height='40'><defs><marker id='m' orient='auto' markerWidth='6' markerHeight='6' refX='3' refY='3'>"
+            "<rect width='6' height='3' fill='red'/></marker></defs><line x1='4' y1='4' x2='36' y2='36' stroke='black' marker-end='url(#m)'/></svg>",
+            120, 80);
+        SvgFrame fixedMarkers = render(
+            "<svg width='40' height='40'><defs><marker id='m' orient='0' markerWidth='6' markerHeight='6' refX='3' refY='3'>"
+            "<rect width='6' height='3' fill='red'/></marker></defs><line x1='4' y1='4' x2='36' y2='36' stroke='black' marker-end='url(#m)'/></svg>",
+            120, 80);
+        EXPECT(redPixels(autoMarkers) > 0);
+        EXPECT(redPixels(fixedMarkers) > 0);
+        EXPECT(differs(autoMarkers, fixedMarkers));
+        SvgFrame strokeUnitMarker = render(
+            "<svg width='40' height='10'><defs><marker id='m' markerWidth='4' markerHeight='4' markerUnits='strokeWidth'>"
+            "<rect x='-4' y='-2' width='4' height='4' fill='red'/></marker></defs>"
+            "<line x1='0' y1='5' x2='30' y2='5' stroke='black' stroke-width='3' marker-end='url(#m)'/></svg>",
+            120, 40);
+        SvgFrame userUnitMarker = render(
+            "<svg width='40' height='10'><defs><marker id='m' markerWidth='4' markerHeight='4' markerUnits='userSpaceOnUse'>"
+            "<rect x='-4' y='-2' width='4' height='4' fill='red'/></marker></defs>"
+            "<line x1='0' y1='5' x2='30' y2='5' stroke='black' stroke-width='3' marker-end='url(#m)'/></svg>",
+            120, 40);
+        EXPECT(isRed(strokeUnitMarker, 20, 5));
+        EXPECT(!isRed(userUnitMarker, 20, 5));
+        EXPECT(redPixels(strokeUnitMarker) > redPixels(userUnitMarker));
+    }
+
+    // clip-path masking: shapes, transforms, nesting, units and text.
+    {
+        SvgFrame circleClip = render(
+            "<svg width='20' height='20'><defs><clipPath id='c'><circle cx='10' cy='10' r='6'/></clipPath></defs>"
+            "<rect width='20' height='20' fill='red' clip-path='url(#c)'/></svg>",
+            80, 48);
+        EXPECT(isRed(circleClip, 10, 10));
+        EXPECT(isRed(circleClip, 10, 5));
+        EXPECT(isWhite(circleClip, 1, 1));
+        EXPECT(isWhite(circleClip, 19, 19));
+        SvgFrame pathClip = render(
+            "<svg width='20' height='20'><defs><clipPath id='c'><path d='M0 0 L20 0 L10 20 Z'/></clipPath></defs>"
+            "<rect width='20' height='20' fill='red' clip-path='url(#c)'/></svg>",
+            80, 48);
+        EXPECT(isRed(pathClip, 10, 4));
+        EXPECT(isWhite(pathClip, 1, 18));
+        EXPECT(isWhite(pathClip, 19, 18));
+        SvgFrame polygonClip = render(
+            "<svg width='20' height='20'><defs><clipPath id='c'><polygon points='0,10 10,0 20,10 10,20'/></clipPath></defs>"
+            "<rect width='20' height='20' fill='red' clip-path='url(#c)'/></svg>",
+            80, 48);
+        EXPECT(isRed(polygonClip, 10, 10));
+        EXPECT(isWhite(polygonClip, 0, 0));
+        SvgFrame transformedClip = render(
+            "<svg width='20' height='20'><defs><clipPath id='c'><rect width='10' height='20' transform='translate(10 0)'/></clipPath></defs>"
+            "<rect width='20' height='20' fill='red' clip-path='url(#c)'/></svg>",
+            80, 48);
+        EXPECT(isWhite(transformedClip, 5, 10));
+        EXPECT(isRed(transformedClip, 15, 10));
+        SvgFrame clipPathTransform = render(
+            "<svg width='20' height='20'><defs><clipPath id='c' transform='translate(10 0)'><rect width='10' height='20'/></clipPath></defs>"
+            "<rect width='20' height='20' fill='red' clip-path='url(#c)'/></svg>",
+            80, 48);
+        EXPECT(isWhite(clipPathTransform, 5, 10));
+        EXPECT(isRed(clipPathTransform, 15, 10));
+        SvgFrame nestedClip = render(
+            "<svg width='20' height='20'><defs><clipPath id='top'><rect width='20' height='10'/></clipPath>"
+            "<clipPath id='left'><rect width='10' height='20'/></clipPath></defs>"
+            "<g clip-path='url(#top)'><rect width='20' height='20' fill='red' clip-path='url(#left)'/></g></svg>",
+            80, 48);
+        EXPECT(isRed(nestedClip, 5, 5));
+        EXPECT(isWhite(nestedClip, 15, 5));
+        EXPECT(isWhite(nestedClip, 5, 15));
+        SvgFrame emptyClip = render(
+            "<svg width='20' height='20'><defs><clipPath id='c'/></defs><rect width='20' height='20' fill='red' clip-path='url(#c)'/></svg>", 80, 48);
+        EXPECT(isWhite(emptyClip, 10, 10));
+        SvgFrame bogusClip = render(
+            "<svg width='20' height='20'><defs><rect id='c' width='4' height='4'/></defs>"
+            "<rect width='20' height='20' fill='red' clip-path='url(#c)'/></svg>",
+            80, 48);
+        EXPECT(isRed(bogusClip, 19, 19));
+        SvgFrame boundingClip = render(
+            "<svg width='20' height='20'><defs><clipPath id='c' clipPathUnits='objectBoundingBox'><circle cx='0.5' cy='0.5' r='0.5'/></clipPath></defs>"
+            "<rect width='20' height='20' fill='red' clip-path='url(#c)'/></svg>",
+            80, 48);
+        EXPECT(isRed(boundingClip, 10, 10));
+        EXPECT(isWhite(boundingClip, 0, 0));
+        SvgFrame groupBoundingClip = render(
+            "<svg width='20' height='20'><defs><clipPath id='c' clipPathUnits='objectBoundingBox'><rect width='0.5' height='1'/></clipPath></defs>"
+            "<g clip-path='url(#c)'><rect width='20' height='20' fill='red'/></g></svg>",
+            80, 48);
+        EXPECT(isRed(groupBoundingClip, 4, 10));
+        EXPECT(isWhite(groupBoundingClip, 15, 10));
+        SvgFrame clippedStroke = render(
+            "<svg width='20' height='20'><defs><clipPath id='c'><rect width='10' height='20'/></clipPath></defs>"
+            "<circle cx='10' cy='10' r='8' fill='none' stroke='red' stroke-width='3' clip-path='url(#c)'/></svg>",
+            80, 48);
+        EXPECT(isRed(clippedStroke, 2, 10));
+        EXPECT(isWhite(clippedStroke, 18, 10));
+        SvgFrame groupClip = render(
+            "<svg width='20' height='20'><defs><clipPath id='c'><rect width='10' height='20'/></clipPath></defs>"
+            "<g clip-path='url(#c)'><rect width='20' height='20' fill='red'/><circle cx='16' cy='10' r='4' fill='blue'/></g></svg>",
+            80, 48);
+        EXPECT(isRed(groupClip, 4, 10));
+        EXPECT(isWhite(groupClip, 15, 10));
+        SvgFrame openText = render("<svg width='40' height='20'><text x='0' y='14' font-size='14' fill='red'>MMMM</text></svg>", 120, 48);
+        SvgFrame clippedText = render(
+            "<svg width='40' height='20'><defs><clipPath id='c'><rect width='8' height='20'/></clipPath></defs>"
+            "<text x='0' y='14' font-size='14' fill='red' clip-path='url(#c)'>MMMM</text></svg>",
+            120, 48);
+        EXPECT(redPixels(openText) > 0);
+        EXPECT(redPixels(clippedText) > 0);
+        EXPECT(redPixels(clippedText) < redPixels(openText));
+    }
+
+    // Exact stroke geometry: the stroke is an outline of the path, so joins,
+    // caps and dash runs land on real Euclidean measurements.
+    {
+        SvgFrame miterJoin = render(
+            "<svg width='20' height='20'><path d='M2 6 H10 V14' fill='none' stroke='red' stroke-width='8' stroke-linejoin='miter'/></svg>",
+            80, 48);
+        SvgFrame bevelJoin = render(
+            "<svg width='20' height='20'><path d='M2 6 H10 V14' fill='none' stroke='red' stroke-width='8' stroke-linejoin='bevel'/></svg>",
+            80, 48);
+        SvgFrame roundJoin = render(
+            "<svg width='20' height='20'><path d='M2 6 H10 V14' fill='none' stroke='red' stroke-width='8' stroke-linejoin='round'/></svg>",
+            80, 48);
+        // The 90° corner at (10,6) miters to the offset rectangle corner
+        // (14,2); a bevel cuts across at (10,2)-(14,6) and a round join keeps
+        // only the quarter disc of radius 4 around the vertex.
+        EXPECT(isRed(miterJoin, 13, 2));
+        EXPECT(isRed(miterJoin, 13, 3));
+        EXPECT(isWhite(miterJoin, 15, 3));
+        EXPECT(isWhite(bevelJoin, 13, 3));
+        EXPECT(isRed(bevelJoin, 11, 3));
+        EXPECT(isRed(roundJoin, 12, 3));
+        EXPECT(isWhite(roundJoin, 13, 3));
+        SvgFrame miterClip = render(
+            "<svg width='48' height='40'><polyline points='4,28 20,16 36,28' fill='none' stroke='red' stroke-width='8' stroke-miterlimit='1' stroke-linejoin='miter-clip'/></svg>",
+            120, 80);
+        SvgFrame miterBevel = render(
+            "<svg width='48' height='40'><polyline points='4,28 20,16 36,28' fill='none' stroke='red' stroke-width='8' stroke-miterlimit='1' stroke-linejoin='bevel'/></svg>",
+            120, 80);
+        // miterlimit 1 clips the 5-unit spike at 4 units: row 12 is inside the
+        // clipped quad, row 11 stays empty just as it does for a bevel.
+        EXPECT(isRed(miterClip, 20, 12));
+        EXPECT(isWhite(miterClip, 19, 11));
+        EXPECT(isWhite(miterBevel, 20, 12));
+    }
+    {
+        SvgFrame buttCap = render(
+            "<svg width='30' height='20'><line x1='8' y1='10' x2='20' y2='10' stroke='red' stroke-width='6'/></svg>", 80, 48);
+        SvgFrame squareCap = render(
+            "<svg width='30' height='20'><line x1='8' y1='10' x2='20' y2='10' stroke='red' stroke-width='6' stroke-linecap='square'/></svg>",
+            80, 48);
+        SvgFrame roundCap = render(
+            "<svg width='30' height='20'><line x1='8' y1='10' x2='20' y2='10' stroke='red' stroke-width='6' stroke-linecap='round'/></svg>",
+            80, 48);
+        EXPECT(isRed(buttCap, 8, 10));
+        EXPECT(isWhite(buttCap, 5, 10));
+        EXPECT(isRed(squareCap, 5, 10));
+        EXPECT(isWhite(squareCap, 4, 10));
+        EXPECT(isRed(roundCap, 5, 10));
+        EXPECT(isWhite(roundCap, 4, 10));
+        SvgFrame hairline = render(
+            "<svg width='20' height='20'><line x1='2' y1='10' x2='18' y2='10' stroke='red'/></svg>", 80, 48);
+        SvgFrame portrait = render(
+            "<svg width='20' height='20'><line x1='10' y1='2' x2='10' y2='18' stroke='red'/></svg>", 80, 48);
+        SvgFrame invisible = render(
+            "<svg width='20' height='20'><line x1='2' y1='10' x2='18' y2='10' stroke='red' stroke-width='0'/></svg>", 80, 48);
+        EXPECT(isRed(hairline, 10, 10));
+        EXPECT(isWhite(hairline, 10, 9));
+        EXPECT(isRed(portrait, 10, 10));
+        EXPECT(isWhite(portrait, 9, 10));
+        EXPECT(isWhite(invisible, 10, 10));
+    }
+    {
+        // Diagonal dashes are measured along the line itself: 10 units of
+        // length cover 7.07 pixels of each axis, not 10.
+        SvgFrame diagonal = render(
+            "<svg width='40' height='40'><line x1='0' y1='0' x2='40' y2='40' stroke='red' stroke-width='2' stroke-dasharray='10 10'/></svg>",
+            120, 80);
+        EXPECT(isRed(diagonal, 2, 2));
+        EXPECT(isWhite(diagonal, 10, 10));
+        EXPECT(isRed(diagonal, 16, 16));
+        EXPECT(isWhite(diagonal, 26, 26));
+        SvgFrame cornerDash = render(
+            "<svg width='30' height='30'><path d='M2 6 H20 V20' fill='none' stroke='red' stroke-width='8' stroke-dasharray='22 10'/></svg>",
+            80, 48);
+        SvgFrame brokenCorner = render(
+            "<svg width='30' height='30'><path d='M2 6 H20 V20' fill='none' stroke='red' stroke-width='8' stroke-dasharray='16 10'/></svg>",
+            80, 48);
+        // One run crosses the corner, so its miter join is painted; when the
+        // gap falls on the corner the join disappears with the dash.
+        EXPECT(isRed(cornerDash, 22, 4));
+        EXPECT(isRed(cornerDash, 20, 8));
+        EXPECT(isWhite(cornerDash, 20, 16));
+        EXPECT(isRed(brokenCorner, 14, 6));
+        EXPECT(isWhite(brokenCorner, 22, 4));
+        EXPECT(isRed(brokenCorner, 20, 14));
+        SvgFrame dots = render(
+            "<svg width='30' height='20'><line x1='2' y1='10' x2='22' y2='10' stroke='red' stroke-width='4' stroke-linecap='round' stroke-dasharray='0 10'/></svg>",
+            80, 48);
+        EXPECT(isRed(dots, 2, 10));
+        EXPECT(isRed(dots, 12, 10));
+        EXPECT(isRed(dots, 22, 10));
+        EXPECT(isWhite(dots, 7, 10));
+    }
+}
+
 void TestDiagnosticFormat() {
     RoboWeb::Diagnostics diagnostics;
     diagnostics.Error("page.html", 4, 2, "duplicate attribute 'id'");
@@ -3613,6 +4100,7 @@ int main() {
     TestStyleRule();
     TestScriptAndPresentation();
     TestHtmlBehavior();
+    TestSvgSpecification();
     TestStaticGeneration();
     TestDiagnosticFormat();
     if (gFailed != 0) {
