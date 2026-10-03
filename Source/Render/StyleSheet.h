@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Diagnostics/Diagnostics.h"
 #include "Dom/Document.h"
 
 #include <string>
@@ -21,8 +22,24 @@ struct CompiledWebFont {
 
 void LoadDocumentStyles(Document& document);
 void ApplyStyleText(ElementStyle& rule, const std::string& declarations);
-bool EvaluateCssPx(const std::string& text, const std::vector<StyleDeclaration>& variables, int fontSizePx, int& pixels);
+
+struct CssLengthContext {
+    int fontSizePx = 16;
+    int rootFontSizePx = 16;
+    int lineHeightPx = 0;
+    int rootLineHeightPx = 0;
+    int zeroAdvancePx = 8;
+    int rootZeroAdvancePx = 8;
+    int viewportWidth = 0;
+    int viewportHeight = 0;
+    int percentBase = -1;
+    int containerWidth = -1;
+    int containerHeight = -1;
+};
+
+bool EvaluateCssPx(const std::string& text, const std::vector<StyleDeclaration>& variables, const CssLengthContext& context, int& pixels);
 bool EvaluateCssColor(const std::string& text, const std::vector<StyleDeclaration>& variables, std::uint8_t& red, std::uint8_t& green, std::uint8_t& blue);
+void ValidateCssText(const std::string& css, const std::string& path, int line, Diagnostics& diagnostics);
 bool CompileLinkedStyles(Document& document, std::vector<CompiledWebFont>& fonts, std::string& error);
 bool CompileRemoteImages(Document& document, std::vector<CompiledImage>& images, std::string& error);
 

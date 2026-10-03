@@ -467,6 +467,211 @@ void TestCssFunctions() {
     EXPECT(widthOf("<!DOCTYPE html><div style='width: calc(atan2(4px, 4px) / 45deg * 10px); height: 8px'></div>") == 10);
     EXPECT(widthOf("<!DOCTYPE html><div style='width: calc(tan(45deg) * 9px); height: 8px'></div>") == 9);
     EXPECT(widthOf("<!DOCTYPE html><div style='width: calc(asin(1) / 90deg * 20px); height: 8px'></div>") == 20);
+    EXPECT(widthOf("<!DOCTYPE html><div style='width:1in;height:8px'></div>") == 96);
+    EXPECT(widthOf("<!DOCTYPE html><div style='width:10vw;height:8px'></div>") == 24);
+    EXPECT(widthOf("<!DOCTYPE html><div style='width:10vh;height:8px'></div>") == 12);
+    EXPECT(widthOf("<!DOCTYPE html><style>html { font-size: 20px }</style><div style='width:2rem;height:8px'></div>") == 40);
+    EXPECT(widthOf("<!DOCTYPE html><div style='font-size:10px;width:3em;height:8px'></div>") == 30);
+    RoboWeb::Document percentBox = Parse(
+        "<!DOCTYPE html><div style='width:100px'><div id='inner' style='width:calc(50% + 10px);height:8px'></div></div>", diagnostics);
+    RoboWeb::LayoutResult percentLayout = RoboWeb::LayoutDocument(percentBox, 240, 120);
+    int innerWidth = -1;
+    for (const RoboWeb::ElementBox& box : percentLayout.boxes) {
+        if (box.node != nullptr && RoboWeb::AttributeValue(*box.node, "id") == "inner") {
+            innerWidth = box.width;
+        }
+    }
+    EXPECT(innerWidth == 60);
+    RoboWeb::Document containerBox = Parse(
+        "<!DOCTYPE html><div style='width:100px;container-type:inline-size'><div id='inner' style='width:50cqw;height:8px'></div></div>",
+        diagnostics);
+    RoboWeb::LayoutResult containerLayout = RoboWeb::LayoutDocument(containerBox, 240, 120);
+    int containerWidth = -1;
+    for (const RoboWeb::ElementBox& box : containerLayout.boxes) {
+        if (box.node != nullptr && RoboWeb::AttributeValue(*box.node, "id") == "inner") {
+            containerWidth = box.width;
+        }
+    }
+    EXPECT(containerWidth == 50);
+    RoboWeb::Document shifted = Parse(
+        "<!DOCTYPE html><div style='width:10px;height:8px;margin:0'></div><div id='moved' style='width:10px;height:8px;margin:0;transform:translate(30px, 0px)'></div>",
+        diagnostics);
+    RoboWeb::LayoutResult shiftedLayout = RoboWeb::LayoutDocument(shifted, 240, 120);
+    int plainX = -1;
+    int movedX = -1;
+    for (const RoboWeb::ElementBox& box : shiftedLayout.boxes) {
+        if (box.tag == "div" && plainX < 0) {
+            plainX = box.x;
+        }
+        if (box.node != nullptr && RoboWeb::AttributeValue(*box.node, "id") == "moved") {
+            movedX = box.x;
+        }
+    }
+    EXPECT(movedX - plainX == 30);
+    RoboWeb::Document columns = Parse(
+        "<!DOCTYPE html><div style='display:grid;grid-template-columns:20px 40px'><div id='a' style='height:8px'></div><div id='b' style='height:8px'></div></div>",
+        diagnostics);
+    RoboWeb::LayoutResult columnLayout = RoboWeb::LayoutDocument(columns, 240, 120);
+    int columnA = -1;
+    int columnB = -1;
+    for (const RoboWeb::ElementBox& box : columnLayout.boxes) {
+        if (box.node == nullptr) {
+            continue;
+        }
+        if (RoboWeb::AttributeValue(*box.node, "id") == "a") {
+            columnA = box.x;
+        }
+        if (RoboWeb::AttributeValue(*box.node, "id") == "b") {
+            columnB = box.x;
+        }
+    }
+    EXPECT(columnB - columnA == 20);
+    RoboWeb::Document gradient = Parse(
+        "<!DOCTYPE html><div style='width:20px;height:8px;background:linear-gradient(to right, #ff0000, #0000ff)'></div>", diagnostics);
+    RoboWeb::LayoutResult gradientLayout = RoboWeb::LayoutDocument(gradient, 240, 120);
+    RoboWeb::Framebuffer gradientFrame = RoboWeb::RenderDocument(gradientLayout, 0);
+    const RoboWeb::ElementBox* gradientBox = RoboWeb::FindBox(gradientLayout, "div");
+    EXPECT(gradientBox != nullptr);
+    if (gradientBox != nullptr) {
+        EXPECT(RoboWeb::PixelRed(gradientFrame, gradientBox->x, gradientBox->y + 2) == 255);
+        EXPECT(RoboWeb::PixelBlue(gradientFrame, gradientBox->x + gradientBox->width - 1, gradientBox->y + 2) > 200);
+    }
+    RoboWeb::Document gray = Parse(
+        "<!DOCTYPE html><div style='width:20px;height:8px;background:#ff0000;filter:grayscale(1)'></div>", diagnostics);
+    RoboWeb::LayoutResult grayLayout = RoboWeb::LayoutDocument(gray, 240, 120);
+    RoboWeb::Framebuffer grayFrame = RoboWeb::RenderDocument(grayLayout, 0);
+    const RoboWeb::ElementBox* grayBox = RoboWeb::FindBox(grayLayout, "div");
+    EXPECT(grayBox != nullptr);
+    if (grayBox != nullptr) {
+        const int grayRed = RoboWeb::PixelRed(grayFrame, grayBox->x + 2, grayBox->y + 2);
+        const int grayGreen = RoboWeb::PixelGreen(grayFrame, grayBox->x + 2, grayBox->y + 2);
+        EXPECT(grayRed == grayGreen);
+        EXPECT(grayRed < 80);
+    }
+    RoboWeb::Document tall = Parse(
+        "<!DOCTYPE html><div style='width:30px;height:40px'><div id='half' style='height:50%'></div></div>", diagnostics);
+    RoboWeb::LayoutResult tallLayout = RoboWeb::LayoutDocument(tall, 240, 120);
+    int halfHeight = -1;
+    for (const RoboWeb::ElementBox& box : tallLayout.boxes) {
+        if (box.node != nullptr && RoboWeb::AttributeValue(*box.node, "id") == "half") {
+            halfHeight = box.height;
+        }
+    }
+    EXPECT(halfHeight == 20);
+    RoboWeb::Document flexColumns = Parse(
+        "<!DOCTYPE html><div style='display:grid;width:40px;grid-template-columns:1fr 1fr'><div id='a' style='height:8px'></div><div id='b' style='height:8px'></div></div>",
+        diagnostics);
+    RoboWeb::LayoutResult flexLayout = RoboWeb::LayoutDocument(flexColumns, 240, 120);
+    int flexA = -1;
+    int flexB = -1;
+    for (const RoboWeb::ElementBox& box : flexLayout.boxes) {
+        if (box.node == nullptr) {
+            continue;
+        }
+        if (RoboWeb::AttributeValue(*box.node, "id") == "a") {
+            flexA = box.x;
+        }
+        if (RoboWeb::AttributeValue(*box.node, "id") == "b") {
+            flexB = box.x;
+        }
+    }
+    EXPECT(flexB - flexA == 20);
+    RoboWeb::Document radial = Parse(
+        "<!DOCTYPE html><div style='width:20px;height:16px;background:radial-gradient(#ff0000, #0000ff)'></div>", diagnostics);
+    RoboWeb::LayoutResult radialLayout = RoboWeb::LayoutDocument(radial, 240, 120);
+    RoboWeb::Framebuffer radialFrame = RoboWeb::RenderDocument(radialLayout, 0);
+    const RoboWeb::ElementBox* radialBox = RoboWeb::FindBox(radialLayout, "div");
+    EXPECT(radialBox != nullptr);
+    if (radialBox != nullptr) {
+        EXPECT(RoboWeb::PixelRed(radialFrame, radialBox->x + 10, radialBox->y + 8) == 255);
+        EXPECT(RoboWeb::PixelBlue(radialFrame, radialBox->x, radialBox->y) > RoboWeb::PixelRed(radialFrame, radialBox->x, radialBox->y));
+    }
+    RoboWeb::Document scaledBox = Parse(
+        "<!DOCTYPE html><div style='width:10px;height:8px;background:#ff0000;transform:scale(2)'></div>", diagnostics);
+    RoboWeb::LayoutResult scaledLayout = RoboWeb::LayoutDocument(scaledBox, 240, 120);
+    RoboWeb::Framebuffer scaledFrame = RoboWeb::RenderDocument(scaledLayout, 0);
+    const RoboWeb::ElementBox* scaledPaint = RoboWeb::FindBox(scaledLayout, "div");
+    EXPECT(scaledPaint != nullptr);
+    if (scaledPaint != nullptr) {
+        EXPECT(RoboWeb::PixelRed(scaledFrame, scaledPaint->x - 2, scaledPaint->y + 2) == 255);
+    }
+    RoboWeb::Document shadow = Parse(
+        "<!DOCTYPE html><div style='width:10px;height:8px;background:#ff0000;filter:drop-shadow(12px 0px 0px #00ff00)'></div>", diagnostics);
+    RoboWeb::LayoutResult shadowLayout = RoboWeb::LayoutDocument(shadow, 240, 120);
+    RoboWeb::Framebuffer shadowFrame = RoboWeb::RenderDocument(shadowLayout, 0);
+    const RoboWeb::ElementBox* shadowBox = RoboWeb::FindBox(shadowLayout, "div");
+    EXPECT(shadowBox != nullptr);
+    if (shadowBox != nullptr) {
+        EXPECT(RoboWeb::PixelGreen(shadowFrame, shadowBox->x + shadowBox->width + 2, shadowBox->y + 2) == 255);
+    }
+    RoboWeb::Document anchored = Parse(
+        "<!DOCTYPE html><div id='mark' style='anchor-name:--a;width:20px;height:10px'></div><div id='pop' style='position:absolute;left:anchor(--a right);width:8px;height:8px'></div>",
+        diagnostics);
+    RoboWeb::LayoutResult anchoredLayout = RoboWeb::LayoutDocument(anchored, 240, 120);
+    int markRight = -1;
+    int popX = -1;
+    for (const RoboWeb::ElementBox& box : anchoredLayout.boxes) {
+        if (box.node == nullptr) {
+            continue;
+        }
+        if (RoboWeb::AttributeValue(*box.node, "id") == "mark") {
+            markRight = box.x + box.width;
+        }
+        if (RoboWeb::AttributeValue(*box.node, "id") == "pop") {
+            popX = box.x;
+        }
+    }
+    EXPECT(popX == markRight);
+    const char* validValues[] = {
+        "display:none", "display:block", "display:inline", "display:inline-block", "display:list-item", "display:grid", "display:inline-grid",
+        "position:static", "position:relative", "position:absolute", "position:fixed", "position:sticky",
+        "width:10px", "width:50%", "width:1em", "width:1rem", "width:10vw", "width:calc(10px + 5px)", "width:min(1px, 2px)", "width:auto",
+        "height:10px", "height:50%", "font-size:16px", "font-style:normal", "font-style:italic", "font-style:oblique",
+        "font-weight:normal", "font-weight:bold", "font-weight:400",
+        "text-align:left", "text-align:right", "text-align:center", "text-align:start", "text-align:end", "text-align:justify",
+        "text-transform:none", "text-transform:uppercase", "text-transform:lowercase", "text-transform:capitalize",
+        "white-space:normal", "white-space:nowrap", "white-space:pre", "white-space:pre-wrap", "white-space:pre-line",
+        "text-decoration:none", "text-decoration:underline", "text-decoration:line-through", "text-decoration:overline",
+        "container-type:normal", "container-type:size", "container-type:inline-size",
+        "color:#ff0000", "color:red", "color:transparent", "background:linear-gradient(#ff0000, #0000ff)",
+        "background:radial-gradient(#ff0000, #0000ff)", "filter:none", "filter:blur(2px)", "filter:grayscale(1)",
+        "filter:drop-shadow(2px 2px 0 #000)", "transform:none", "transform:translate(1px, 2px)", "transform:scale(2)", "transform:rotate(90deg)",
+        "grid-template-columns:1fr 1fr", "grid-template-columns:repeat(2, 10px)", "grid-template-columns:minmax(8px, 24px)",
+        "grid-template-columns:auto", "grid-template-columns:min-content", "grid-template-columns:max-content", "grid-template-columns:fit-content(20px)",
+        "grid-template-rows:1fr", "margin:4px", "margin:4px 8px", "margin:1px 2px 3px 4px", "padding:4px 8px",
+        "font-size:1em", "font-weight:bolder", "font-weight:lighter", "line-height:normal", "line-height:1.5", "line-height:20px",
+        "letter-spacing:1px", "text-indent:2em", "word-spacing:2px", "font-family:Inter", "border:1px", "border-width:2px",
+        "text-underline-offset:2px", "text-decoration-color:#ff0000", "background-color:#00ff00", "background-image:linear-gradient(#ff0000, #0000ff)",
+        "transform:translateX(4px)", "transform:translateY(4px)", "transform:translateZ(4px)", "transform:translate3d(1px, 2px, 3px)",
+        "transform:scaleX(2)", "transform:scaleY(2)", "transform:scaleZ(2)", "transform:scale3d(2, 2, 1)",
+        "transform:rotateX(90deg)", "transform:rotateY(90deg)", "transform:rotateZ(90deg)", "transform:rotate3d(0, 0, 1, 90deg)",
+        "transform:skew(10deg)", "transform:skewX(10deg)", "transform:skewY(10deg)", "transform:matrix(1, 0, 0, 1, 0, 0)",
+        "transform:matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)", "transform:perspective(100px)",
+        "filter:brightness(1)", "filter:contrast(1)", "filter:hue-rotate(90deg)", "filter:invert(1)", "filter:opacity(1)", "filter:saturate(1)", "filter:sepia(1)",
+        "animation-duration:2s", "animation-duration:500ms", "animation-name:grow", "animation:grow 2s linear", "transition:width 1s",
+        "transition-timing-function:ease-in", "top:anchor(--a bottom)", "right:10px", "bottom:10px",
+        "fill:#ff0000", "stroke:#000", "stroke-width:2", "stroke-linecap:round", "stroke-linejoin:miter", "stroke-miterlimit:4",
+        "fill-opacity:0.5", "stroke-opacity:1", "opacity:1", "stop-color:#fff", "flood-color:#000", "flood-opacity:0.4",
+        "clip-path:url(#a)", "mask:url(#a)", "marker:url(#a)", "marker-start:url(#a)", "marker-end:url(#a)", "marker-mid:url(#a)",
+        "text-anchor:middle", "dominant-baseline:middle", "--ink:#ff0000",
+        "animation-timing-function:linear", "animation-timing-function:ease", "animation-timing-function:ease-in",
+        "animation-timing-function:ease-out", "animation-timing-function:ease-in-out", "animation-timing-function:step-start",
+        "animation-timing-function:step-end", "animation-timing-function:cubic-bezier(0, 0, 1, 1)", "animation-timing-function:steps(4)",
+        "anchor-name:--a", "left:anchor(--a right)"};
+    for (const char* declaration : validValues) {
+        RoboWeb::Diagnostics validDiagnostics;
+        RoboWeb::Document valid = Parse(std::string("<!DOCTYPE html><div style='") + declaration + "'></div>", validDiagnostics);
+        RoboWeb::ValidateTree(valid, validDiagnostics);
+        EXPECT(validDiagnostics.ErrorCount() == 0);
+    }
+    RoboWeb::Diagnostics badProperty;
+    RoboWeb::Document badPropertyDocument = Parse("<!DOCTYPE html><div style='made-up:1'></div>", badProperty);
+    RoboWeb::ValidateTree(badPropertyDocument, badProperty);
+    EXPECT(CountMessages(badProperty, RoboWeb::Severity::Error, "unknown property 'made-up'") == 1);
+    RoboWeb::Diagnostics badValue;
+    RoboWeb::Document badValueDocument = Parse("<!DOCTYPE html><div style='display:banana'></div>", badValue);
+    RoboWeb::ValidateTree(badValueDocument, badValue);
+    EXPECT(CountMessages(badValue, RoboWeb::Severity::Error, "invalid value 'banana' for property 'display'") == 1);
     RoboWeb::Document variableColor = Parse(
         "<!DOCTYPE html><style>:root { --ink: #ff0000 } div { --ink: #00ff00; width: 20px; height: 10px; background: var(--ink) }</style><div></div>",
         diagnostics);
@@ -477,6 +682,87 @@ void TestCssFunctions() {
     if (variableColorBox != nullptr) {
         EXPECT(RoboWeb::PixelRed(variableColorFrame, variableColorBox->x + 2, variableColorBox->y + 2) == 0);
         EXPECT(RoboWeb::PixelGreen(variableColorFrame, variableColorBox->x + 2, variableColorBox->y + 2) == 255);
+    }
+    const char* invalidValues[] = {
+        "display:banana", "position:floating", "width:wide", "height:tall", "font-size:huge", "font-style:slanted",
+        "font-weight:heavy", "text-align:middle", "text-transform:small-caps", "white-space:collapse",
+        "text-decoration:blink", "container-type:block", "color:not-a-color", "background:sparkle",
+        "filter:smear(1)", "transform:spin(1)", "grid-template-columns:sideways", "animation-timing-function:bounce",
+        "animation-duration:later", "left:beside", "anchor-name:a"};
+    for (const char* declaration : invalidValues) {
+        RoboWeb::Diagnostics invalidDiagnostics;
+        RoboWeb::Document invalid = Parse(std::string("<!DOCTYPE html><div style='") + declaration + "'></div>", invalidDiagnostics);
+        RoboWeb::ValidateTree(invalid, invalidDiagnostics);
+        EXPECT(invalidDiagnostics.ErrorCount() == 1);
+    }
+    RoboWeb::SetSvgAnimationTime(1);
+    RoboWeb::Document linearGrow = Parse(
+        "<!DOCTYPE html><style>@keyframes grow { from { width: 10px } to { width: 50px } }</style><div style='animation-name:grow;animation-duration:2s;animation-timing-function:linear;height:8px;background:#ff0000'></div>",
+        diagnostics);
+    const RoboWeb::ElementBox* linearGrowBox = RoboWeb::FindBox(RoboWeb::LayoutDocument(linearGrow, 240, 120), "div");
+    EXPECT(linearGrowBox != nullptr);
+    if (linearGrowBox != nullptr) {
+        EXPECT(linearGrowBox->width == 30);
+    }
+    RoboWeb::Document easedGrow = Parse(
+        "<!DOCTYPE html><style>@keyframes grow { from { width: 10px } to { width: 50px } }</style><div style='animation-name:grow;animation-duration:2s;animation-timing-function:ease-in;height:8px'></div>",
+        diagnostics);
+    const RoboWeb::ElementBox* easedGrowBox = RoboWeb::FindBox(RoboWeb::LayoutDocument(easedGrow, 240, 120), "div");
+    EXPECT(easedGrowBox != nullptr);
+    if (easedGrowBox != nullptr) {
+        EXPECT(easedGrowBox->width > 10);
+        EXPECT(easedGrowBox->width < 30);
+    }
+    RoboWeb::Document steppedGrow = Parse(
+        "<!DOCTYPE html><style>@keyframes grow { from { width: 10px } to { width: 50px } }</style><div style='animation-name:grow;animation-duration:2s;animation-timing-function:step-end;height:8px'></div>",
+        diagnostics);
+    const RoboWeb::ElementBox* steppedGrowBox = RoboWeb::FindBox(RoboWeb::LayoutDocument(steppedGrow, 240, 120), "div");
+    EXPECT(steppedGrowBox != nullptr);
+    if (steppedGrowBox != nullptr) {
+        EXPECT(steppedGrowBox->width == 10);
+    }
+    RoboWeb::Document startedGrow = Parse(
+        "<!DOCTYPE html><style>@keyframes grow { from { width: 10px } to { width: 50px } }</style><div style='animation-name:grow;animation-duration:2s;animation-timing-function:step-start;height:8px'></div>",
+        diagnostics);
+    const RoboWeb::ElementBox* startedGrowBox = RoboWeb::FindBox(RoboWeb::LayoutDocument(startedGrow, 240, 120), "div");
+    EXPECT(startedGrowBox != nullptr);
+    if (startedGrowBox != nullptr) {
+        EXPECT(startedGrowBox->width == 50);
+    }
+    RoboWeb::SetSvgAnimationTime(0);
+    RoboWeb::Document shiftedX = Parse(
+        "<!DOCTYPE html><div style='width:10px;height:8px'></div><div style='width:10px;height:8px;transform:translateX(30px)'></div>", diagnostics);
+    RoboWeb::LayoutResult movedLayout = RoboWeb::LayoutDocument(shiftedX, 240, 120);
+    int firstX = -1;
+    int secondX = -1;
+    for (const RoboWeb::ElementBox& box : movedLayout.boxes) {
+        if (box.tag != "div") {
+            continue;
+        }
+        if (firstX < 0) {
+            firstX = box.x;
+        } else if (secondX < 0) {
+            secondX = box.x;
+        }
+    }
+    EXPECT(secondX - firstX == 30);
+    RoboWeb::Document skewed = Parse(
+        "<!DOCTYPE html><div style='width:10px;height:16px;background:#ff0000;transform:skewX(45deg)'></div>", diagnostics);
+    RoboWeb::LayoutResult skewedLayout = RoboWeb::LayoutDocument(skewed, 240, 120);
+    RoboWeb::Framebuffer skewedFrame = RoboWeb::RenderDocument(skewedLayout, 0);
+    const RoboWeb::ElementBox* skewedBox = RoboWeb::FindBox(skewedLayout, "div");
+    EXPECT(skewedBox != nullptr);
+    if (skewedBox != nullptr) {
+        EXPECT(RoboWeb::PixelRed(skewedFrame, skewedBox->x + skewedBox->width + 2, skewedBox->y + skewedBox->height - 2) == 255);
+    }
+    RoboWeb::Document turned = Parse(
+        "<!DOCTYPE html><div style='width:20px;height:8px;background:#ff0000;transform:rotate(90deg)'></div>", diagnostics);
+    RoboWeb::LayoutResult turnedLayout = RoboWeb::LayoutDocument(turned, 240, 120);
+    RoboWeb::Framebuffer turnedFrame = RoboWeb::RenderDocument(turnedLayout, 0);
+    const RoboWeb::ElementBox* turnedBox = RoboWeb::FindBox(turnedLayout, "div");
+    EXPECT(turnedBox != nullptr);
+    if (turnedBox != nullptr) {
+        EXPECT(RoboWeb::PixelRed(turnedFrame, turnedBox->x + 10, turnedBox->y - 2) == 255);
     }
 }
 
@@ -4119,6 +4405,72 @@ void TestSvgSpecification() {
         EXPECT(isRed(dots, 12, 10));
         EXPECT(isRed(dots, 22, 10));
         EXPECT(isWhite(dots, 7, 10));
+    }
+
+    // Gradient templates: geometry, units, transform and spreadMethod travel
+    // through the href chain, and spreadMethod applies to radial gradients too.
+    {
+        SvgFrame inherited = render(
+            "<svg width='20' height='20'><defs>"
+            "<linearGradient id='base' x1='0' y1='0' x2='0' y2='1'>"
+            "<stop offset='0' stop-color='#ff0000'/><stop offset='0.25' stop-color='#ff0000'/>"
+            "<stop offset='0.75' stop-color='#0000ff'/><stop offset='1' stop-color='#0000ff'/>"
+            "</linearGradient>"
+            "<linearGradient id='derived' xlink:href='#base'/>"
+            "</defs><rect width='20' height='20' fill='url(#derived)'/></svg>",
+            80, 48);
+        EXPECT(isRed(inherited, 10, 2));
+        EXPECT(isBlue(inherited, 10, 17));
+        SvgFrame radialRepeat = render(
+            "<svg width='40' height='40'><defs><radialGradient id='r' spreadMethod='repeat' cx='0.5' cy='0.5' r='0.25'>"
+            "<stop offset='0' stop-color='#ff0000'/><stop offset='1' stop-color='#0000ff'/></radialGradient></defs>"
+            "<rect width='40' height='40' fill='url(#r)'/></svg>",
+            120, 48);
+        SvgFrame radialReflect = render(
+            "<svg width='40' height='40'><defs><radialGradient id='r' spreadMethod='reflect' cx='0.5' cy='0.5' r='0.25'>"
+            "<stop offset='0' stop-color='#ff0000'/><stop offset='1' stop-color='#0000ff'/></radialGradient></defs>"
+            "<rect width='40' height='40' fill='url(#r)'/></svg>",
+            120, 48);
+        SvgFrame radialPad = render(
+            "<svg width='40' height='40'><defs><radialGradient id='r' cx='0.5' cy='0.5' r='0.25'>"
+            "<stop offset='0' stop-color='#ff0000'/><stop offset='1' stop-color='#0000ff'/></radialGradient></defs>"
+            "<rect width='40' height='40' fill='url(#r)'/></svg>",
+            120, 48);
+        // Pixel (7,20) sits 1.25-1.3 radii from the centre: repeat keeps the
+        // fraction, reflect mirrors it, and pad clamps to the last stop.
+        EXPECT(matches(radialRepeat, 7, 20, 179, 0, 77, 30));
+        EXPECT(matches(radialReflect, 7, 20, 77, 0, 179, 30));
+        EXPECT(matches(radialPad, 7, 20, 0, 0, 255, 2));
+    }
+
+    // Masks render their whole content (not only rectangles), apply to every
+    // painted element, and honour the luminance and alpha mask types.
+    {
+        SvgFrame circleMask = render(
+            "<svg width='20' height='20'><defs><mask id='m'><circle cx='10' cy='10' r='6' fill='#ffffff'/></mask></defs>"
+            "<rect width='20' height='20' fill='#ff0000' mask='url(#m)'/></svg>",
+            80, 48);
+        EXPECT(isRed(circleMask, 10, 10));
+        EXPECT(isWhite(circleMask, 2, 2));
+        EXPECT(isWhite(circleMask, 18, 2));
+        SvgFrame circleMasked = render(
+            "<svg width='20' height='20'><defs><mask id='m'><rect width='10' height='20' fill='#ffffff'/></mask></defs>"
+            "<circle cx='10' cy='10' r='8' fill='#ff0000' mask='url(#m)'/></svg>",
+            80, 48);
+        EXPECT(isRed(circleMasked, 4, 10));
+        EXPECT(isWhite(circleMasked, 16, 10));
+        SvgFrame alphaMask = render(
+            "<svg width='20' height='20'><defs><mask id='m' mask-type='alpha'><rect width='20' height='20' fill='rgba(0, 0, 0, 0.5)'/></mask></defs>"
+            "<rect width='20' height='20' fill='#ff0000' mask='url(#m)'/></svg>",
+            80, 48);
+        EXPECT(matches(alphaMask, 10, 10, 255, 128, 128, 14));
+        SvgFrame grayMask = render(
+            "<svg width='20' height='20'><defs><mask id='m'><rect width='20' height='20' fill='#808080'/></mask></defs>"
+            "<rect width='20' height='20' fill='#ff0000' mask='url(#m)'/></svg>",
+            80, 48);
+        // Luminance of #808080 is about 0.216, so only that fraction of the
+        // red paint survives over the white background.
+        EXPECT(matches(grayMask, 10, 10, 255, 200, 200, 14));
     }
 }
 

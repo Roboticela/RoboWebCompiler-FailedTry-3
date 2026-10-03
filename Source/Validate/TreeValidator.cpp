@@ -3,6 +3,7 @@
 #include "Catalog/AttributeCatalog.h"
 #include "Catalog/SvgCatalog.h"
 #include "Core/Utf8.h"
+#include "Render/StyleSheet.h"
 
 #include <initializer_list>
 #include <set>
@@ -157,6 +158,9 @@ void ValidateNode(const Document& document, Diagnostics& diagnostics, const Node
         if (node.kind == ElementKind::Optgroup && !ParentIs(node, ElementKind::Select)) {
             diagnostics.Warning(document.sourcePath, node.line, node.column, "optgroup element is not inside select");
         }
+        if (node.kind == ElementKind::Style) {
+            ValidateCssText(GatherText(node), document.sourcePath, node.line, diagnostics);
+        }
         for (const Attribute& attribute : node.attributes) {
             const std::string name = ToLowerAscii(attribute.name);
             if (name.size() > 2 && name[0] == 'o' && name[1] == 'n' && !IsKnownAttribute(name)) {
@@ -189,6 +193,9 @@ void ValidateNode(const Document& document, Diagnostics& diagnostics, const Node
                 diagnostics.Warning(
                     document.sourcePath, attribute.line, attribute.column,
                     "attribute '" + name + "' is obsolete; it is still applied as a presentational hint");
+            }
+            if (name == "style") {
+                ValidateCssText(attribute.value, document.sourcePath, attribute.line, diagnostics);
             }
             if (name == "id") {
                 if (attribute.value.empty() || attribute.value.find_first_of(" \t\r\n") != std::string::npos) {

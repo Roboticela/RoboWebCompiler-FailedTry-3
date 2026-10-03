@@ -694,8 +694,23 @@ struct Engine {
         if (color.alpha == 0 || width <= 0 || height <= 0) {
             return;
         }
-        if (activeClip == nullptr || activeClip->clipScopes.empty()) {
+        const bool clipActive = activeClip != nullptr && !activeClip->clipScopes.empty();
+        if (!clipActive && activeMask == nullptr) {
             EmitFill(x, y, width, height, color, fixed, clipped, clipX, clipY, clipWidth, clipHeight);
+            return;
+        }
+        if (!clipActive) {
+            // Only a mask is in play: each pixel keeps the fraction of the
+            // paint its mask value allows.
+            for (int row = 0; row < height; ++row) {
+                for (int column = 0; column < width; ++column) {
+                    const Color masked = MaskedColor(color, *activeMask, x + column + 0.5, y + row + 0.5);
+                    if (masked.alpha == 0) {
+                        continue;
+                    }
+                    EmitFill(x + column, y + row, 1, 1, masked, fixed, clipped, clipX, clipY, clipWidth, clipHeight);
+                }
+            }
             return;
         }
         // A clip-path masks the shape pixel by pixel, so every span is cut into
@@ -704,6 +719,14 @@ struct Engine {
             int column = 0;
             while (column < width) {
                 if (!SvgClipAllows(*activeClip, x + column + 0.5, y + row + 0.5)) {
+                    ++column;
+                    continue;
+                }
+                if (activeMask != nullptr) {
+                    const Color masked = MaskedColor(color, *activeMask, x + column + 0.5, y + row + 0.5);
+                    if (masked.alpha != 0) {
+                        EmitFill(x + column, y + row, 1, 1, masked, fixed, clipped, clipX, clipY, clipWidth, clipHeight);
+                    }
                     ++column;
                     continue;
                 }
@@ -2164,6 +2187,27 @@ struct Engine {
         bool evenOdd = false;
     };
 
+    // One painted piece of a <mask>'s content: the contours it covers, its
+    // paint, and how it composits over the pieces before it.
+    struct SvgMaskPiece {
+        std::vector<std::vector<SvgPoint>> contours;
+        bool evenOdd = false;
+        Color color{0, 0, 0, 255};
+        double opacity = 1;
+    };
+
+    // A <mask> reduced to what the painter needs per pixel: its content pieces,
+    // the mask region, and whether luminance (default) or alpha values it.
+    struct SvgMaskContent {
+        std::vector<SvgMaskPiece> pieces;
+        bool luminance = true;
+        bool hasRegion = false;
+        double regionX = 0;
+        double regionY = 0;
+        double regionWidth = 0;
+        double regionHeight = 0;
+    };
+
     bool SvgPointInContour(const std::vector<SvgPoint>& points, double x, double y, bool evenOdd) {
         if (points.size() < 3) {
             return false;
@@ -2450,6 +2494,9 @@ struct Engine {
         double minY = 0;
         double pixelWidth = 0;
         double pixelHeight = 0;
+        // True once a viewport (the root <svg>) owns this space: a nested <svg>
+        // then sets up its own viewport from x/y/width/height.
+        bool hasViewport = false;
         double strokeWidth = 1;
         std::string lineJoin = "miter";
         std::string lineCap = "butt";
@@ -2484,6 +2531,23 @@ struct Engine {
     // here so markers, patterns, referenced content and gradients painted while
     // a clipped element renders are masked exactly like the element itself.
     const SvgSpace* activeClip = nullptr;
+
+    // The mask guarding every pixel the painter emits, exactly like activeClip:
+    // shapes, strokes, gradients and referenced content all pass through it.
+    const SvgMaskContent* activeMask = nullptr;
+
+    struct SvgMaskScope {
+        Engine& owner;
+        const SvgMaskContent* previous;
+        SvgMaskScope(Engine& engine, const SvgMaskContent* mask) : owner(engine), previous(engine.activeMask) {
+            owner.activeMask = mask;
+        }
+        SvgMaskScope(const SvgMaskScope&) = delete;
+        SvgMaskScope& operator=(const SvgMaskScope&) = delete;
+        ~SvgMaskScope() {
+            owner.activeMask = previous;
+        }
+    };
 
     struct SvgClipScope {
         Engine& owner;
@@ -3315,8 +3379,33 @@ struct Engine {
         int clipHeight = 0;
     };
 
+    // Gradient attributes follow the href/xlink:href template chain: a value a
+    // gradient does not define itself comes from the gradient it references.
+    std::string SvgGradientAttribute(Node& gradient, const char* name, int depth = 0) {
+        const std::string own = AttributeValue(gradient, name);
+        if (!own.empty() || depth > 4) {
+            return own;
+        }
+        std::string href = AttributeValue(gradient, "href");
+        if (href.empty()) {
+            href = AttributeValue(gradient, "xlink:href");
+        }
+        const std::string id = SvgPaintId(href);
+        if (id.empty()) {
+            return own;
+        }
+        Node* root = &gradient;
+        while (root->parent != nullptr) {
+            root = root->parent;
+        }
+        if (Node* next = FindSvgById(*root, id)) {
+            return SvgGradientAttribute(*next, name, depth + 1);
+        }
+        return own;
+    }
+
     bool SvgGradientMatrix(Node& gradient, SvgMatrix& matrix) {
-        const std::string text = AttributeValue(gradient, "gradienttransform");
+        const std::string text = SvgGradientAttribute(gradient, "gradienttransform");
         if (text.empty()) {
             return false;
         }
@@ -3348,21 +3437,22 @@ struct Engine {
             return false;
         }
         CollectStops(*gradient, paint.stops, 0);
-        paint.linearRgb = ToLowerAscii(AttributeValue(*gradient, "color-interpolation")) == "linearrgb";
+        paint.linearRgb = ToLowerAscii(SvgGradientAttribute(*gradient, "color-interpolation")) == "linearrgb";
         paint.opacity = space.opacity * space.fillOpacity;
         paint.clipped = space.clipped;
         paint.clipX = space.clipX;
         paint.clipY = space.clipY;
         paint.clipWidth = space.clipWidth;
         paint.clipHeight = space.clipHeight;
-        const bool objectBox = ToLowerAscii(AttributeValue(*gradient, "gradientunits")) != "userspaceonuse";
+        const bool objectBox = ToLowerAscii(SvgGradientAttribute(*gradient, "gradientunits")) != "userspaceonuse";
+        paint.spread = ToLowerAscii(SvgGradientAttribute(*gradient, "spreadmethod"));
         SvgMatrix gradientMatrix;
         const bool hasGradientMatrix = SvgGradientMatrix(*gradient, gradientMatrix);
         if (gradientTag == "radialgradient") {
             paint.radial = true;
-            double cx = AttributeValue(*gradient, "cx").empty() ? 0.5 : SvgOffset(AttributeValue(*gradient, "cx"));
-            double cy = AttributeValue(*gradient, "cy").empty() ? 0.5 : SvgOffset(AttributeValue(*gradient, "cy"));
-            double radius = AttributeValue(*gradient, "r").empty() ? 0.5 : SvgOffset(AttributeValue(*gradient, "r"));
+            double cx = SvgGradientAttribute(*gradient, "cx").empty() ? 0.5 : SvgOffset(SvgGradientAttribute(*gradient, "cx"));
+            double cy = SvgGradientAttribute(*gradient, "cy").empty() ? 0.5 : SvgOffset(SvgGradientAttribute(*gradient, "cy"));
+            double radius = SvgGradientAttribute(*gradient, "r").empty() ? 0.5 : SvgOffset(SvgGradientAttribute(*gradient, "r"));
             double radiusXUnits = radius;
             double radiusYUnits = radius;
             if (hasGradientMatrix) {
@@ -3380,8 +3470,8 @@ struct Engine {
             paint.centerY = objectBox ? y + cy * height : SvgY(space, cy);
             paint.radiusX = std::max(0.001, objectBox ? radiusXUnits * width : radiusXUnits * std::abs(space.matrix.a) * space.scaleX);
             paint.radiusY = std::max(0.001, objectBox ? radiusYUnits * height : radiusYUnits * std::abs(space.matrix.d) * space.scaleY);
-            double focalUserX = AttributeValue(*gradient, "fx").empty() ? cx : SvgOffset(AttributeValue(*gradient, "fx"));
-            double focalUserY = AttributeValue(*gradient, "fy").empty() ? cy : SvgOffset(AttributeValue(*gradient, "fy"));
+            double focalUserX = SvgGradientAttribute(*gradient, "fx").empty() ? cx : SvgOffset(SvgGradientAttribute(*gradient, "fx"));
+            double focalUserY = SvgGradientAttribute(*gradient, "fy").empty() ? cy : SvgOffset(SvgGradientAttribute(*gradient, "fy"));
             if (hasGradientMatrix) {
                 SvgApplyGradientMatrix(gradientMatrix, focalUserX, focalUserY);
             }
@@ -3389,9 +3479,9 @@ struct Engine {
             const double focalY = objectBox ? y + focalUserY * height : SvgY(space, focalUserY);
             paint.focusX = (focalX - paint.centerX) / paint.radiusX;
             paint.focusY = (focalY - paint.centerY) / paint.radiusY;
-            if (!AttributeValue(*gradient, "fr").empty() && radius > 0) {
+            if (!SvgGradientAttribute(*gradient, "fr").empty() && radius > 0) {
                 paint.adjustFocus = true;
-                paint.focalRadius = SvgOffset(AttributeValue(*gradient, "fr")) / radius;
+                paint.focalRadius = SvgOffset(SvgGradientAttribute(*gradient, "fr")) / radius;
             }
             return true;
         }
@@ -3410,8 +3500,28 @@ struct Engine {
         paint.deltaX = endX - paint.startX;
         paint.deltaY = endY - paint.startY;
         paint.length = paint.deltaX * paint.deltaX + paint.deltaY * paint.deltaY;
-        paint.spread = ToLowerAscii(AttributeValue(*gradient, "spreadmethod"));
         return true;
+    }
+
+    // spreadMethod = repeat | reflect folds the parametric gradient offset back
+    // into [0,1]; the default pad leaves it for the final clamp.
+    double SvgSpreadOffset(const std::string& spread, double value) {
+        if (spread == "repeat") {
+            return value - std::floor(value);
+        }
+        if (spread == "reflect") {
+            if (value < 0) {
+                value = -value;
+            }
+            const double period = std::floor(value);
+            const double fraction = value - period;
+            int turns = 0;
+            if (period > 0 && period < 1000000) {
+                turns = static_cast<int>(period);
+            }
+            return turns % 2 == 0 ? fraction : 1 - fraction;
+        }
+        return value;
     }
 
     Color SampleGradient(const GradientPaint& paint, int pixelX, int pixelY) {
@@ -3444,22 +3554,10 @@ struct Engine {
                     offset = (offset - paint.focalRadius) / (1 - paint.focalRadius);
                 }
             }
+            offset = SvgSpreadOffset(paint.spread, offset);
         } else if (paint.length > 0) {
             offset = ((pixelX - paint.startX) * paint.deltaX + (pixelY - paint.startY) * paint.deltaY) / paint.length;
-            if (paint.spread == "repeat") {
-                offset -= std::floor(offset);
-            } else if (paint.spread == "reflect") {
-                if (offset < 0) {
-                    offset = -offset;
-                }
-                const double period = std::floor(offset);
-                const double fraction = offset - period;
-                int turns = 0;
-                if (period > 0 && period < 1000000) {
-                    turns = static_cast<int>(period);
-                }
-                offset = turns % 2 == 0 ? fraction : 1 - fraction;
-            }
+            offset = SvgSpreadOffset(paint.spread, offset);
         }
         if (!(offset >= 0)) {
             offset = 0;
@@ -3630,13 +3728,32 @@ struct Engine {
         }
         std::vector<SvgStop> stops;
         CollectStops(*gradient, stops, 0);
-        const bool objectBox = ToLowerAscii(AttributeValue(*gradient, "gradientunits")) != "userspaceonuse";
+        const bool objectBox = ToLowerAscii(SvgGradientAttribute(*gradient, "gradientunits")) != "userspaceonuse";
+        const std::string spread = ToLowerAscii(SvgGradientAttribute(*gradient, "spreadmethod"));
+        auto spreadOffset = [&spread](double value) {
+            if (spread == "repeat") {
+                return value - std::floor(value);
+            }
+            if (spread == "reflect") {
+                if (value < 0) {
+                    value = -value;
+                }
+                const double period = std::floor(value);
+                const double fraction = value - period;
+                int turns = 0;
+                if (period > 0 && period < 1000000) {
+                    turns = static_cast<int>(period);
+                }
+                return turns % 2 == 0 ? fraction : 1 - fraction;
+            }
+            return value;
+        };
         SvgMatrix gradientMatrix;
         const bool hasGradientMatrix = SvgGradientMatrix(*gradient, gradientMatrix);
         if (gradientTag == "radialgradient") {
-            double cx = AttributeValue(*gradient, "cx").empty() ? 0.5 : SvgOffset(AttributeValue(*gradient, "cx"));
-            double cy = AttributeValue(*gradient, "cy").empty() ? 0.5 : SvgOffset(AttributeValue(*gradient, "cy"));
-            double radius = AttributeValue(*gradient, "r").empty() ? 0.5 : SvgOffset(AttributeValue(*gradient, "r"));
+            double cx = SvgGradientAttribute(*gradient, "cx").empty() ? 0.5 : SvgOffset(SvgGradientAttribute(*gradient, "cx"));
+            double cy = SvgGradientAttribute(*gradient, "cy").empty() ? 0.5 : SvgOffset(SvgGradientAttribute(*gradient, "cy"));
+            double radius = SvgGradientAttribute(*gradient, "r").empty() ? 0.5 : SvgOffset(SvgGradientAttribute(*gradient, "r"));
             double radiusXUnits = radius;
             double radiusYUnits = radius;
             if (hasGradientMatrix) {
@@ -3654,8 +3771,8 @@ struct Engine {
             const double centerY = objectBox ? y + cy * height : SvgY(space, cy);
             const double radiusX = std::max(0.001, objectBox ? radiusXUnits * width : radiusXUnits * std::abs(space.matrix.a) * space.scaleX);
             const double radiusY = std::max(0.001, objectBox ? radiusYUnits * height : radiusYUnits * std::abs(space.matrix.d) * space.scaleY);
-            double focalUserX = AttributeValue(*gradient, "fx").empty() ? cx : SvgOffset(AttributeValue(*gradient, "fx"));
-            double focalUserY = AttributeValue(*gradient, "fy").empty() ? cy : SvgOffset(AttributeValue(*gradient, "fy"));
+            double focalUserX = SvgGradientAttribute(*gradient, "fx").empty() ? cx : SvgOffset(SvgGradientAttribute(*gradient, "fx"));
+            double focalUserY = SvgGradientAttribute(*gradient, "fy").empty() ? cy : SvgOffset(SvgGradientAttribute(*gradient, "fy"));
             if (hasGradientMatrix) {
                 SvgApplyGradientMatrix(gradientMatrix, focalUserX, focalUserY);
             }
@@ -3687,23 +3804,25 @@ struct Engine {
                             offset = other;
                         }
                     }
-                    if (!AttributeValue(*gradient, "fr").empty() && radius > 0) {
-                        const double focalRadius = SvgOffset(AttributeValue(*gradient, "fr")) / radius;
+                    if (!SvgGradientAttribute(*gradient, "fr").empty() && radius > 0) {
+                        const double focalRadius = SvgOffset(SvgGradientAttribute(*gradient, "fr")) / radius;
                         if (focalRadius >= 1) {
                             offset = offset <= 1 ? 0 : offset;
                         } else if (focalRadius > 0) {
                             offset = (offset - focalRadius) / (1 - focalRadius);
                         }
                     }
-                    Fill(x + column, y + row, 1, 1, WithOpacity(SampleStops(stops, offset, ToLowerAscii(AttributeValue(*gradient, "color-interpolation")) == "linearrgb"), space.opacity * space.fillOpacity), fixed);
+                    offset = spreadOffset(offset);
+                    Fill(x + column, y + row, 1, 1, WithOpacity(SampleStops(stops, offset, ToLowerAscii(SvgGradientAttribute(*gradient, "color-interpolation")) == "linearrgb"), space.opacity * space.fillOpacity), fixed);
                 }
             }
             return true;
         }
-        double x1 = AttributeValue(*gradient, "x1").empty() ? 0 : SvgOffset(AttributeValue(*gradient, "x1"));
-        double y1 = AttributeValue(*gradient, "y1").empty() ? 0 : SvgOffset(AttributeValue(*gradient, "y1"));
-        double x2 = AttributeValue(*gradient, "x2").empty() ? (objectBox ? 1 : static_cast<double>(width)) : SvgOffset(AttributeValue(*gradient, "x2"));
-        double y2 = AttributeValue(*gradient, "y2").empty() ? 0 : SvgOffset(AttributeValue(*gradient, "y2"));
+        double x1 = SvgGradientAttribute(*gradient, "x1").empty() ? 0 : SvgOffset(SvgGradientAttribute(*gradient, "x1"));
+        double y1 = SvgGradientAttribute(*gradient, "y1").empty() ? 0 : SvgOffset(SvgGradientAttribute(*gradient, "y1"));
+        double x2 = SvgGradientAttribute(*gradient, "x2").empty() ? (objectBox ? 1 : static_cast<double>(width))
+                                                               : SvgOffset(SvgGradientAttribute(*gradient, "x2"));
+        double y2 = SvgGradientAttribute(*gradient, "y2").empty() ? 0 : SvgOffset(SvgGradientAttribute(*gradient, "y2"));
         if (hasGradientMatrix) {
             SvgApplyGradientMatrix(gradientMatrix, x1, y1);
             SvgApplyGradientMatrix(gradientMatrix, x2, y2);
@@ -3715,7 +3834,6 @@ struct Engine {
         const double deltaX = endX - startX;
         const double deltaY = endY - startY;
         const double length = deltaX * deltaX + deltaY * deltaY;
-        const std::string spread = ToLowerAscii(AttributeValue(*gradient, "spreadmethod"));
         for (int row = 0; row < height; ++row) {
             for (int column = 0; column < width; ++column) {
                 if (space.clipped && (x + column < space.clipX || y + row < space.clipY || x + column >= space.clipX + space.clipWidth ||
@@ -3726,17 +3844,8 @@ struct Engine {
                 if (length > 0) {
                     t = ((x + column - startX) * deltaX + (y + row - startY) * deltaY) / length;
                 }
-                if (spread == "repeat") {
-                    t -= std::floor(t);
-                } else if (spread == "reflect") {
-                    if (t < 0) {
-                        t = -t;
-                    }
-                    const double period = std::floor(t);
-                    const double fraction = t - period;
-                    t = static_cast<int>(period) % 2 == 0 ? fraction : 1 - fraction;
-                }
-                Fill(x + column, y + row, 1, 1, WithOpacity(SampleStops(stops, t, ToLowerAscii(AttributeValue(*gradient, "color-interpolation")) == "linearrgb"), space.opacity * space.fillOpacity), fixed);
+                t = spreadOffset(t);
+                Fill(x + column, y + row, 1, 1, WithOpacity(SampleStops(stops, t, ToLowerAscii(SvgGradientAttribute(*gradient, "color-interpolation")) == "linearrgb"), space.opacity * space.fillOpacity), fixed);
             }
         }
         return true;
@@ -4052,78 +4161,221 @@ struct Engine {
         return true;
     }
 
-    bool MaskShows(const Node& node, const SvgSpace& space, int pixelX, int pixelY) {
-        const std::string id = SvgPaintId(SvgProperty(node, "mask"));
-        if (id.empty()) {
-            return true;
+    // Builds the user-space outline of one mask shape. The mask evaluator
+    // supports every basic shape, so a <circle> or <path> masks exactly like it
+    // does in a browser instead of only rectangles.
+    bool SvgMaskChildContour(Node& child, const std::string& tag, std::vector<SvgPoint>& contour) {
+        if (tag == "rect") {
+            double radiusX = 0;
+            double radiusY = 0;
+            const double width = SvgReal(child, "width", 0);
+            const double height = SvgReal(child, "height", 0);
+            SvgRectRadii(child, width, height, radiusX, radiusY);
+            contour = StraightPath(SvgRectPath(SvgReal(child, "x", 0), SvgReal(child, "y", 0), width, height, radiusX, radiusY));
+            return !contour.empty();
         }
-        Node* root = const_cast<Node*>(&node);
+        if (tag == "circle" || tag == "ellipse") {
+            const double centerX = SvgReal(child, "cx", 0);
+            const double centerY = SvgReal(child, "cy", 0);
+            const double radiusX = tag == "circle" ? SvgReal(child, "r", 0) : SvgReal(child, "rx", 0);
+            const double radiusY = tag == "circle" ? radiusX : SvgReal(child, "ry", 0);
+            const double span = std::max(std::abs(radiusX), std::abs(radiusY));
+            const int steps = std::max(SVG_CLIP_CIRCLE_STEPS,
+                std::min(SVG_CLIP_CIRCLE_MAX_STEPS, static_cast<int>(std::ceil(span * 4.0))));
+            for (int step = 0; step < steps; ++step) {
+                const double angle = 2.0 * std::acos(-1.0) * static_cast<double>(step) / static_cast<double>(steps);
+                contour.push_back(SvgPoint{centerX + std::cos(angle) * radiusX, centerY + std::sin(angle) * radiusY});
+            }
+            return !contour.empty();
+        }
+        if (tag == "polygon" || tag == "polyline") {
+            contour = ParsePointList(AttributeValue(child, "points"));
+            return contour.size() >= 3;
+        }
+        if (tag == "path") {
+            contour = StraightPath(AttributeValue(child, "d"));
+            return !contour.empty();
+        }
+        return false;
+    }
+
+    void BuildSvgMaskPieces(Node& container, const SvgSpace& contentSpace, bool objectBox, double elementX, double elementY, double elementWidth,
+        double elementHeight, SvgMaskContent& content) {
+        for (const std::unique_ptr<Node>& child : container.children) {
+            if (child->type != Node::Type::Element) {
+                continue;
+            }
+            const std::string childTag = ToLowerAscii(child->tagName);
+            if (childTag == "defs" || childTag == "title" || childTag == "desc" || childTag == "metadata" || childTag == "style" ||
+                childTag == "script" || childTag == "clippath" || childTag == "mask" || childTag == "filter" || childTag == "lineargradient" ||
+                childTag == "radialgradient" || childTag == "pattern" || childTag == "marker" || childTag == "symbol") {
+                continue;
+            }
+            SvgSpace childSpace = contentSpace;
+            ApplySvgTransform(SvgProperty(*child, "transform"), childSpace);
+            if (childTag == "g" || childTag == "a" || childTag == "switch" || childTag == "svg") {
+                BuildSvgMaskPieces(*child, childSpace, objectBox, elementX, elementY, elementWidth, elementHeight, content);
+                continue;
+            }
+            std::vector<SvgPoint> contour;
+            if (!SvgMaskChildContour(*child, childTag, contour)) {
+                continue;
+            }
+            if (objectBox) {
+                for (SvgPoint& point : contour) {
+                    point.x = elementX + point.x * elementWidth;
+                    point.y = elementY + point.y * elementHeight;
+                }
+            }
+            const std::string paint = SvgProperty(*child, "fill");
+            if (ToLowerAscii(paint) == "none") {
+                continue;
+            }
+            SvgMaskPiece piece;
+            piece.evenOdd = ToLowerAscii(SvgProperty(*child, "fill-rule")) == "evenodd";
+            if (!paint.empty() && paint.find("url(") == std::string::npos) {
+                ParseColor(paint, piece.color);
+            }
+            if (!SvgProperty(*child, "fill-opacity").empty()) {
+                piece.opacity *= std::max(0.0, std::min(1.0, std::atof(SvgProperty(*child, "fill-opacity").c_str())));
+            }
+            if (!SvgProperty(*child, "opacity").empty()) {
+                piece.opacity *= std::max(0.0, std::min(1.0, std::atof(SvgProperty(*child, "opacity").c_str())));
+            }
+            piece.contours.push_back(MapSvgPoints(contour, childSpace));
+            content.pieces.push_back(std::move(piece));
+        }
+    }
+
+    bool BuildSvgMask(Node& node, const std::string& maskId, const SvgSpace& space, SvgMaskContent& content) {
+        Node* root = &node;
         while (root->parent != nullptr) {
             root = root->parent;
         }
-        Node* mask = FindSvgById(*root, id);
-        if (mask == nullptr) {
-            return true;
-        }
-        if (ToLowerAscii(AttributeValue(*mask, "maskunits")) == "objectboundingbox" && !AttributeValue(*mask, "width").empty() &&
-            !AttributeValue(*mask, "height").empty()) {
-            const double elementX = SvgNumber(node, "x", 0);
-            const double elementY = SvgNumber(node, "y", 0);
-            const double elementWidth = SvgNumber(node, "width", 0);
-            const double elementHeight = SvgNumber(node, "height", 0);
-            const int regionLeft = SvgX(space, elementX + SvgOffset(AttributeValue(*mask, "x")) * elementWidth);
-            const int regionTop = SvgY(space, elementY + SvgOffset(AttributeValue(*mask, "y")) * elementHeight);
-            const int regionRight = regionLeft + SvgLength(space, SvgOffset(AttributeValue(*mask, "width")) * elementWidth, true);
-            const int regionBottom = regionTop + SvgLength(space, SvgOffset(AttributeValue(*mask, "height")) * elementHeight, false);
-            if (pixelX < regionLeft || pixelY < regionTop || pixelX >= regionRight || pixelY >= regionBottom) {
-                return false;
-            }
-        }
-        const bool alpha = ToLowerAscii(AttributeValue(*mask, "mask-type")) == "alpha";
-        Color covered{0, 0, 0, 0};
-        bool hit = false;
-        for (const std::unique_ptr<Node>& child : mask->children) {
-            if (ToLowerAscii(child->tagName) != "rect") {
-                continue;
-            }
-            const bool objectBox = ToLowerAscii(AttributeValue(*mask, "maskcontentunits")) == "objectboundingbox";
-            int left = 0;
-            int top = 0;
-            int right = 0;
-            int bottom = 0;
-            if (objectBox) {
-                const double elementX = SvgNumber(node, "x", 0);
-                const double elementY = SvgNumber(node, "y", 0);
-                const double elementWidth = SvgNumber(node, "width", 0);
-                const double elementHeight = SvgNumber(node, "height", 0);
-                left = SvgX(space, elementX + SvgOffset(AttributeValue(*child, "x")) * elementWidth);
-                top = SvgY(space, elementY + SvgOffset(AttributeValue(*child, "y")) * elementHeight);
-                right = left + SvgLength(space, SvgOffset(AttributeValue(*child, "width")) * elementWidth, true);
-                bottom = top + SvgLength(space, SvgOffset(AttributeValue(*child, "height")) * elementHeight, false);
-            } else {
-                left = SvgX(space, SvgNumber(*child, "x", 0));
-                top = SvgY(space, SvgNumber(*child, "y", 0));
-                right = left + SvgLength(space, SvgNumber(*child, "width", 0), true);
-                bottom = top + SvgLength(space, SvgNumber(*child, "height", 0), false);
-            }
-            if (pixelX < left || pixelY < top || pixelX >= right || pixelY >= bottom) {
-                continue;
-            }
-            covered = Color{255, 255, 255, 255};
-            const std::string paint = AttributeValue(*child, "fill");
-            if (!paint.empty()) {
-                ParseColor(paint, covered);
-            }
-            hit = true;
-        }
-        if (!hit) {
+        Node* mask = FindSvgById(*root, maskId);
+        if (mask == nullptr || ToLowerAscii(mask->tagName) != "mask") {
             return false;
         }
-        if (alpha) {
-            return covered.alpha > 127;
+        content = SvgMaskContent();
+        content.luminance = ToLowerAscii(SvgProperty(*mask, "mask-type")) != "alpha";
+        const bool objectBox = ToLowerAscii(AttributeValue(*mask, "maskunits")) != "userspaceonuse";
+        double elementX = SvgReal(node, "x", 0);
+        double elementY = SvgReal(node, "y", 0);
+        double elementWidth = SvgReal(node, "width", 0);
+        double elementHeight = SvgReal(node, "height", 0);
+        if (objectBox) {
+            double boundsLeft = 0;
+            double boundsTop = 0;
+            double boundsRight = 0;
+            double boundsBottom = 0;
+            if (SvgGeometryBounds(node, boundsLeft, boundsTop, boundsRight, boundsBottom)) {
+                elementX = boundsLeft;
+                elementY = boundsTop;
+                elementWidth = boundsRight - boundsLeft;
+                elementHeight = boundsBottom - boundsTop;
+            }
         }
-        const int luminance = (covered.red * 30 + covered.green * 59 + covered.blue * 11) / 100;
-        return luminance > 127 && covered.alpha > 127;
+        // Missing x/y/width/height default to -10%, -10%, 120%, 120% resolved
+        // against the bounding box (objectBoundingBox) or the viewport.
+        auto regionValue = [&objectBox](const std::string& text, double fallback, double reference) {
+            if (text.empty()) {
+                return fallback * reference;
+            }
+            // objectBoundingBox lengths are fractions of the box. A percent is
+            // that same fraction written with a percent sign.
+            if (objectBox || text.find('%') != std::string::npos) {
+                double number = std::atof(text.c_str());
+                if (text.find('%') != std::string::npos) {
+                    number /= 100.0;
+                }
+                return number * reference;
+            }
+            return std::atof(text.c_str());
+        };
+        const double viewportX = space.scaleX != 0 ? space.pixelWidth / space.scaleX : space.pixelWidth;
+        const double viewportY = space.scaleY != 0 ? space.pixelHeight / space.scaleY : space.pixelHeight;
+        const double referenceX = objectBox ? elementWidth : viewportX;
+        const double referenceY = objectBox ? elementHeight : viewportY;
+        const double regionX = regionValue(AttributeValue(*mask, "x"), -0.1, referenceX);
+        const double regionY = regionValue(AttributeValue(*mask, "y"), -0.1, referenceY);
+        const double regionWidth = std::max(0.0, regionValue(AttributeValue(*mask, "width"), 1.2, referenceX));
+        const double regionHeight = std::max(0.0, regionValue(AttributeValue(*mask, "height"), 1.2, referenceY));
+        content.hasRegion = true;
+        content.regionX = SvgX(space, objectBox ? elementX + regionX : regionX);
+        content.regionY = SvgY(space, objectBox ? elementY + regionY : regionY);
+        content.regionWidth = SvgLength(space, regionWidth, true);
+        content.regionHeight = SvgLength(space, regionHeight, false);
+        const bool contentBox = ToLowerAscii(AttributeValue(*mask, "maskcontentunits")) == "objectboundingbox";
+        BuildSvgMaskPieces(*mask, space, contentBox, elementX, elementY, elementWidth, elementHeight, content);
+        return true;
+    }
+
+    // The mask value at one pixel: the content is composited source-over, then
+    // turned into a coverage by the luminance rule (default) or alpha rule.
+    // Shapes outside the mask region contribute nothing.
+    double SvgMaskValueAt(const SvgMaskContent& mask, double sampleX, double sampleY) {
+        if (mask.hasRegion &&
+            (sampleX < mask.regionX || sampleY < mask.regionY || sampleX >= mask.regionX + mask.regionWidth ||
+             sampleY >= mask.regionY + mask.regionHeight)) {
+            return 0;
+        }
+        double red = 0;
+        double green = 0;
+        double blue = 0;
+        double alpha = 0;
+        for (const SvgMaskPiece& piece : mask.pieces) {
+            bool inside = false;
+            for (const std::vector<SvgPoint>& contour : piece.contours) {
+                if (SvgPointInContour(contour, sampleX, sampleY, piece.evenOdd)) {
+                    inside = true;
+                    break;
+                }
+            }
+            if (!inside) {
+                continue;
+            }
+            const double sourceAlpha = (piece.color.alpha / 255.0) * piece.opacity;
+            const double outAlpha = sourceAlpha + alpha * (1 - sourceAlpha);
+            if (!(outAlpha > 0)) {
+                alpha = 0;
+                red = 0;
+                green = 0;
+                blue = 0;
+                continue;
+            }
+            const double share = sourceAlpha / outAlpha;
+            const double keep = alpha * (1 - sourceAlpha) / outAlpha;
+            red = piece.color.red / 255.0 * share + red * keep;
+            green = piece.color.green / 255.0 * share + green * keep;
+            blue = piece.color.blue / 255.0 * share + blue * keep;
+            alpha = outAlpha;
+        }
+        if (!(alpha > 0)) {
+            return 0;
+        }
+        if (!mask.luminance) {
+            return std::min(1.0, alpha);
+        }
+        auto toLinear = [](double encoded) {
+            return encoded <= 0.04045 ? encoded / 12.92 : std::pow((encoded + 0.055) / 1.055, 2.4);
+        };
+        const double luminance = 0.2126 * toLinear(red) + 0.7152 * toLinear(green) + 0.0722 * toLinear(blue);
+        return std::max(0.0, std::min(1.0, luminance * alpha));
+    }
+
+    // The fraction of `color` that survives the active mask at one pixel.
+    Color MaskedColor(Color color, const SvgMaskContent& mask, double sampleX, double sampleY) {
+        const double value = SvgMaskValueAt(mask, sampleX, sampleY);
+        if (value >= 1) {
+            return color;
+        }
+        if (!(value > 0)) {
+            color.alpha = 0;
+            return color;
+        }
+        const double scaled = static_cast<double>(color.alpha) * value + 0.5;
+        color.alpha = static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, scaled)));
+        return color;
     }
 
     struct AnimationScope {
@@ -5130,13 +5382,51 @@ struct Engine {
         double originX = 0;
         double originY = 0;
         std::size_t originIndex = 0;
-        const std::string origin = AttributeValue(node, "transform-origin");
+        const std::string origin = SvgProperty(node, "transform-origin");
         const bool hasOrigin = !origin.empty() && ReadSvgNumber(origin, originIndex, originX);
         if (hasOrigin) {
             ReadSvgNumber(origin, originIndex, originY);
         }
-        ApplySvgTransform(AttributeValue(node, "transform"), space, hasOrigin, originX, originY);
+        // transform and transform-origin are presentation attributes, so the
+        // stylesheet version overrides them exactly like any other property.
+        ApplySvgTransform(SvgProperty(node, "transform"), space, hasOrigin, originX, originY);
         ApplySvgMotion(node, space);
+        if (tag == "svg" && !space.hasViewport) {
+            // A nested <svg> establishes its own viewport before its viewBox is
+            // applied. Percentages resolve against the parent viewport.
+            const double parentUserWidth = space.scaleX != 0 ? space.pixelWidth / space.scaleX : space.pixelWidth;
+            const double parentUserHeight = space.scaleY != 0 ? space.pixelHeight / space.scaleY : space.pixelHeight;
+            auto viewportValue = [](const std::string& text, double fallback, double reference) {
+                if (text.empty()) {
+                    return fallback * reference;
+                }
+                if (text.find('%') != std::string::npos) {
+                    return std::atof(text.c_str()) / 100.0 * reference;
+                }
+                return std::atof(text.c_str());
+            };
+            const double viewportX = viewportValue(AttributeValue(node, "x"), 0, parentUserWidth);
+            const double viewportY = viewportValue(AttributeValue(node, "y"), 0, parentUserHeight);
+            const double viewportWidth = viewportValue(AttributeValue(node, "width"), 1, parentUserWidth);
+            const double viewportHeight = viewportValue(AttributeValue(node, "height"), 1, parentUserHeight);
+            space.originX += (viewportX - space.minX) * space.scaleX;
+            space.originY += (viewportY - space.minY) * space.scaleY;
+            space.pixelWidth = viewportWidth * space.scaleX;
+            space.pixelHeight = viewportHeight * space.scaleY;
+            space.minX = 0;
+            space.minY = 0;
+            space.scaleX = 1;
+            space.scaleY = 1;
+            space.hasViewport = true;
+            // Nested viewports clip their content unless overflow is visible.
+            if (ToLowerAscii(AttributeValue(node, "overflow")) != "visible" && space.pixelWidth > 0 && space.pixelHeight > 0) {
+                space.clipped = true;
+                space.clipX = static_cast<int>(space.originX);
+                space.clipY = static_cast<int>(space.originY);
+                space.clipWidth = static_cast<int>(space.pixelWidth);
+                space.clipHeight = static_cast<int>(space.pixelHeight);
+            }
+        }
         if (tag == "svg" || node.kind == ElementKind::Svg) {
             ApplyViewBox(node, space);
             if (AttributeValue(node, "viewbox").empty()) {
@@ -5156,9 +5446,17 @@ struct Engine {
             space.clipHeight = static_cast<int>(space.pixelHeight);
         }
         ReadSvgPaint(node, space);
+        SvgMaskContent maskContent;
+        bool hasMask = false;
+        const std::string maskId = SvgPaintId(SvgProperty(node, "mask"));
+        if (!maskId.empty()) {
+            hasMask = BuildSvgMask(node, maskId, space, maskContent);
+        }
         // Everything this element paints, descendants and referenced content
-        // included, passes through the clip-path scopes collected above.
+        // included, passes through the clip-path scopes collected above and the
+        // element's own mask.
         SvgClipScope clipScope(*this, space.clipScopes.empty() ? nullptr : &space);
+        SvgMaskScope maskScope(*this, hasMask ? &maskContent : nullptr);
         const Color fill = WithOpacity(space.fill, space.opacity * space.fillOpacity);
         const Color stroke = WithOpacity(space.stroke, space.opacity * space.strokeOpacity);
         const bool fixedStroke = ToLowerAscii(SvgProperty(node, "vector-effect")) == "non-scaling-stroke";
@@ -5595,7 +5893,7 @@ struct Engine {
                             Fill(fillX + column, fillY + row, 1, 1, pixel, fixed);
                         }
                     }
-                } else if (SvgProperty(node, "mask").empty()) {
+                } else {
                     if (space.shapeRendering == 1) {
                         const double rawX = space.originX + (SvgReal(node, "x", 0) - space.minX) * space.scaleX;
                         const double rawY = space.originY + (SvgReal(node, "y", 0) - space.minY) * space.scaleY;
@@ -5613,14 +5911,6 @@ struct Engine {
                             std::max(0, static_cast<int>(std::lround(rawBottom)) - snappedY), shown, fixed);
                     } else {
                         Fill(fillX, fillY, fillWidth, fillHeight, shown, fixed);
-                    }
-                } else {
-                    for (int row = 0; row < fillHeight; ++row) {
-                        for (int column = 0; column < fillWidth; ++column) {
-                            if (MaskShows(node, space, fillX + column, fillY + row)) {
-                                Fill(fillX + column, fillY + row, 1, 1, shown, fixed);
-                            }
-                        }
                     }
                 }
             }
@@ -6251,6 +6541,7 @@ struct Engine {
             space.originY = y;
             space.pixelWidth = width;
             space.pixelHeight = height;
+            space.hasViewport = true;
             PaintSvgTree(node, space, fixed);
             if (style.border > 0) {
                 Stroke(x, y, width, height, Color{0, 0, 0, 255}, fixed);
@@ -7822,6 +8113,131 @@ struct Engine {
     }
 
     int LayoutFlow(Node& node, const ResolvedStyle& style, int x, int y, int width, bool fixed, bool suppressFirstTop) {
+        std::vector<int> gridTracks = style.gridColumns;
+        if (!style.gridTracks.empty()) {
+            gridTracks.clear();
+            int frTotal = 0;
+            std::vector<int> minimums;
+            std::vector<int> maximums;
+            std::vector<int> flex;
+            int fixedSum = 0;
+            CssLengthContext trackContext;
+            trackContext.fontSizePx = std::max(1, style.fontSizePx);
+            trackContext.rootFontSizePx = std::max(1, style.rootFontSizePx);
+            trackContext.viewportWidth = style.viewportWidthPx;
+            trackContext.viewportHeight = style.viewportHeightPx;
+            trackContext.percentBase = width;
+            trackContext.zeroAdvancePx = std::max(1, CharAdvancePx(trackContext.fontSizePx, style.fontFamily));
+            trackContext.rootZeroAdvancePx = trackContext.zeroAdvancePx;
+            for (const std::string& token : style.gridTracks) {
+                const std::string lower = ToLowerAscii(token);
+                if (lower.size() > 2 && lower.compare(lower.size() - 2, 2, "fr") == 0) {
+                    const int weight = std::max(1, std::atoi(lower.c_str()));
+                    flex.push_back(weight);
+                    minimums.push_back(0);
+                    maximums.push_back(0);
+                    frTotal += weight;
+                } else if (lower == "auto" || lower == "min-content" || lower == "max-content") {
+                    flex.push_back(1);
+                    minimums.push_back(0);
+                    maximums.push_back(0);
+                    frTotal += 1;
+                } else if (lower.compare(0, 12, "fit-content(") == 0) {
+                    const std::size_t close = token.find(')');
+                    int cap = 0;
+                    if (close != std::string::npos) {
+                        EvaluateCssPx(token.substr(12, close - 12), style.customProperties, trackContext, cap);
+                    }
+                    flex.push_back(0);
+                    minimums.push_back(0);
+                    maximums.push_back(std::max(0, cap));
+                } else if (lower.compare(0, 7, "minmax(") == 0) {
+                    const std::size_t comma = token.find(',');
+                    const std::size_t close = token.find(')');
+                    int low = 0;
+                    int high = 0;
+                    if (comma != std::string::npos && close != std::string::npos) {
+                        EvaluateCssPx(token.substr(7, comma - 7), style.customProperties, trackContext, low);
+                        EvaluateCssPx(token.substr(comma + 1, close - comma - 1), style.customProperties, trackContext, high);
+                    }
+                    if (high < low) {
+                        high = low;
+                    }
+                    flex.push_back(0);
+                    minimums.push_back(std::max(0, low));
+                    maximums.push_back(std::max(0, high));
+                    fixedSum += std::max(0, low);
+                } else {
+                    int track = 0;
+                    EvaluateCssPx(token, style.customProperties, trackContext, track);
+                    flex.push_back(0);
+                    minimums.push_back(std::max(0, track));
+                    maximums.push_back(std::max(0, track));
+                    fixedSum += std::max(0, track);
+                }
+            }
+            int leftover = width - fixedSum;
+            if (leftover < 0) {
+                leftover = 0;
+            }
+            for (std::size_t index = 0; index < minimums.size(); ++index) {
+                int size = minimums[index];
+                if (flex[index] == 0 && maximums[index] > size && leftover > 0) {
+                    const int grow = std::min(leftover, maximums[index] - size);
+                    size += grow;
+                    leftover -= grow;
+                }
+                gridTracks.push_back(size);
+            }
+            if (frTotal > 0 && leftover > 0) {
+                int used = 0;
+                std::size_t flexIndex = 0;
+                for (std::size_t index = 0; index < flex.size(); ++index) {
+                    if (flex[index] == 0) {
+                        continue;
+                    }
+                    ++flexIndex;
+                    const int share = flexIndex == static_cast<std::size_t>(std::count_if(flex.begin(), flex.end(), [](int weight) { return weight > 0; }))
+                        ? leftover - used
+                        : leftover * flex[index] / frTotal;
+                    gridTracks[index] += share;
+                    used += share;
+                }
+            }
+        }
+        if (!gridTracks.empty()) {
+            const int columns = static_cast<int>(gridTracks.size());
+            int column = 0;
+            int rowY = y;
+            int rowHeight = 0;
+            int columnX = x;
+            for (Node* childPtr : FlowChildren(node)) {
+                Node& child = *childPtr;
+                if (child.type != Node::Type::Element || IsHidden(child)) {
+                    continue;
+                }
+                if (column == 0) {
+                    columnX = x;
+                }
+                const int track = gridTracks[static_cast<std::size_t>(column)];
+                const ResolvedStyle childStyle = ResolveStyle(child, style, *document, track);
+                const int childHeight = LayoutBlock(child, childStyle, columnX, rowY, track, fixed, false);
+                if (childHeight > rowHeight) {
+                    rowHeight = childHeight;
+                }
+                columnX += track;
+                ++column;
+                if (column == columns) {
+                    rowY += rowHeight;
+                    rowHeight = 0;
+                    column = 0;
+                }
+            }
+            if (column != 0) {
+                rowY += rowHeight;
+            }
+            return rowY - y;
+        }
         int cursor = y;
         int previousBottom = 0;
         bool any = false;
@@ -7830,6 +8246,7 @@ struct Engine {
         };
         (void)flushInlines;
         (void)pendingInlines;
+        std::vector<Node*> anchored;
         for (Node* childPtr : FlowChildren(node)) {
             Node& child = *childPtr;
             if (child.type == Node::Type::Text) {
@@ -7849,7 +8266,7 @@ struct Engine {
             if (IsHidden(child)) {
                 continue;
             }
-            if (ResolveStyle(child, style, *document).display == DisplayKind::None) {
+            if (ResolveStyle(child, style, *document, width, style.heightPx > 0 ? style.heightPx : -1).display == DisplayKind::None) {
                 continue;
             }
             if (node.kind == ElementKind::Details && !node.open && child.kind != ElementKind::Summary) {
@@ -7864,7 +8281,11 @@ struct Engine {
                 }
                 continue;
             }
-            ResolvedStyle childStyle = ResolveStyle(child, style, *document);
+            ResolvedStyle childStyle = ResolveStyle(child, style, *document, width, style.heightPx > 0 ? style.heightPx : -1);
+            if (childStyle.positionKind == 1) {
+                anchored.push_back(&child);
+                continue;
+            }
             if (childStyle.display == DisplayKind::Inline || childStyle.display == DisplayKind::InlineBlock ||
                 childStyle.display == DisplayKind::Replaced || childStyle.display == DisplayKind::LineBreak ||
                 childStyle.display == DisplayKind::WordBreak) {
@@ -7884,6 +8305,27 @@ struct Engine {
             cursor += childHeight;
             previousBottom = childStyle.marginBottom;
             any = true;
+        }
+        for (Node* absolute : anchored) {
+            const int heightBase = style.heightPx > 0 ? style.heightPx : -1;
+            const ResolvedStyle absoluteStyle = ResolveStyle(*absolute, style, *document, width, heightBase);
+            int placeX = x;
+            int placeY = y;
+            if (absoluteStyle.anchorLeft && !absoluteStyle.anchorQuery.empty()) {
+                for (const ElementBox& box : result->boxes) {
+                    if (box.node == nullptr) {
+                        continue;
+                    }
+                    const ResolvedStyle anchorStyle = ResolveStyle(*box.node, style, *document, width, heightBase);
+                    if (anchorStyle.anchorName == absoluteStyle.anchorQuery) {
+                        placeX = box.x + box.width;
+                        placeY = box.y;
+                        break;
+                    }
+                }
+            }
+            const int absoluteWidth = absoluteStyle.widthPx > 0 ? absoluteStyle.widthPx : 8;
+            LayoutBlock(*absolute, absoluteStyle, placeX, placeY, absoluteWidth, fixed, false);
         }
         return cursor - y;
     }
@@ -7930,6 +8372,8 @@ int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, in
     if (style.display == DisplayKind::None) {
         return 0;
     }
+    x += style.translateX;
+    y += style.translateY;
     if (style.widthPx > 0) {
         width = std::min(width, style.widthPx);
     }
@@ -7974,7 +8418,7 @@ int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, in
     bool inlineFlow = true;
     for (const std::unique_ptr<Node>& child : node.children) {
         if (child->type == Node::Type::Element && !IsHidden(*child)) {
-            const DisplayKind display = ResolveStyle(*child, style, *document).display;
+            const DisplayKind display = ResolveStyle(*child, style, *document, contentWidth).display;
             if (display == DisplayKind::Block || display == DisplayKind::ListItem || display == DisplayKind::Table) {
                 inlineFlow = false;
             }
@@ -7989,7 +8433,7 @@ int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, in
     } else {
         contentHeight = LayoutFlow(node, style, contentX, contentY, contentWidth, fixed, false);
     }
-    if (style.background.alpha != 0) {
+    if (!style.linearGradient && style.background.alpha != 0) {
         DrawOp background;
         background.kind = DrawOp::Kind::Fill;
         background.x = x;
@@ -8005,6 +8449,118 @@ int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, in
         borderHeight = style.heightPx;
         if (style.background.alpha != 0 && backgroundIndex < result->ops.size()) {
             result->ops[backgroundIndex].height = borderHeight;
+        }
+    }
+    if (style.shadowColor.alpha != 0 && width > 0 && borderHeight > 0) {
+        Fill(x + style.shadowDx, y + style.shadowDy, width, borderHeight, style.shadowColor, fixed);
+    }
+    if (style.blurPx > 0 && style.background.alpha != 0 && width > 0 && borderHeight > 0) {
+        for (int extra = style.blurPx; extra >= 1; --extra) {
+            Color halo = style.background;
+            const int alpha = style.background.alpha * (style.blurPx - extra + 1) / (style.blurPx + 1);
+            halo.alpha = static_cast<std::uint8_t>(alpha < 0 ? 0 : (alpha > 255 ? 255 : alpha));
+            Fill(x - extra, y - extra, width + extra * 2, borderHeight + extra * 2, halo, fixed);
+        }
+    }
+    if (style.scaleMilli > 1000 && style.background.alpha != 0 && !style.linearGradient && width > 0 && borderHeight > 0) {
+        const int extraWidth = width * (style.scaleMilli - 1000) / 2000;
+        const int extraHeight = borderHeight * (style.scaleMilli - 1000) / 2000;
+        Fill(x - extraWidth, y - extraHeight, width + extraWidth * 2, borderHeight + extraHeight * 2, style.background, fixed);
+    }
+    if ((style.rotateDeg == 90 || style.rotateDeg == 270) && style.background.alpha != 0 && width > 0 && borderHeight > 0) {
+        const int centerX = x + width / 2;
+        const int centerY = y + borderHeight / 2;
+        Fill(centerX - borderHeight / 2, centerY - width / 2, borderHeight, width, style.background, fixed);
+    }
+    if (style.hasCssMatrix && style.background.alpha != 0 && width > 0 && borderHeight > 0) {
+        const double determinant = style.matrixA * style.matrixD - style.matrixC * style.matrixB;
+        if (std::fabs(determinant) > 0.0001) {
+            const double halfWidth = width / 2.0;
+            const double halfHeight = borderHeight / 2.0;
+            const double centerX = x + halfWidth;
+            const double centerY = y + borderHeight / 2.0;
+            auto mapPoint = [&](double localX, double localY, double& outX, double& outY) {
+                outX = style.matrixA * localX + style.matrixC * localY + style.matrixE;
+                outY = style.matrixB * localX + style.matrixD * localY + style.matrixF;
+            };
+            double minX = 0;
+            double minY = 0;
+            double maxX = 0;
+            double maxY = 0;
+            const double corners[4][2] = {{-halfWidth, -halfHeight}, {halfWidth, -halfHeight}, {halfWidth, halfHeight}, {-halfWidth, halfHeight}};
+            for (int corner = 0; corner < 4; ++corner) {
+                double mappedX = 0;
+                double mappedY = 0;
+                mapPoint(corners[corner][0], corners[corner][1], mappedX, mappedY);
+                if (corner == 0 || mappedX < minX) {
+                    minX = mappedX;
+                }
+                if (corner == 0 || mappedY < minY) {
+                    minY = mappedY;
+                }
+                if (corner == 0 || mappedX > maxX) {
+                    maxX = mappedX;
+                }
+                if (corner == 0 || mappedY > maxY) {
+                    maxY = mappedY;
+                }
+            }
+            const int left = static_cast<int>(std::floor(centerX + minX));
+            const int top = static_cast<int>(std::floor(centerY + minY));
+            const int right = static_cast<int>(std::ceil(centerX + maxX));
+            const int bottom = static_cast<int>(std::ceil(centerY + maxY));
+            for (int row = top; row < bottom; ++row) {
+                for (int column = left; column < right; ++column) {
+                    const double offsetX = column + 0.5 - centerX - style.matrixE;
+                    const double offsetY = row + 0.5 - centerY - style.matrixF;
+                    const double localX = (style.matrixD * offsetX - style.matrixC * offsetY) / determinant;
+                    const double localY = (-style.matrixB * offsetX + style.matrixA * offsetY) / determinant;
+                    if (localX >= -halfWidth && localX < halfWidth && localY >= -halfHeight && localY < halfHeight) {
+                        Fill(column, row, 1, 1, style.background, fixed);
+                    }
+                }
+            }
+        }
+    }
+    if (style.linearGradient && borderHeight > 0 && width > 0) {
+        if (style.radialGradient) {
+            const int centerX = width / 2;
+            const int centerY = borderHeight / 2;
+            const int radius = std::max(1, static_cast<int>(std::sqrt(static_cast<double>(centerX * centerX + centerY * centerY))));
+            for (int row = 0; row < borderHeight; ++row) {
+                for (int column = 0; column < width; ++column) {
+                    const int dx = column - centerX;
+                    const int dy = row - centerY;
+                    int distance = static_cast<int>(std::sqrt(static_cast<double>(dx * dx + dy * dy)));
+                    if (style.gradientPeriod > 1) {
+                        distance = distance % style.gradientPeriod;
+                    }
+                    const int limit = style.gradientPeriod > 1 ? style.gradientPeriod : radius;
+                    const int weight = limit <= 1 ? 0 : std::min(256, distance * 256 / limit);
+                    Color color = style.gradientStart;
+                    color.red = static_cast<std::uint8_t>((style.gradientStart.red * (256 - weight) + style.gradientEnd.red * weight) / 256);
+                    color.green = static_cast<std::uint8_t>((style.gradientStart.green * (256 - weight) + style.gradientEnd.green * weight) / 256);
+                    color.blue = static_cast<std::uint8_t>((style.gradientStart.blue * (256 - weight) + style.gradientEnd.blue * weight) / 256);
+                    Fill(x + column, y + row, 1, 1, color, fixed);
+                }
+            }
+        } else {
+            const int span = style.gradientAcross ? width : borderHeight;
+            const int period = style.gradientPeriod > 1 ? style.gradientPeriod : span;
+            for (int step = 0; step < span; ++step) {
+                const int local = style.repeatingGradient && style.gradientPeriod > 1 ? step % period : step;
+                const int limit = style.repeatingGradient && style.gradientPeriod > 1 ? period : span;
+                const int weight = limit <= 1 ? 0 : local * 256 / (limit - 1);
+                Color color = style.gradientStart;
+                color.red = static_cast<std::uint8_t>((style.gradientStart.red * (256 - weight) + style.gradientEnd.red * weight) / 256);
+                color.green = static_cast<std::uint8_t>((style.gradientStart.green * (256 - weight) + style.gradientEnd.green * weight) / 256);
+                color.blue = static_cast<std::uint8_t>((style.gradientStart.blue * (256 - weight) + style.gradientEnd.blue * weight) / 256);
+                if (style.gradientAcross) {
+                    Fill(x + step, y, 1, borderHeight, color, fixed);
+                } else {
+                    Fill(x, y + step, width, 1, color, fixed);
+                }
+            }
         }
     }
     if (style.border > 0) {
@@ -8134,9 +8690,46 @@ ResolvedStyle DefaultStyle() {
     return style;
 }
 
-ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const Document& document) {
+ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const Document& document, int percentBase, int percentBaseHeight) {
     (void)document;
     ResolvedStyle style = parent;
+    style.isContainer = false;
+    style.translateX = 0;
+    style.translateY = 0;
+    style.scaleMilli = 1000;
+    style.rotateDeg = 0;
+    style.hasCssMatrix = false;
+    style.matrixA = 1;
+    style.matrixB = 0;
+    style.matrixC = 0;
+    style.matrixD = 1;
+    style.matrixE = 0;
+    style.matrixF = 0;
+    style.animationName.clear();
+    style.animationDurationSec = 0;
+    style.easeKind = 0;
+    style.easeSteps = 1;
+    style.easeX1 = 0;
+    style.easeY1 = 0;
+    style.easeX2 = 1;
+    style.easeY2 = 1;
+    style.blurPx = 0;
+    style.shadowDx = 0;
+    style.shadowDy = 0;
+    style.shadowColor = Color{0, 0, 0, 0};
+    style.linearGradient = false;
+    style.radialGradient = false;
+    style.repeatingGradient = false;
+    style.gradientPeriod = 0;
+    style.gridColumns.clear();
+    style.gridTracks.clear();
+    style.positionKind = 0;
+    style.anchorName.clear();
+    style.anchorQuery.clear();
+    style.anchorLeft = false;
+    if (parent.isContainer && percentBase >= 0) {
+        style.containerWidthPx = percentBase;
+    }
     style.mark = false;
     style.background = Color{0, 0, 0, 0};
     style.border = 0;
@@ -8483,11 +9076,29 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
             }
         }
     };
-    auto resolveLengths = [](ResolvedStyle& target, const ElementStyle& rule) {
+    auto resolveLengths = [percentBase, percentBaseHeight](ResolvedStyle& target, const ElementStyle& rule) {
         int fontSize = target.fontSizePx;
         for (const StyleDeclaration& declaration : rule.declarations) {
+            CssLengthContext context;
+            context.fontSizePx = std::max(1, fontSize);
+            context.rootFontSizePx = std::max(1, target.rootFontSizePx);
+            context.lineHeightPx = target.lineHeightPx > 0 ? target.lineHeightPx : LineHeightPx(context.fontSizePx);
+            context.rootLineHeightPx = LineHeightPx(context.rootFontSizePx);
+            context.zeroAdvancePx = std::max(1, CharAdvancePx(context.fontSizePx, target.fontFamily));
+            context.rootZeroAdvancePx = std::max(1, CharAdvancePx(context.rootFontSizePx, target.fontFamily));
+            context.viewportWidth = target.viewportWidthPx;
+            context.viewportHeight = target.viewportHeightPx;
+            context.containerWidth = target.containerWidthPx;
+            context.containerHeight = target.containerHeightPx;
+            if (declaration.name == "font-size") {
+                context.percentBase = context.fontSizePx;
+            } else if (declaration.name == "height") {
+                context.percentBase = percentBaseHeight;
+            } else {
+                context.percentBase = percentBase;
+            }
             int pixels = 0;
-            if (!EvaluateCssPx(declaration.value, target.customProperties, fontSize, pixels)) {
+            if (!EvaluateCssPx(declaration.value, target.customProperties, context, pixels)) {
                 continue;
             }
             if (declaration.name == "font-size" && pixels > 0) {
@@ -8531,6 +9142,477 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
                 target.color = Color{red, green, blue, 255};
             } else {
                 target.background = Color{red, green, blue, 255};
+            }
+        }
+        for (const StyleDeclaration& declaration : rule.declarations) {
+            CssLengthContext context;
+            context.fontSizePx = std::max(1, target.fontSizePx);
+            context.rootFontSizePx = std::max(1, target.rootFontSizePx);
+            context.lineHeightPx = target.lineHeightPx > 0 ? target.lineHeightPx : LineHeightPx(context.fontSizePx);
+            context.rootLineHeightPx = LineHeightPx(context.rootFontSizePx);
+            context.zeroAdvancePx = std::max(1, CharAdvancePx(context.fontSizePx, target.fontFamily));
+            context.rootZeroAdvancePx = std::max(1, CharAdvancePx(context.rootFontSizePx, target.fontFamily));
+            context.viewportWidth = target.viewportWidthPx;
+            context.viewportHeight = target.viewportHeightPx;
+            context.containerWidth = target.containerWidthPx;
+            context.containerHeight = target.containerHeightPx;
+            context.percentBase = percentBase;
+            if (declaration.name == "grid-template-columns") {
+                target.gridTracks.clear();
+                target.gridColumns.clear();
+                const std::string tracks = declaration.value;
+                std::size_t cursor = 0;
+                while (cursor < tracks.size()) {
+                    while (cursor < tracks.size() && tracks[cursor] == ' ') {
+                        ++cursor;
+                    }
+                    if (cursor >= tracks.size()) {
+                        break;
+                    }
+                    const std::string lower = ToLowerAscii(tracks.substr(cursor));
+                    if (lower.compare(0, 7, "repeat(") == 0) {
+                        cursor += 7;
+                        int count = std::atoi(tracks.c_str() + cursor);
+                        const std::size_t comma = tracks.find(',', cursor);
+                        const std::size_t close = tracks.find(')', comma == std::string::npos ? cursor : comma);
+                        std::string inner = comma == std::string::npos || close == std::string::npos ? std::string() : TrimSpaces(tracks.substr(comma + 1, close - comma - 1));
+                        if (count < 1) {
+                            count = 1;
+                        }
+                        for (int copy = 0; copy < count; ++copy) {
+                            target.gridTracks.push_back(inner);
+                        }
+                        cursor = close == std::string::npos ? tracks.size() : close + 1;
+                        continue;
+                    }
+                    int depth = 0;
+                    const std::size_t start = cursor;
+                    while (cursor < tracks.size() && !(depth == 0 && tracks[cursor] == ' ')) {
+                        if (tracks[cursor] == '(') {
+                            ++depth;
+                        } else if (tracks[cursor] == ')' && depth > 0) {
+                            --depth;
+                        }
+                        ++cursor;
+                    }
+                    target.gridTracks.push_back(TrimSpaces(tracks.substr(start, cursor - start)));
+                }
+            }
+            if (declaration.name == "transform") {
+                const std::string transform = ToLowerAscii(declaration.value);
+                struct Plane {
+                    double a = 1;
+                    double b = 0;
+                    double c = 0;
+                    double d = 1;
+                    double e = 0;
+                    double f = 0;
+                };
+                auto multiply = [](Plane left, Plane right) {
+                    Plane out;
+                    out.a = left.a * right.a + left.c * right.b;
+                    out.b = left.b * right.a + left.d * right.b;
+                    out.c = left.a * right.c + left.c * right.d;
+                    out.d = left.b * right.c + left.d * right.d;
+                    out.e = left.a * right.e + left.c * right.f + left.e;
+                    out.f = left.b * right.e + left.d * right.f + left.f;
+                    return out;
+                };
+                auto readLength = [&](const std::string& text, double& pixels) {
+                    int resolved = 0;
+                    CssLengthContext shift = context;
+                    shift.percentBase = percentBase;
+                    std::string token = TrimSpaces(text);
+                    if (!token.empty() && token.back() == ',') {
+                        token.pop_back();
+                    }
+                    if (!EvaluateCssPx(token, target.customProperties, shift, resolved)) {
+                        return false;
+                    }
+                    pixels = resolved;
+                    return true;
+                };
+                auto readAngle = [](const std::string& text) {
+                    const std::string lower = ToLowerAscii(TrimSpaces(text));
+                    if (lower.size() > 3 && lower.compare(lower.size() - 3, 3, "rad") == 0) {
+                        return std::atof(lower.c_str()) * 180.0 / 3.141592653589793;
+                    }
+                    if (lower.size() > 4 && lower.compare(lower.size() - 4, 4, "turn") == 0) {
+                        return std::atof(lower.c_str()) * 360.0;
+                    }
+                    if (lower.size() > 4 && lower.compare(lower.size() - 4, 4, "grad") == 0) {
+                        return std::atof(lower.c_str()) * 0.9;
+                    }
+                    return std::atof(lower.c_str());
+                };
+                auto splitArgs = [](const std::string& inner) {
+                    std::vector<std::string> args;
+                    std::string current;
+                    for (char character : inner) {
+                        if (character == ',') {
+                            args.push_back(TrimSpaces(current));
+                            current.clear();
+                        } else {
+                            current.push_back(character);
+                        }
+                    }
+                    if (!TrimSpaces(current).empty()) {
+                        args.push_back(TrimSpaces(current));
+                    }
+                    return args;
+                };
+                Plane plane;
+                bool saw = false;
+                std::size_t cursor = 0;
+                while (cursor < transform.size()) {
+                    while (cursor < transform.size() && transform[cursor] == ' ') {
+                        ++cursor;
+                    }
+                    const std::size_t nameAt = cursor;
+                    while (cursor < transform.size() && transform[cursor] != '(' && transform[cursor] != ' ') {
+                        ++cursor;
+                    }
+                    if (cursor >= transform.size() || transform[cursor] != '(') {
+                        break;
+                    }
+                    const std::string function = transform.substr(nameAt, cursor - nameAt);
+                    int depth = 1;
+                    const std::size_t innerAt = ++cursor;
+                    while (cursor < transform.size() && depth > 0) {
+                        if (transform[cursor] == '(') {
+                            ++depth;
+                        } else if (transform[cursor] == ')') {
+                            --depth;
+                        }
+                        if (depth > 0) {
+                            ++cursor;
+                        }
+                    }
+                    const std::string inner = transform.substr(innerAt, cursor - innerAt);
+                    if (cursor < transform.size() && transform[cursor] == ')') {
+                        ++cursor;
+                    }
+                    const std::vector<std::string> args = splitArgs(inner);
+                    Plane next;
+                    if (function == "translate" || function == "translate3d") {
+                        double dx = 0;
+                        double dy = 0;
+                        if (!args.empty()) {
+                            readLength(args[0], dx);
+                        }
+                        if (args.size() >= 2) {
+                            readLength(args[1], dy);
+                        }
+                        next.e = dx;
+                        next.f = dy;
+                    } else if (function == "translatex") {
+                        double dx = 0;
+                        if (!args.empty()) {
+                            readLength(args[0], dx);
+                        }
+                        next.e = dx;
+                    } else if (function == "translatey") {
+                        double dy = 0;
+                        if (!args.empty()) {
+                            readLength(args[0], dy);
+                        }
+                        next.f = dy;
+                    } else if (function == "scale" || function == "scale3d") {
+                        const double sx = args.empty() ? 1 : std::atof(args[0].c_str());
+                        const double sy = args.size() >= 2 ? std::atof(args[1].c_str()) : sx;
+                        next.a = sx == 0 ? 0.0001 : sx;
+                        next.d = sy == 0 ? 0.0001 : sy;
+                    } else if (function == "scalex") {
+                        const double sx = args.empty() ? 1 : std::atof(args[0].c_str());
+                        next.a = sx == 0 ? 0.0001 : sx;
+                    } else if (function == "scaley") {
+                        const double sy = args.empty() ? 1 : std::atof(args[0].c_str());
+                        next.d = sy == 0 ? 0.0001 : sy;
+                    } else if (function == "rotate" || function == "rotatez") {
+                        const double radians = (args.empty() ? 0 : readAngle(args[0])) * 3.141592653589793 / 180.0;
+                        next.a = std::cos(radians);
+                        next.b = std::sin(radians);
+                        next.c = -std::sin(radians);
+                        next.d = std::cos(radians);
+                    } else if (function == "rotatex") {
+                        const double radians = (args.empty() ? 0 : readAngle(args[0])) * 3.141592653589793 / 180.0;
+                        next.d = std::cos(radians);
+                    } else if (function == "rotatey") {
+                        const double radians = (args.empty() ? 0 : readAngle(args[0])) * 3.141592653589793 / 180.0;
+                        next.a = std::cos(radians);
+                    } else if (function == "skewx") {
+                        const double radians = (args.empty() ? 0 : readAngle(args[0])) * 3.141592653589793 / 180.0;
+                        next.c = std::tan(radians);
+                    } else if (function == "skewy") {
+                        const double radians = (args.empty() ? 0 : readAngle(args[0])) * 3.141592653589793 / 180.0;
+                        next.b = std::tan(radians);
+                    } else if (function == "skew") {
+                        const double xRadians = (args.empty() ? 0 : readAngle(args[0])) * 3.141592653589793 / 180.0;
+                        const double yRadians = (args.size() >= 2 ? readAngle(args[1]) : 0) * 3.141592653589793 / 180.0;
+                        next.c = std::tan(xRadians);
+                        next.b = std::tan(yRadians);
+                    } else if (function == "matrix" && args.size() >= 6) {
+                        next.a = std::atof(args[0].c_str());
+                        next.b = std::atof(args[1].c_str());
+                        next.c = std::atof(args[2].c_str());
+                        next.d = std::atof(args[3].c_str());
+                        readLength(args[4], next.e);
+                        readLength(args[5], next.f);
+                    } else if (function == "matrix3d" && args.size() >= 16) {
+                        next.a = std::atof(args[0].c_str());
+                        next.b = std::atof(args[1].c_str());
+                        next.c = std::atof(args[4].c_str());
+                        next.d = std::atof(args[5].c_str());
+                        readLength(args[12], next.e);
+                        readLength(args[13], next.f);
+                    } else if (function == "perspective" || function == "translatez" || function == "scalez" || function == "rotate3d") {
+                        next = Plane();
+                    } else {
+                        continue;
+                    }
+                    plane = multiply(plane, next);
+                    saw = true;
+                }
+                if (saw) {
+                    const bool pureMove = std::fabs(plane.a - 1) < 0.001 && std::fabs(plane.b) < 0.001 && std::fabs(plane.c) < 0.001 &&
+                        std::fabs(plane.d - 1) < 0.001;
+                    if (pureMove) {
+                        target.translateX += static_cast<int>(std::lround(plane.e));
+                        target.translateY += static_cast<int>(std::lround(plane.f));
+                    } else {
+                        target.hasCssMatrix = true;
+                        target.matrixA = plane.a;
+                        target.matrixB = plane.b;
+                        target.matrixC = plane.c;
+                        target.matrixD = plane.d;
+                        target.matrixE = plane.e;
+                        target.matrixF = plane.f;
+                        if (std::fabs(plane.a - plane.d) < 0.001 && std::fabs(plane.b) < 0.001 && std::fabs(plane.c) < 0.001) {
+                            target.scaleMilli = static_cast<int>(plane.a * 1000.0 + 0.5);
+                        }
+                    }
+                }
+            }
+            if (declaration.name == "animation-name") {
+                target.animationName = ToLowerAscii(TrimSpaces(declaration.value));
+            }
+            if (declaration.name == "animation-duration") {
+                const std::string timing = ToLowerAscii(TrimSpaces(declaration.value));
+                if (timing.size() > 2 && timing.compare(timing.size() - 2, 2, "ms") == 0) {
+                    target.animationDurationSec = std::atof(timing.c_str()) / 1000.0;
+                } else {
+                    target.animationDurationSec = std::atof(timing.c_str());
+                }
+            }
+            if (declaration.name == "animation-timing-function") {
+                const std::string timing = ToLowerAscii(TrimSpaces(declaration.value));
+                target.easeKind = 0;
+                target.easeX1 = 0;
+                target.easeY1 = 0;
+                target.easeX2 = 1;
+                target.easeY2 = 1;
+                if (timing == "ease") {
+                    target.easeKind = 1;
+                    target.easeX1 = 0.25;
+                    target.easeY1 = 0.1;
+                    target.easeX2 = 0.25;
+                    target.easeY2 = 1;
+                } else if (timing == "ease-in") {
+                    target.easeKind = 2;
+                    target.easeX1 = 0.42;
+                    target.easeY1 = 0;
+                    target.easeX2 = 1;
+                    target.easeY2 = 1;
+                } else if (timing == "ease-out") {
+                    target.easeKind = 3;
+                    target.easeX1 = 0;
+                    target.easeY1 = 0;
+                    target.easeX2 = 0.58;
+                    target.easeY2 = 1;
+                } else if (timing == "ease-in-out") {
+                    target.easeKind = 4;
+                    target.easeX1 = 0.42;
+                    target.easeY1 = 0;
+                    target.easeX2 = 0.58;
+                    target.easeY2 = 1;
+                } else if (timing == "step-start") {
+                    target.easeKind = 5;
+                } else if (timing == "step-end") {
+                    target.easeKind = 6;
+                } else if (timing.compare(0, 6, "steps(") == 0) {
+                    target.easeKind = 7;
+                    target.easeSteps = std::max(1, std::atoi(timing.c_str() + 6));
+                } else if (timing.compare(0, 13, "cubic-bezier(") == 0) {
+                    target.easeKind = 8;
+                    double values[4] = {0, 0, 1, 1};
+                    int slot = 0;
+                    std::string number;
+                    for (char character : timing.substr(13)) {
+                        if ((character >= '0' && character <= '9') || character == '.' || character == '-') {
+                            number.push_back(character);
+                        } else if (!number.empty() && slot < 4) {
+                            values[slot++] = std::atof(number.c_str());
+                            number.clear();
+                        }
+                    }
+                    target.easeX1 = values[0];
+                    target.easeY1 = values[1];
+                    target.easeX2 = values[2];
+                    target.easeY2 = values[3];
+                }
+            }
+            if (declaration.name == "position" && ToLowerAscii(declaration.value) == "absolute") {
+                target.positionKind = 1;
+            }
+            if (declaration.name == "anchor-name") {
+                target.anchorName = TrimSpaces(declaration.value);
+            }
+            if (declaration.name == "left" && ToLowerAscii(declaration.value).compare(0, 7, "anchor(") == 0) {
+                target.anchorLeft = true;
+                target.positionKind = 1;
+                const std::size_t open = declaration.value.find('(');
+                const std::size_t close = declaration.value.find(')', open);
+                if (open != std::string::npos && close != std::string::npos) {
+                    std::string inner = TrimSpaces(declaration.value.substr(open + 1, close - open - 1));
+                    if (inner.size() >= 2 && inner[0] == '-' && inner[1] == '-') {
+                        const std::size_t space = inner.find(' ');
+                        target.anchorQuery = space == std::string::npos ? inner : inner.substr(0, space);
+                    }
+                }
+            }
+            if (declaration.name == "filter") {
+                const std::string filter = ToLowerAscii(declaration.value);
+                if (filter.compare(0, 5, "blur(") == 0) {
+                    std::string radiusText = declaration.value.substr(5);
+                    if (!radiusText.empty() && radiusText.back() == ')') {
+                        radiusText.pop_back();
+                    }
+                    int radius = 0;
+                    if (EvaluateCssPx(radiusText, target.customProperties, context, radius) && radius > 0) {
+                        target.blurPx = radius;
+                    }
+                }
+                if (filter.compare(0, 12, "drop-shadow(") == 0) {
+                    std::string inner = declaration.value.substr(12);
+                    const std::size_t close = inner.find(')');
+                    if (close != std::string::npos) {
+                        inner = inner.substr(0, close);
+                    }
+                    std::size_t piece = 0;
+                    std::vector<std::string> parts;
+                    while (piece < inner.size() && parts.size() < 4) {
+                        while (piece < inner.size() && inner[piece] == ' ') {
+                            ++piece;
+                        }
+                        const std::size_t start = piece;
+                        while (piece < inner.size() && inner[piece] != ' ') {
+                            ++piece;
+                        }
+                        if (start < piece) {
+                            parts.push_back(inner.substr(start, piece - start));
+                        }
+                    }
+                    int dx = 0;
+                    int dy = 0;
+                    if (parts.size() >= 2 && EvaluateCssPx(parts[0], target.customProperties, context, dx) &&
+                        EvaluateCssPx(parts[1], target.customProperties, context, dy)) {
+                        target.shadowDx = dx;
+                        target.shadowDy = dy;
+                        std::uint8_t red = 0;
+                        std::uint8_t green = 0;
+                        std::uint8_t blue = 0;
+                        const std::string colorText = parts.size() >= 4 ? parts[3] : "#000000";
+                        if (EvaluateCssColor(colorText, target.customProperties, red, green, blue)) {
+                            target.shadowColor = Color{red, green, blue, 255};
+                        }
+                    }
+                }
+                if (filter.compare(0, 10, "grayscale(") == 0) {
+                    double amount = std::atof(filter.c_str() + 10);
+                    if (filter.find('%') != std::string::npos) {
+                        amount /= 100.0;
+                    }
+                    if (amount < 0) {
+                        amount = 0;
+                    }
+                    if (amount > 1) {
+                        amount = 1;
+                    }
+                    const int weight = static_cast<int>(amount * 1000);
+                    auto mixGray = [weight](Color color) {
+                        const int gray = (color.red * 2126 + color.green * 7152 + color.blue * 722) / 10000;
+                        color.red = static_cast<std::uint8_t>((color.red * (1000 - weight) + gray * weight) / 1000);
+                        color.green = static_cast<std::uint8_t>((color.green * (1000 - weight) + gray * weight) / 1000);
+                        color.blue = static_cast<std::uint8_t>((color.blue * (1000 - weight) + gray * weight) / 1000);
+                        return color;
+                    };
+                    target.color = mixGray(target.color);
+                    if (target.background.alpha != 0) {
+                        target.background = mixGray(target.background);
+                    }
+                    if (target.linearGradient) {
+                        target.gradientStart = mixGray(target.gradientStart);
+                        target.gradientEnd = mixGray(target.gradientEnd);
+                    }
+                }
+            }
+            if (declaration.name == "background" || declaration.name == "background-image") {
+                const std::string lower = ToLowerAscii(declaration.value);
+                const bool repeating = lower.compare(0, 26, "repeating-linear-gradient(") == 0;
+                const bool radial = lower.compare(0, 16, "radial-gradient(") == 0 || lower.compare(0, 26, "repeating-radial-gradient(") == 0;
+                const bool linear = lower.compare(0, 16, "linear-gradient(") == 0 || repeating;
+                if ((linear || radial) && !declaration.value.empty() && declaration.value.back() == ')') {
+                    const std::size_t open = declaration.value.find('(');
+                    std::string inner = TrimSpaces(declaration.value.substr(open + 1, declaration.value.size() - open - 2));
+                    bool across = false;
+                    const std::string direction = ToLowerAscii(inner);
+                    if (direction.compare(0, 8, "to right") == 0) {
+                        across = true;
+                        inner = TrimSpaces(inner.substr(8));
+                        if (!inner.empty() && inner.front() == ',') {
+                            inner = TrimSpaces(inner.substr(1));
+                        }
+                    } else if (direction.compare(0, 9, "to bottom") == 0) {
+                        inner = TrimSpaces(inner.substr(9));
+                        if (!inner.empty() && inner.front() == ',') {
+                            inner = TrimSpaces(inner.substr(1));
+                        }
+                    }
+                    const std::size_t comma = inner.find(',');
+                    if (comma != std::string::npos) {
+                        std::uint8_t red = 0;
+                        std::uint8_t green = 0;
+                        std::uint8_t blue = 0;
+                        std::uint8_t redEnd = 0;
+                        std::uint8_t greenEnd = 0;
+                        std::uint8_t blueEnd = 0;
+                        std::string endText = TrimSpaces(inner.substr(comma + 1));
+                        const std::size_t space = endText.find_last_of(' ');
+                        int period = 0;
+                        if (space != std::string::npos && EvaluateCssPx(endText.substr(space + 1), target.customProperties, context, period) && period > 0) {
+                            endText = TrimSpaces(endText.substr(0, space));
+                        } else {
+                            period = 0;
+                        }
+                        if (EvaluateCssColor(TrimSpaces(inner.substr(0, comma)), target.customProperties, red, green, blue) &&
+                            EvaluateCssColor(endText, target.customProperties, redEnd, greenEnd, blueEnd)) {
+                            target.linearGradient = true;
+                            target.radialGradient = radial;
+                            target.repeatingGradient = repeating || lower.compare(0, 26, "repeating-radial-gradient(") == 0;
+                            target.gradientPeriod = period;
+                            target.gradientAcross = across || radial;
+                            target.gradientStart = Color{red, green, blue, 255};
+                            target.gradientEnd = Color{redEnd, greenEnd, blueEnd, 255};
+                            target.background = target.gradientStart;
+                        }
+                    }
+                }
+            }
+            if (declaration.name == "container-type") {
+                const std::string kind = ToLowerAscii(declaration.value);
+                if (kind.find("size") != std::string::npos || kind.find("inline-size") != std::string::npos) {
+                    target.isContainer = true;
+                }
             }
         }
     };
@@ -8709,6 +9791,90 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
         applyRule(style, inlineRule);
         resolveLengths(style, inlineRule);
     }
+    if (!style.animationName.empty() && style.animationDurationSec > 0) {
+        double progress = gSvgAnimationTime / style.animationDurationSec;
+        if (progress < 0) {
+            progress = 0;
+        }
+        if (progress > 1) {
+            progress = 1;
+        }
+        if (style.easeKind == 5) {
+            progress = progress <= 0 ? 0 : 1;
+        } else if (style.easeKind == 6) {
+            progress = progress >= 1 ? 1 : 0;
+        } else if (style.easeKind == 7) {
+            progress = progress >= 1 ? 1 : std::floor(progress * style.easeSteps) / style.easeSteps;
+        } else if (style.easeKind == 1 || style.easeKind == 2 || style.easeKind == 3 || style.easeKind == 4 || style.easeKind == 8) {
+            auto curve = [](double amount, double first, double second) {
+                const double remain = 1 - amount;
+                return 3 * remain * remain * amount * first + 3 * remain * amount * amount * second + amount * amount * amount;
+            };
+            double low = 0;
+            double high = 1;
+            for (int step = 0; step < 24; ++step) {
+                const double mid = (low + high) * 0.5;
+                if (curve(mid, style.easeX1, style.easeX2) < progress) {
+                    low = mid;
+                } else {
+                    high = mid;
+                }
+            }
+            progress = curve((low + high) * 0.5, style.easeY1, style.easeY2);
+            if (progress < 0) {
+                progress = 0;
+            }
+            if (progress > 1) {
+                progress = 1;
+            }
+        }
+        const ElementStyle* fromRule = nullptr;
+        const ElementStyle* toRule = nullptr;
+        for (const ElementStyle& rule : document.styleRules) {
+            if (rule.selector == "@" + style.animationName + "@0") {
+                fromRule = &rule;
+            }
+            if (rule.selector == "@" + style.animationName + "@100") {
+                toRule = &rule;
+            }
+        }
+        auto keyframeLength = [&](const ElementStyle* rule, const char* property, int& pixels) {
+            if (rule == nullptr) {
+                return false;
+            }
+            if (std::string(property) == "width" && rule->widthPx >= 0) {
+                pixels = rule->widthPx;
+                return true;
+            }
+            if (std::string(property) == "height" && rule->heightPx >= 0) {
+                pixels = rule->heightPx;
+                return true;
+            }
+            for (const StyleDeclaration& declaration : rule->declarations) {
+                if (ToLowerAscii(declaration.name) != property) {
+                    continue;
+                }
+                CssLengthContext lengthContext;
+                lengthContext.fontSizePx = std::max(1, style.fontSizePx);
+                lengthContext.rootFontSizePx = std::max(1, style.rootFontSizePx);
+                lengthContext.viewportWidth = style.viewportWidthPx;
+                lengthContext.viewportHeight = style.viewportHeightPx;
+                lengthContext.percentBase = percentBase > 0 ? percentBase : style.viewportWidthPx;
+                return EvaluateCssPx(declaration.value, style.customProperties, lengthContext, pixels);
+            }
+            return false;
+        };
+        int fromWidth = 0;
+        int toWidth = 0;
+        if (keyframeLength(fromRule, "width", fromWidth) && keyframeLength(toRule, "width", toWidth)) {
+            style.widthPx = fromWidth + static_cast<int>(std::lround((toWidth - fromWidth) * progress));
+        }
+        int fromHeight = 0;
+        int toHeight = 0;
+        if (keyframeLength(fromRule, "height", fromHeight) && keyframeLength(toRule, "height", toHeight)) {
+            style.heightPx = fromHeight + static_cast<int>(std::lround((toHeight - fromHeight) * progress));
+        }
+    }
     return style;
 }
 
@@ -8756,7 +9922,13 @@ LayoutResult LayoutDocument(Document& document, int viewportWidth, int viewportH
         return result;
     }
     ResolvedStyle rootStyle = DefaultStyle();
-    ResolvedStyle bodyStyle = ResolveStyle(*body, rootStyle, document);
+    rootStyle.viewportWidthPx = result.viewportWidth;
+    rootStyle.viewportHeightPx = result.viewportHeight;
+    if (html != nullptr) {
+        const ResolvedStyle htmlStyle = ResolveStyle(*html, rootStyle, document, result.viewportWidth);
+        rootStyle.rootFontSizePx = htmlStyle.fontSizePx;
+    }
+    ResolvedStyle bodyStyle = ResolveStyle(*body, rootStyle, document, result.viewportWidth);
     if (bodyStyle.background.alpha != 0) {
         engine.Fill(0, 0, result.viewportWidth, result.viewportHeight, bodyStyle.background, true);
     }
