@@ -3,6 +3,7 @@
 #include "Render/BitmapFont.h"
 #include "Render/ImageDecoder.h"
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 
@@ -10,8 +11,18 @@ namespace RoboWeb {
 
 namespace {
 
-bool InsideClip(const DrawOp& op, int originY, int x, int y, int frameWidth, int frameHeight) {
+struct PaintClip {
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+};
+
+bool InsideClip(const DrawOp& op, int originY, int x, int y, int frameWidth, int frameHeight, const PaintClip* dirty) {
     if (x < 0 || y < 0 || x >= frameWidth || y >= frameHeight) {
+        return false;
+    }
+    if (dirty != nullptr && (x < dirty->x || y < dirty->y || x >= dirty->x + dirty->width || y >= dirty->y + dirty->height)) {
         return false;
     }
     if (!op.clipped) {
@@ -40,13 +51,22 @@ void Blend(Framebuffer& framebuffer, int x, int y, Color color) {
     framebuffer.pixels[offset + 3] = 255;
 }
 
-}  // namespace
+void ClearRect(Framebuffer& framebuffer, const PaintClip& dirty) {
+    for (int row = dirty.y; row < dirty.y + dirty.height; ++row) {
+        for (int column = dirty.x; column < dirty.x + dirty.width; ++column) {
+            if (column < 0 || row < 0 || column >= framebuffer.width || row >= framebuffer.height) {
+                continue;
+            }
+            const std::size_t offset = static_cast<std::size_t>((row * framebuffer.width + column) * 4);
+            framebuffer.pixels[offset] = 255;
+            framebuffer.pixels[offset + 1] = 255;
+            framebuffer.pixels[offset + 2] = 255;
+            framebuffer.pixels[offset + 3] = 255;
+        }
+    }
+}
 
-Framebuffer RenderDocument(const LayoutResult& layout, int scrollY, bool settled) {
-    Framebuffer framebuffer;
-    framebuffer.width = layout.viewportWidth;
-    framebuffer.height = layout.viewportHeight;
-    framebuffer.pixels.assign(static_cast<std::size_t>(framebuffer.width * framebuffer.height * 4), 255);
+void PaintOps(Framebuffer& framebuffer, const LayoutResult& layout, int scrollY, bool settled, const PaintClip* dirty) {
     for (const DrawOp& op : layout.ops) {
         const int originY = op.fixed ? 0 : scrollY;
         const int x = op.x;
@@ -54,25 +74,25 @@ Framebuffer RenderDocument(const LayoutResult& layout, int scrollY, bool settled
         if (op.kind == DrawOp::Kind::Fill) {
             for (int row = 0; row < op.height; ++row) {
                 for (int column = 0; column < op.width; ++column) {
-                    if (InsideClip(op, originY, x + column, y + row, framebuffer.width, framebuffer.height)) {
+                    if (InsideClip(op, originY, x + column, y + row, framebuffer.width, framebuffer.height, dirty)) {
                         Blend(framebuffer, x + column, y + row, op.color);
                     }
                 }
             }
         } else if (op.kind == DrawOp::Kind::Stroke) {
             for (int column = 0; column < op.width; ++column) {
-                if (InsideClip(op, originY, x + column, y, framebuffer.width, framebuffer.height)) {
+                if (InsideClip(op, originY, x + column, y, framebuffer.width, framebuffer.height, dirty)) {
                     Blend(framebuffer, x + column, y, op.color);
                 }
-                if (InsideClip(op, originY, x + column, y + op.height - 1, framebuffer.width, framebuffer.height)) {
+                if (InsideClip(op, originY, x + column, y + op.height - 1, framebuffer.width, framebuffer.height, dirty)) {
                     Blend(framebuffer, x + column, y + op.height - 1, op.color);
                 }
             }
             for (int row = 0; row < op.height; ++row) {
-                if (InsideClip(op, originY, x, y + row, framebuffer.width, framebuffer.height)) {
+                if (InsideClip(op, originY, x, y + row, framebuffer.width, framebuffer.height, dirty)) {
                     Blend(framebuffer, x, y + row, op.color);
                 }
-                if (InsideClip(op, originY, x + op.width - 1, y + row, framebuffer.width, framebuffer.height)) {
+                if (InsideClip(op, originY, x + op.width - 1, y + row, framebuffer.width, framebuffer.height, dirty)) {
                     Blend(framebuffer, x + op.width - 1, y + row, op.color);
                 }
             }
@@ -87,6 +107,12 @@ Framebuffer RenderDocument(const LayoutResult& layout, int scrollY, bool settled
                 clipRight = op.clipX + op.clipWidth;
                 clipBottom = clipTop + op.clipHeight;
             }
+            if (dirty != nullptr) {
+                clipLeft = std::max(clipLeft, dirty->x);
+                clipTop = std::max(clipTop, dirty->y);
+                clipRight = std::min(clipRight, dirty->x + dirty->width);
+                clipBottom = std::min(clipBottom, dirty->y + dirty->height);
+            }
             DrawTextPx(framebuffer.pixels.data(), framebuffer.width, framebuffer.height, x, y, op.text, op.fontSizePx, op.color,
                 op.bold, op.italic, clipLeft, clipTop, clipRight, clipBottom, op.fontFamily, op.letterSpacingPx, op.wordSpacingPx);
             const int textWidth = MeasureTextPx(op.text, op.fontSizePx, op.bold, op.italic, op.fontFamily, op.letterSpacingPx, op.wordSpacingPx);
@@ -94,14 +120,14 @@ Framebuffer RenderDocument(const LayoutResult& layout, int scrollY, bool settled
             const Color lineColor = op.hasDecorationColor ? op.decorationColor : op.color;
             if (op.underline) {
                 for (int column = 0; column < textWidth; ++column) {
-                    if (InsideClip(op, originY, x + column, y + line - 2 + op.underlineOffsetPx, framebuffer.width, framebuffer.height)) {
+                    if (InsideClip(op, originY, x + column, y + line - 2 + op.underlineOffsetPx, framebuffer.width, framebuffer.height, dirty)) {
                         Blend(framebuffer, x + column, y + line - 2 + op.underlineOffsetPx, lineColor);
                     }
                 }
             }
             if (op.strike) {
                 for (int column = 0; column < textWidth; ++column) {
-                    if (InsideClip(op, originY, x + column, y + line / 2, framebuffer.width, framebuffer.height)) {
+                    if (InsideClip(op, originY, x + column, y + line / 2, framebuffer.width, framebuffer.height, dirty)) {
                         Blend(framebuffer, x + column, y + line / 2, lineColor);
                     }
                 }
@@ -134,14 +160,41 @@ Framebuffer RenderDocument(const LayoutResult& layout, int scrollY, bool settled
                         };
                         color = Color{mixChannel(0), mixChannel(1), mixChannel(2), 255};
                     }
-                    if (InsideClip(op, originY, x + column, y + row, framebuffer.width, framebuffer.height)) {
+                    if (InsideClip(op, originY, x + column, y + row, framebuffer.width, framebuffer.height, dirty)) {
                         Blend(framebuffer, x + column, y + row, color);
                     }
                 }
             }
         }
     }
+}
+
+}  // namespace
+
+Framebuffer RenderDocument(const LayoutResult& layout, int scrollY, bool settled) {
+    Framebuffer framebuffer;
+    framebuffer.width = layout.viewportWidth;
+    framebuffer.height = layout.viewportHeight;
+    framebuffer.pixels.assign(static_cast<std::size_t>(framebuffer.width * framebuffer.height * 4), 255);
+    PaintOps(framebuffer, layout, scrollY, settled, nullptr);
     return framebuffer;
+}
+
+void RenderDirty(const LayoutResult& layout, int scrollY, Framebuffer& framebuffer, int x, int y, int width, int height, bool settled) {
+    if (framebuffer.width != layout.viewportWidth || framebuffer.height != layout.viewportHeight || framebuffer.pixels.empty()) {
+        framebuffer = RenderDocument(layout, scrollY, settled);
+        return;
+    }
+    PaintClip dirty;
+    dirty.x = std::max(0, x);
+    dirty.y = std::max(0, y);
+    dirty.width = std::max(0, std::min(width, framebuffer.width - dirty.x));
+    dirty.height = std::max(0, std::min(height, framebuffer.height - dirty.y));
+    if (dirty.width <= 0 || dirty.height <= 0) {
+        return;
+    }
+    ClearRect(framebuffer, dirty);
+    PaintOps(framebuffer, layout, scrollY, settled, &dirty);
 }
 
 bool WritePpm(const Framebuffer& framebuffer, const std::string& path) {

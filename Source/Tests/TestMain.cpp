@@ -2,13 +2,16 @@
 #include "Catalog/ElementCatalog.h"
 #include "Catalog/SvgCatalog.h"
 #include "Compiler/CodeGenerator.h"
+#include "Compiler/FastPath.h"
 #include "Diagnostics/Diagnostics.h"
 #include "Dom/Document.h"
 #include "Layout/LayoutEngine.h"
 #include "Parser/HtmlParser.h"
 #include "Render/BitmapFont.h"
 #include "Render/ImageDecoder.h"
+#include "Render/InterFontData.h"
 #include "Render/Renderer.h"
+#include "Runtime/FramePlan.h"
 #include "Runtime/Interaction.h"
 #include "Validate/TreeValidator.h"
 #include "Xml/XmlParser.h"
@@ -408,6 +411,7 @@ void TestStaticGeneration() {
     EXPECT(cpp.find("MakeText") != std::string::npos);
     EXPECT(cpp.find("Hello") != std::string::npos);
     EXPECT(cpp.find("RunDocument") != std::string::npos);
+    EXPECT(cpp.find("Performance contract") != std::string::npos);
     EXPECT(cpp.find("StaticNode") == std::string::npos);
     std::unique_ptr<RoboWeb::Node> rebuilt = RoboWeb::RebuildStatic(document);
     EXPECT(rebuilt != nullptr);
@@ -4948,6 +4952,103 @@ void TestDiagnosticFormat() {
     EXPECT(text.find("page.html:5:1: warning: element 'center' is obsolete") != std::string::npos);
 }
 
+RoboWeb::Node* FindKind(RoboWeb::Node& node, RoboWeb::ElementKind kind) {
+    if (node.kind == kind) {
+        return &node;
+    }
+    for (const std::unique_ptr<RoboWeb::Node>& child : node.children) {
+        RoboWeb::Node* found = FindKind(*child, kind);
+        if (found != nullptr) {
+            return found;
+        }
+    }
+    return nullptr;
+}
+
+bool SameFrame(const RoboWeb::Framebuffer& left, const RoboWeb::Framebuffer& right) {
+    return left.width == right.width && left.height == right.height && left.pixels == right.pixels;
+}
+
+void TestFastFrame() {
+    RoboWeb::Diagnostics diagnostics;
+    RoboWeb::Document document = Parse("<!DOCTYPE html><button>Save</button><input value=\"ab\"><p>Plain</p>", diagnostics);
+    RoboWeb::ResetFrameStatistics();
+    RoboWeb::ViewCache cache;
+    RoboWeb::AdvanceFrame(cache, document, 320, 200, RoboWeb::FrameCause::Viewport, nullptr, true);
+    EXPECT(RoboWeb::FrameStatistics().layoutCount == 1);
+    EXPECT(RoboWeb::FrameStatistics().fullRasterCount == 1);
+    EXPECT(RoboWeb::FrameStatistics().dirtyRasterCount == 0);
+    RoboWeb::Node* button = FindKind(*document.root, RoboWeb::ElementKind::Button);
+    EXPECT(button != nullptr);
+    document.hover = button;
+    RoboWeb::FrameUpdate hovered = RoboWeb::AdvanceFrame(cache, document, 320, 200, RoboWeb::FrameCause::Hover, nullptr, true);
+    EXPECT(RoboWeb::FrameStatistics().layoutCount == 1);
+    EXPECT(RoboWeb::FrameStatistics().dirtyRasterCount == 1);
+    EXPECT(RoboWeb::FrameStatistics().fullRasterCount == 1);
+    EXPECT(hovered.paint && !hovered.full);
+    RoboWeb::Document hoveredReference = Parse("<!DOCTYPE html><button>Save</button><input value=\"ab\"><p>Plain</p>", diagnostics);
+    hoveredReference.hover = FindKind(*hoveredReference.root, RoboWeb::ElementKind::Button);
+    EXPECT(SameFrame(cache.frame, RoboWeb::RenderDocument(RoboWeb::LayoutDocument(hoveredReference, 320, 200), 0, true)));
+    document.hover = nullptr;
+    RoboWeb::AdvanceFrame(cache, document, 320, 200, RoboWeb::FrameCause::Hover, button, true);
+    EXPECT(RoboWeb::FrameStatistics().layoutCount == 1);
+    RoboWeb::Document idleReference = Parse("<!DOCTYPE html><button>Save</button><input value=\"ab\"><p>Plain</p>", diagnostics);
+    EXPECT(SameFrame(cache.frame, RoboWeb::RenderDocument(RoboWeb::LayoutDocument(idleReference, 320, 200), 0, true)));
+    RoboWeb::Node* paragraph = FindKind(*document.root, RoboWeb::ElementKind::P);
+    const int dirtyBeforePlain = RoboWeb::FrameStatistics().dirtyRasterCount;
+    document.hover = paragraph;
+    RoboWeb::FrameUpdate plain = RoboWeb::AdvanceFrame(cache, document, 320, 200, RoboWeb::FrameCause::Hover, nullptr, true);
+    EXPECT(!plain.paint);
+    EXPECT(RoboWeb::FrameStatistics().layoutCount == 1);
+    EXPECT(RoboWeb::FrameStatistics().dirtyRasterCount == dirtyBeforePlain);
+    document.hover = nullptr;
+    RoboWeb::Node* field = FindKind(*document.root, RoboWeb::ElementKind::Input);
+    document.focus = field;
+    document.caretOn = true;
+    RoboWeb::AdvanceFrame(cache, document, 320, 200, RoboWeb::FrameCause::Content, nullptr, true);
+    const int layoutsAfterFocus = RoboWeb::FrameStatistics().layoutCount;
+    document.caretOn = false;
+    RoboWeb::FrameUpdate blink = RoboWeb::AdvanceFrame(cache, document, 320, 200, RoboWeb::FrameCause::Caret, nullptr, true);
+    EXPECT(RoboWeb::FrameStatistics().layoutCount == layoutsAfterFocus);
+    EXPECT(blink.paint && !blink.full);
+    RoboWeb::Document caretReference = Parse("<!DOCTYPE html><button>Save</button><input value=\"ab\"><p>Plain</p>", diagnostics);
+    caretReference.focus = FindKind(*caretReference.root, RoboWeb::ElementKind::Input);
+    caretReference.caretOn = false;
+    EXPECT(SameFrame(cache.frame, RoboWeb::RenderDocument(RoboWeb::LayoutDocument(caretReference, 320, 200), 0, true)));
+    RoboWeb::Document tall = Parse("<!DOCTYPE html><p>One</p><p>Two</p><p>Three</p><p>Four</p><p>Five</p><p>Six</p><p>Seven</p><p>Eight</p>", diagnostics);
+    RoboWeb::ViewCache tallCache;
+    RoboWeb::AdvanceFrame(tallCache, tall, 200, 40, RoboWeb::FrameCause::Viewport, nullptr, true);
+    const int layoutsBeforeScroll = RoboWeb::FrameStatistics().layoutCount;
+    const int fullBeforeScroll = RoboWeb::FrameStatistics().fullRasterCount;
+    tall.scrollY = 30;
+    RoboWeb::FrameUpdate scrolled = RoboWeb::AdvanceFrame(tallCache, tall, 200, 40, RoboWeb::FrameCause::Scroll, nullptr, true);
+    EXPECT(RoboWeb::FrameStatistics().layoutCount == layoutsBeforeScroll);
+    EXPECT(RoboWeb::FrameStatistics().fullRasterCount == fullBeforeScroll + 1);
+    EXPECT(scrolled.full);
+    EXPECT(SameFrame(tallCache.frame, RoboWeb::RenderDocument(tallCache.layout, tall.scrollY, true)));
+    RoboWeb::Diagnostics slow;
+    RoboWeb::Document interpreted = Parse("<!DOCTYPE html><script>eval(\"no\")</script><p>Hi</p>", slow);
+    RoboWeb::WarnSlowPaths(interpreted, slow);
+    EXPECT(slow.WarningCount() >= 1);
+    bool warned = false;
+    for (const RoboWeb::Diagnostic& item : slow.Items()) {
+        if (item.message.find("will not have C++ performance") != std::string::npos) {
+            warned = true;
+        }
+    }
+    EXPECT(warned);
+    RoboWeb::Diagnostics fast;
+    RoboWeb::Document assigned = Parse("<!DOCTYPE html><script>document.title = \"Hi\";</script>", fast);
+    RoboWeb::WarnSlowPaths(assigned, fast);
+    EXPECT(fast.WarningCount() == 0);
+    EXPECT(RoboWeb::RegisterWebFontView("probe-face", 400, false, RoboWeb::kInterRegular, RoboWeb::kInterRegularSize));
+    EXPECT(RoboWeb::MeasureTextPx("A", 16, false, false, "probe-face") > 0);
+    static const unsigned char kRedPixel[] = {'P', '6', '\n', '1', ' ', '1', '\n', '2', '5', '5', '\n', 255, 0, 0};
+    RoboWeb::RegisterCompiledImageView("unit-red.ppm", kRedPixel, sizeof(kRedPixel));
+    RoboWeb::DecodedImage image = RoboWeb::DecodeImageFile("unit-red.ppm");
+    EXPECT(image.ok && image.width == 1 && image.rgba[0] == 255 && image.rgba[1] == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -4965,6 +5066,7 @@ int main() {
     TestStaticGeneration();
     TestXml();
     TestDiagnosticFormat();
+    TestFastFrame();
     if (gFailed != 0) {
         std::cerr << gFailed << " test assertion(s) failed\n";
         return 1;

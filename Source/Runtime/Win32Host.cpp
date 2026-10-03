@@ -3,6 +3,7 @@
 #include "Core/Utf8.h"
 #include "Layout/LayoutEngine.h"
 #include "Render/Renderer.h"
+#include "Runtime/FramePlan.h"
 #include "Runtime/Interaction.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -36,8 +37,8 @@ struct App {
     bool refreshing = false;
     bool hasMarquee = false;
     bool imagesSettled = false;
-    LayoutResult layout;
-    Framebuffer frame;
+    ViewCache view;
+    FrameUpdate present;
     std::wstring pending;
 };
 
@@ -135,31 +136,41 @@ std::wstring Caption(const App& app) {
 }
 
 void Present(const App& app, HDC dc) {
-    if (app.frame.width <= 0 || app.frame.height <= 0 || app.frame.pixels.empty()) {
+    const Framebuffer& frame = app.view.frame;
+    if (!app.present.paint || frame.width <= 0 || frame.height <= 0 || frame.pixels.empty()) {
+        return;
+    }
+    const int originX = app.present.full ? 0 : app.present.x;
+    const int originY = app.present.full ? 0 : app.present.y;
+    const int width = app.present.full ? frame.width : app.present.width;
+    const int height = app.present.full ? frame.height : app.present.height;
+    if (width <= 0 || height <= 0) {
         return;
     }
     BITMAPINFO info;
     ZeroMemory(&info, sizeof(info));
     info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    info.bmiHeader.biWidth = app.frame.width;
-    info.bmiHeader.biHeight = -app.frame.height;
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height;
     info.bmiHeader.biPlanes = 1;
     info.bmiHeader.biBitCount = 32;
     info.bmiHeader.biCompression = BI_RGB;
-    std::vector<std::uint8_t> bgra(static_cast<std::size_t>(app.frame.width * app.frame.height * 4));
-    for (int index = 0; index < app.frame.width * app.frame.height; ++index) {
-        const std::size_t source = static_cast<std::size_t>(index * 4);
-        const std::size_t target = source;
-        bgra[target] = app.frame.pixels[source + 2];
-        bgra[target + 1] = app.frame.pixels[source + 1];
-        bgra[target + 2] = app.frame.pixels[source];
-        bgra[target + 3] = 255;
+    std::vector<std::uint8_t> bgra(static_cast<std::size_t>(width * height * 4));
+    for (int row = 0; row < height; ++row) {
+        for (int column = 0; column < width; ++column) {
+            const std::size_t source = static_cast<std::size_t>(((originY + row) * frame.width + originX + column) * 4);
+            const std::size_t target = static_cast<std::size_t>((row * width + column) * 4);
+            bgra[target] = frame.pixels[source + 2];
+            bgra[target + 1] = frame.pixels[source + 1];
+            bgra[target + 2] = frame.pixels[source];
+            bgra[target + 3] = 255;
+        }
     }
-    SetDIBitsToDevice(dc, 0, 0, static_cast<UINT>(app.frame.width), static_cast<UINT>(app.frame.height), 0, 0, 0,
-        static_cast<UINT>(app.frame.height), bgra.data(), &info, DIB_RGB_COLORS);
+    SetDIBitsToDevice(dc, originX, originY, static_cast<UINT>(width), static_cast<UINT>(height), 0, 0, 0, static_cast<UINT>(height),
+        bgra.data(), &info, DIB_RGB_COLORS);
 }
 
-void Refresh(App& app) {
+void Refresh(App& app, FrameCause cause, Node* previousHover) {
     if (app.window == nullptr || app.refreshing || app.document == nullptr) {
         return;
     }
@@ -168,35 +179,37 @@ void Refresh(App& app) {
     GetClientRect(app.window, &client);
     app.width = std::max(MIN_VIEWPORT_PX, static_cast<int>(client.right - client.left));
     app.height = std::max(MIN_VIEWPORT_PX, static_cast<int>(client.bottom - client.top));
-    app.layout = LayoutDocument(*app.document, app.width, app.height);
-    DispatchScroll(*app.document, 0, app.height, app.layout.contentHeight);
+    app.present = AdvanceFrame(app.view, *app.document, app.width, app.height, cause, previousHover, app.imagesSettled);
+    if (cause == FrameCause::Viewport || cause == FrameCause::Content) {
+        const int scrollBefore = app.document->scrollY;
+        DispatchScroll(*app.document, 0, app.height, app.view.layout.contentHeight);
+        if (app.document->scrollY != scrollBefore) {
+            app.present = AdvanceFrame(app.view, *app.document, app.width, app.height, FrameCause::Scroll, nullptr, app.imagesSettled);
+        }
+    }
     bool waitingImage = false;
-    for (const DrawOp& op : app.layout.ops) {
+    for (const DrawOp& op : app.view.layout.ops) {
         if (op.deferImage) {
             waitingImage = true;
             break;
         }
     }
     if (waitingImage && !app.imagesSettled) {
-        app.frame = RenderDocument(app.layout, app.document->scrollY, false);
-        if (app.window != nullptr) {
-            SetTimer(app.window, 3, 33, nullptr);
-        }
+        SetTimer(app.window, 3, 33, nullptr);
     } else {
-        app.frame = RenderDocument(app.layout, app.document->scrollY, true);
-        if (app.window != nullptr) {
-            KillTimer(app.window, 3);
-        }
+        KillTimer(app.window, 3);
     }
-    SCROLLINFO info;
-    ZeroMemory(&info, sizeof(info));
-    info.cbSize = sizeof(info);
-    info.fMask = SIF_RANGE | SIF_PAGE | SIF_POS | SIF_DISABLENOSCROLL;
-    info.nMin = 0;
-    info.nMax = std::max(0, app.layout.contentHeight - 1);
-    info.nPage = static_cast<UINT>(app.height);
-    info.nPos = app.document->scrollY;
-    SetScrollInfo(app.window, SB_VERT, &info, TRUE);
+    if (cause == FrameCause::Viewport || cause == FrameCause::Content || cause == FrameCause::Scroll) {
+        SCROLLINFO info;
+        ZeroMemory(&info, sizeof(info));
+        info.cbSize = sizeof(info);
+        info.fMask = SIF_RANGE | SIF_PAGE | SIF_POS | SIF_DISABLENOSCROLL;
+        info.nMin = 0;
+        info.nMax = std::max(0, app.view.layout.contentHeight - 1);
+        info.nPage = static_cast<UINT>(app.height);
+        info.nPos = app.document->scrollY;
+        SetScrollInfo(app.window, SB_VERT, &info, TRUE);
+    }
     SetWindowTextW(app.window, Caption(app).c_str());
     const bool marquee = app.document->root != nullptr && TreeHasMarquee(*app.document->root);
     const bool animated = app.document->root != nullptr && TreeHasSvgAnimation(*app.document->root);
@@ -208,7 +221,18 @@ void Refresh(App& app) {
             KillTimer(app.window, 2);
         }
     }
-    InvalidateRect(app.window, nullptr, FALSE);
+    if (app.present.paint) {
+        RECT dirty;
+        if (app.present.full) {
+            GetClientRect(app.window, &dirty);
+        } else {
+            dirty.left = app.present.x;
+            dirty.top = app.present.y;
+            dirty.right = app.present.x + app.present.width;
+            dirty.bottom = app.present.y + app.present.height;
+        }
+        InvalidateRect(app.window, &dirty, FALSE);
+    }
     app.refreshing = false;
 }
 
@@ -251,7 +275,7 @@ void PasteFocus(App& app) {
     }
     CloseClipboard();
     if (!text.empty() && DispatchText(*app.document, text)) {
-        Refresh(app);
+        Refresh(app, FrameCause::Content, nullptr);
     }
 }
 
@@ -269,7 +293,7 @@ void ChooseFile(App& app, Node& input) {
     if (GetOpenFileNameW(&dialog)) {
         input.liveValue = Narrow(buffer);
         app.document->status = input.liveValue;
-        Refresh(app);
+        Refresh(app, FrameCause::Content, nullptr);
     }
 }
 
@@ -306,8 +330,8 @@ void OnScroll(App& app, WPARAM wParam) {
     default:
         return;
     }
-    DispatchScroll(*app.document, next - app.document->scrollY, app.height, app.layout.contentHeight);
-    Refresh(app);
+    DispatchScroll(*app.document, next - app.document->scrollY, app.height, app.view.layout.contentHeight);
+    Refresh(app, FrameCause::Scroll, nullptr);
 }
 
 void OnKeyDown(App& app, WPARAM key) {
@@ -319,7 +343,7 @@ void OnKeyDown(App& app, WPARAM key) {
             focus->liveValue.clear();
             app.document->caretOffset = 0;
             app.document->caretOn = true;
-            Refresh(app);
+            Refresh(app, FrameCause::Content, nullptr);
         }
         return;
     }
@@ -346,8 +370,8 @@ void OnKeyDown(App& app, WPARAM key) {
         name = (GetKeyState(VK_SHIFT) & 0x8000) != 0 ? "shift-tab" : "tab";
     }
     if (name != nullptr && DispatchKey(*app.document, name)) {
-        RevealFocus(*app.document, app.layout, app.height);
-        Refresh(app);
+        RevealFocus(*app.document, app.view.layout, app.height);
+        Refresh(app, FrameCause::Content, nullptr);
     }
 }
 
@@ -368,7 +392,7 @@ void OnChar(App& app, wchar_t character) {
     }
     app.pending.clear();
     if (DispatchText(*app.document, Narrow(text))) {
-        Refresh(app);
+        Refresh(app, FrameCause::Content, nullptr);
     }
 }
 
@@ -403,7 +427,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     }
     case WM_SIZE:
         if (app != nullptr && wParam != SIZE_MINIMIZED) {
-            Refresh(*app);
+            Refresh(*app, FrameCause::Viewport, nullptr);
         }
         return 0;
     case WM_MOUSEMOVE:
@@ -416,15 +440,17 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             track.dwFlags = TME_LEAVE;
             track.hwndTrack = window;
             TrackMouseEvent(&track);
-            if (DispatchHover(*app->document, app->layout, app->mouseX, app->mouseY)) {
-                Refresh(*app);
+            Node* previousHover = app->document->hover;
+            if (DispatchHover(*app->document, app->view.layout, app->mouseX, app->mouseY)) {
+                Refresh(*app, FrameCause::Hover, previousHover);
             }
         }
         return 0;
     case WM_MOUSELEAVE:
         if (app != nullptr && app->document->hover != nullptr) {
+            Node* previousHover = app->document->hover;
             app->document->hover = nullptr;
-            Refresh(*app);
+            Refresh(*app, FrameCause::Hover, previousHover);
         }
         return 0;
     case WM_LBUTTONDOWN:
@@ -432,19 +458,19 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             SetFocus(window);
             const int x = GET_X_LPARAM(lParam);
             const int y = GET_Y_LPARAM(lParam);
-            DispatchClick(*app->document, app->layout, x, y);
+            DispatchClick(*app->document, app->view.layout, x, y);
             if (IsFileInput(app->document->focus)) {
                 ChooseFile(*app, *app->document->focus);
             }
-            RevealFocus(*app->document, app->layout, app->height);
-            Refresh(*app);
+            RevealFocus(*app->document, app->view.layout, app->height);
+            Refresh(*app, FrameCause::Content, nullptr);
         }
         return 0;
     case WM_MOUSEWHEEL:
         if (app != nullptr) {
             const int ticks = GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA;
-            DispatchScroll(*app->document, -ticks * 48, app->height, app->layout.contentHeight);
-            Refresh(*app);
+            DispatchScroll(*app->document, -ticks * 48, app->height, app->view.layout.contentHeight);
+            Refresh(*app, FrameCause::Scroll, nullptr);
         }
         return 0;
     case WM_VSCROLL:
@@ -467,7 +493,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             POINT point;
             GetCursorPos(&point);
             ScreenToClient(window, &point);
-            SetCursor(CursorFor(PointerAt(app->layout, point.x, point.y, app->document->scrollY)));
+            SetCursor(CursorFor(PointerAt(app->view.layout, point.x, point.y, app->document->scrollY)));
             return TRUE;
         }
         break;
@@ -475,16 +501,16 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         if (app != nullptr && wParam == 1) {
             if (ShowsCaret(app->document->focus)) {
                 app->document->caretOn = !app->document->caretOn;
-                Refresh(*app);
+                Refresh(*app, FrameCause::Caret, nullptr);
             }
         } else if (app != nullptr && wParam == 2) {
             TickMarquee(*app->document);
             SetSvgAnimationTime(SvgAnimationTime() + 0.033);
-            Refresh(*app);
+            Refresh(*app, FrameCause::Content, nullptr);
         } else if (app != nullptr && wParam == 3) {
             app->imagesSettled = true;
             KillTimer(window, 3);
-            Refresh(*app);
+            Refresh(*app, FrameCause::Content, nullptr);
         }
         return 0;
     case WM_DESTROY:
@@ -551,7 +577,7 @@ int RunWindow(Document& document, int width, int height) {
         return 1;
     }
     SetTimer(app.window, 1, 530, nullptr);
-    Refresh(app);
+    Refresh(app, FrameCause::Viewport, nullptr);
     ShowWindow(app.window, SW_SHOW);
     UpdateWindow(app.window);
     MSG message;

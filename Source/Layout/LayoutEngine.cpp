@@ -657,6 +657,7 @@ struct Engine {
     std::vector<Node*> overlays;
     std::vector<CssColorFilter> colorFilters;
     int paintHidden = 0;
+    Node* paintOwner = nullptr;
 
     static int ClampByte(int value) {
         if (value < 0) {
@@ -816,6 +817,7 @@ struct Engine {
         op.clipY = clipY;
         op.clipWidth = clipWidth;
         op.clipHeight = clipHeight;
+        op.owner = paintOwner;
         result->ops.push_back(op);
     }
 
@@ -910,6 +912,7 @@ struct Engine {
         op.height = height;
         op.color = color;
         op.fixed = fixed;
+        op.owner = paintOwner;
         result->ops.push_back(op);
     }
 
@@ -952,6 +955,7 @@ struct Engine {
         op.clipY = clipY;
         op.clipWidth = clipWidth;
         op.clipHeight = clipHeight;
+        op.owner = paintOwner;
         result->ops.push_back(op);
     }
 
@@ -990,7 +994,7 @@ struct Engine {
             }
             Text(innerX - shift, lineY, lines[static_cast<std::size_t>(index)].text, paint, fixed, true, innerX, innerY, innerW, innerH);
         }
-        if (!focused || !document->caretOn) {
+        if (!focused) {
             return;
         }
         const std::vector<FieldLine> caretLines = SplitFieldLines(placeholder ? std::string() : edited);
@@ -1005,8 +1009,26 @@ struct Engine {
         }
         const int prefix = MeasureTextPx(line.text.substr(0, static_cast<std::size_t>(column)), style.fontSizePx, style.bold, style.italic,
             style.fontFamily);
-        Fill(innerX - shift + prefix, innerY + lineIndex * lineHeight, 1, lineHeight, Color{0, 0, 0, 255}, fixed, true, innerX, innerY, innerW,
-            innerH);
+        DrawOp caretOp;
+        caretOp.kind = DrawOp::Kind::Fill;
+        caretOp.x = innerX - shift + prefix;
+        caretOp.y = innerY + lineIndex * lineHeight;
+        caretOp.width = 1;
+        caretOp.height = lineHeight;
+        caretOp.color = Color{0, 0, 0, 255};
+        caretOp.fixed = fixed;
+        caretOp.clipped = true;
+        caretOp.clipX = innerX;
+        caretOp.clipY = innerY;
+        caretOp.clipWidth = innerW;
+        caretOp.clipHeight = innerH;
+        caretOp.owner = &node;
+        caretOp.caret = true;
+        result->caretPresent = true;
+        result->caret = caretOp;
+        if (document->caretOn) {
+            result->ops.push_back(caretOp);
+        }
     }
 
     int ReplacedSize(Node& node, const ResolvedStyle& style, int containing, int& width, int& height) {
@@ -6848,7 +6870,21 @@ struct Engine {
         }
     }
 
+    struct AtomicOwner {
+        Engine* engine;
+        Node* previous;
+
+        AtomicOwner(Engine* engine, Node& node) : engine(engine), previous(engine->paintOwner) {
+            engine->paintOwner = &node;
+        }
+
+        ~AtomicOwner() {
+            engine->paintOwner = previous;
+        }
+    };
+
     void PaintAtomic(Node& node, int x, int y, int width, int height, const ResolvedStyle& style, bool fixed) {
+        AtomicOwner atomicOwner(this, node);
         AddBox(node, x, y, width, height, style, fixed);
         if (node.kind == ElementKind::Svg) {
             SvgSpace space;
@@ -8705,11 +8741,25 @@ std::string ListMarker(int index, const std::string& type) {
     return std::to_string(index) + ".";
 }
 
+struct PaintOwnerScope {
+    Engine& engine;
+    Node* previous;
+
+    PaintOwnerScope(Engine& engine, Node& node) : engine(engine), previous(engine.paintOwner) {
+        engine.paintOwner = &node;
+    }
+
+    ~PaintOwnerScope() {
+        engine.paintOwner = previous;
+    }
+};
+
 int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, int width, bool fixed, bool suppressTop) {
     (void)suppressTop;
     if (style.display == DisplayKind::None) {
         return 0;
     }
+    PaintOwnerScope ownerScope(*this, node);
     PaintScope paintScope(*this, style);
     x += style.translateX;
     y += style.translateY;

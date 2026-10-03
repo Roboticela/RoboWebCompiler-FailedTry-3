@@ -16,6 +16,14 @@ namespace {
 
 std::vector<std::pair<std::string, std::vector<unsigned char>>> gCompiledImages;
 
+struct ImageView {
+    std::string url;
+    const unsigned char* bytes = nullptr;
+    std::size_t size = 0;
+};
+
+std::vector<ImageView> gImageViews;
+
 DecodedImage DecodeGdiplus(const std::vector<unsigned char>& bytes) {
     DecodedImage image;
     if (bytes.size() < 8) {
@@ -220,6 +228,24 @@ const std::vector<PlannedFetch>& ResourceFetchPlan() {
     return gFetchPlan;
 }
 
+void RegisterCompiledImageView(const std::string& url, const unsigned char* bytes, std::size_t size) {
+    if (bytes == nullptr || size == 0) {
+        return;
+    }
+    for (ImageView& entry : gImageViews) {
+        if (entry.url == url) {
+            entry.bytes = bytes;
+            entry.size = size;
+            return;
+        }
+    }
+    ImageView view;
+    view.url = url;
+    view.bytes = bytes;
+    view.size = size;
+    gImageViews.push_back(view);
+}
+
 void RegisterCompiledImage(const std::string& url, const std::vector<unsigned char>& bytes) {
     for (std::pair<std::string, std::vector<unsigned char>>& entry : gCompiledImages) {
         if (entry.first == url) {
@@ -231,6 +257,11 @@ void RegisterCompiledImage(const std::string& url, const std::vector<unsigned ch
 }
 
 DecodedImage DecodeImageFile(const std::string& path) {
+    for (const ImageView& view : gImageViews) {
+        if (view.url == path && view.bytes != nullptr) {
+            return DecodeImageBytes(std::vector<unsigned char>(view.bytes, view.bytes + view.size));
+        }
+    }
     for (const std::pair<std::string, std::vector<unsigned char>>& entry : gCompiledImages) {
         if (entry.first == path) {
             return DecodeImageBytes(entry.second);

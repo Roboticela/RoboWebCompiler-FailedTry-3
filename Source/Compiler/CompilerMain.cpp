@@ -1,4 +1,5 @@
 #include "Compiler/CodeGenerator.h"
+#include "Compiler/FastPath.h"
 #include "Diagnostics/Diagnostics.h"
 #include "Parser/HtmlParser.h"
 #include "Validate/TreeValidator.h"
@@ -94,6 +95,7 @@ int main(int argc, char** argv) {
     RoboWeb::HtmlParser parser;
     RoboWeb::Document document = parser.Parse(source, inputPath, diagnostics);
     RoboWeb::ValidateTree(document, diagnostics);
+    RoboWeb::WarnSlowPaths(document, diagnostics);
     diagnostics.Print(std::cerr);
     if (diagnostics.HasErrors()) {
         std::cerr << "RoboWebCompiler: compilation failed with " << diagnostics.ErrorCount() << " error";

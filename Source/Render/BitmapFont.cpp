@@ -349,14 +349,41 @@ void DrawTextPx(
     }
 }
 
+bool RegisterWebFontView(const std::string& family, int weight, bool italic, const unsigned char* bytes, std::size_t size) {
+    if (bytes == nullptr || size < 12 || family.empty()) {
+        return false;
+    }
+    EnsureInterFaces();
+    const std::string name = ToLowerAscii(family);
+    const int storedWeight = weight < 1 ? 400 : weight;
+    for (const std::unique_ptr<Face>& existing : gFaces) {
+        if (existing->family == name && existing->weight == storedWeight && existing->italic == italic) {
+            return true;
+        }
+    }
+    auto face = std::make_unique<Face>();
+    face->bytes = bytes;
+    face->family = name;
+    face->weight = storedWeight;
+    face->italic = italic;
+    const int offset = stbtt_GetFontOffsetForIndex(face->bytes, 0);
+    if (offset < 0 || stbtt_InitFont(&face->info, face->bytes, offset) == 0) {
+        return false;
+    }
+    face->ready = true;
+    gFaces.push_back(std::move(face));
+    return true;
+}
+
 bool RegisterWebFont(const std::string& family, int weight, bool italic, const std::vector<unsigned char>& bytes) {
     if (bytes.size() < 12 || family.empty()) {
         return false;
     }
     EnsureInterFaces();
     const std::string name = ToLowerAscii(family);
+    const int storedWeight = weight < 1 ? 400 : weight;
     for (const std::unique_ptr<Face>& existing : gFaces) {
-        if (existing->family == name && existing->weight == weight && existing->italic == italic) {
+        if (existing->family == name && existing->weight == storedWeight && existing->italic == italic) {
             return true;
         }
     }
@@ -364,7 +391,7 @@ bool RegisterWebFont(const std::string& family, int weight, bool italic, const s
     face->owned = bytes;
     face->bytes = face->owned.data();
     face->family = name;
-    face->weight = weight < 1 ? 400 : weight;
+    face->weight = storedWeight;
     face->italic = italic;
     const int offset = stbtt_GetFontOffsetForIndex(face->bytes, 0);
     if (offset < 0 || stbtt_InitFont(&face->info, face->bytes, offset) == 0) {

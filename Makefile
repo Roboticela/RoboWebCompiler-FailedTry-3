@@ -14,6 +14,7 @@ RUNTIME_OBJS := \
 	$(OBJDIR)/StyleSheet.o \
 	$(OBJDIR)/Interaction.o \
 	$(OBJDIR)/MiniScript.o \
+	$(OBJDIR)/FramePlan.o \
 	$(OBJDIR)/HostLoop.o \
 	$(OBJDIR)/Win32Host.o
 
@@ -32,6 +33,7 @@ COMPILER_OBJS := \
 	$(OBJDIR)/ImageDecoder.o \
 	$(OBJDIR)/StyleSheet.o \
 	$(OBJDIR)/CodeGenerator.o \
+	$(OBJDIR)/FastPath.o \
 	$(OBJDIR)/CompilerMain.o
 
 TEST_OBJS := \
@@ -54,9 +56,11 @@ TEST_OBJS := \
 	$(OBJDIR)/StyleSheet.o \
 	$(OBJDIR)/Interaction.o \
 	$(OBJDIR)/MiniScript.o \
+	$(OBJDIR)/FramePlan.o \
 	$(OBJDIR)/HostLoop.o \
 	$(OBJDIR)/Win32Host.o \
 	$(OBJDIR)/CodeGenerator.o \
+	$(OBJDIR)/FastPath.o \
 	$(OBJDIR)/TestMain.o
 
 .PHONY: all test clean
@@ -130,6 +134,12 @@ $(OBJDIR)/Interaction.o: Source/Runtime/Interaction.cpp | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(OBJDIR)/MiniScript.o: Source/Runtime/MiniScript.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(OBJDIR)/FramePlan.o: Source/Runtime/FramePlan.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(OBJDIR)/FastPath.o: Source/Compiler/FastPath.cpp | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 $(OBJDIR)/HostLoop.o: Source/Runtime/HostLoop.cpp | $(OBJDIR)

@@ -1,15 +1,25 @@
-It will also give warnings if their is something which is going to compile but can break behavior.
+The only objective is that a page written in HTML, CSS, and the supported script subset runs at the same performance as the same screen written by hand in C++. Browser-identical pixels and behavior stay mandatory. A faster path that paints the wrong box, drops a default element style, or skips a test is a failed change.
 
-You have to write all possible tests so everything is verified and tested 100% same as browser behavior and looks while code and performance is native.
+C++ also repaints, resizes, and handles hover. Those events are required. The generated program does the same work a C++ UI does inside the event, and it does not replay the web pipeline.
 
-The filenames must be PascalCase.
+- Fixed geometry, colors, text, and images are constants or static tables. Font and image bytes stay in the static arrays from code generation. Startup must not copy them into a `std::vector`.
+- A resize runs arithmetic or `LayoutDocument` only because the viewport changed, then paints the new frame.
+- A hover that changes color sets the hover node and repaints that control's rectangle from the cached draw records. It does not call `LayoutDocument`, measure text, or raster the whole window.
+- A caret blink toggles the cached caret record and repaints that caret rectangle. It does not call `LayoutDocument`.
+- A scroll repaints from the cached layout. It does not call `LayoutDocument`.
+- A click, a text edit, a marquee tick, or an animation changes live content, so a new layout is allowed.
+- Unchanged regions are not walked, restyled, or remeasured.
 
-The functions, class and structs names must be PascalCase.
+`AdvanceFrame` in `Source/Runtime/FramePlan.h` is the only window refresh path. `LayoutDocument` remains the reference engine for tests and for a viewport or content change. A color hover, a caret blink, and a scroll must increment `dirtyRasterCount` or `fullRasterCount` without incrementing `layoutCount`.
 
-Variable names must be camelCase.
+Warn, through `WarnSlowPaths`, when a construct cannot stay on this path. The warning says the region stays on the general engine or the interpreter and will not have C++ performance. The page still compiles. Covered cases are marquee, CSS or SVG animation, and script syntax outside straight assignments (`eval`, `innerHTML`, `function`, a brace, or an arrow function). Do not silently put a hot path back on `LayoutDocument` or `MiniScript`.
 
-the constants must be CAPITAL_CASE. which has all stuff capital but _ between words.
+Supported script statements compile as direct field writes. Anything else stays on `MiniScript` only behind that warning. Do not build a general JavaScript compiler, and do not claim C++ performance for the warned path.
 
-Use the MDN-Reference Folder as reference and implement all the elements one by one and then delete one by one files of that elements which you have implemented. For each element, you have to write tests and you have to define its default behavior so the result is completely same as a web browser. You have to use C++ and makefile only and if their is any which to download or similar tasks then use python for that. The implementation must be independent of the operating system because this is going to be runtime of an OS. The project name is RoboWebCompiler and first part is to implement all the elements. Write a renderer too which is also independent of the OS and must work the same way like browser but the difference will be that, it will run the compiled native machine code which is converted in below way.
+Static data is immutable for the life of the process. Dynamic data is recomputed only from the input that changed: window size, hover, focus, caret phase, form value, or a live handler.
 
-The HTML/CSS/JS will be converted to its corresponding C++ code and that code will then compile to machine code so the end goal is the programmer write HTML/CSS/JS and the user get the same performance as C++ and the performance must be equal to C++. You have to implement the static stuff as static so they never change during runtime and dynamic to dynamic which calculates on different parameters like size change and so on.
+The filenames must be PascalCase. The functions, classes, and structs must be PascalCase. Variable names must be camelCase. Constants must be CAPITAL_CASE.
+
+Use the MDN-Reference folder as the reference and implement elements one by one, then delete that element's reference file. For each element, write tests and define its default behavior so the result matches a web browser. Use C++ and the Makefile only. Use Python only for a download. The runtime must be independent of the operating system. The renderer must be independent of the operating system. Win32 is a host, not the product.
+
+Give a warning when something will compile but can break behavior. Write tests so behavior and pixels stay browser-identical while the event path stays on the C++ frame plan above. Do not weaken a test, delete a reference check, or mark a slow path as fast to make the build green.

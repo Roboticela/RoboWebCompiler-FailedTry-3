@@ -50,6 +50,8 @@ struct DrawOp {
     int clipY = 0;
     int clipWidth = 0;
     int clipHeight = 0;
+    Node* owner = nullptr;
+    bool caret = false;
 };
 
 struct ElementBox {
@@ -77,6 +79,8 @@ struct LayoutResult {
     int contentHeight = 0;
     std::vector<ElementBox> boxes;
     std::vector<DrawOp> ops;
+    bool caretPresent = false;
+    DrawOp caret;
 };
 
 struct ResolvedStyle {

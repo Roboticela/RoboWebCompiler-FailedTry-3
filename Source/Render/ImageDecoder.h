@@ -16,6 +16,7 @@ struct DecodedImage {
 DecodedImage DecodeImageFile(const std::string& path);
 DecodedImage DecodeImageBytes(const std::vector<unsigned char>& bytes);
 void RegisterCompiledImage(const std::string& url, const std::vector<unsigned char>& bytes);
+void RegisterCompiledImageView(const std::string& url, const unsigned char* bytes, std::size_t size);
 
 struct PlannedFetch {
     std::string url;

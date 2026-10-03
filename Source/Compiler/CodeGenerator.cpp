@@ -226,13 +226,12 @@ void WriteCompiledStyles(
     output << "    document.stylesLoaded = true;\n";
     for (std::size_t index = 0; index < fonts.size(); ++index) {
         const CompiledWebFont& font = fonts[index];
-        output << "    RoboWeb::RegisterWebFont(\"" << Escape(font.family) << "\", " << font.weight << ", "
-               << (font.italic ? "true" : "false") << ", std::vector<unsigned char>(kCompiledFont" << index
-               << ", kCompiledFont" << index << " + sizeof(kCompiledFont" << index << ")));\n";
+        output << "    RoboWeb::RegisterWebFontView(\"" << Escape(font.family) << "\", " << font.weight << ", "
+               << (font.italic ? "true" : "false") << ", kCompiledFont" << index << ", sizeof(kCompiledFont" << index << "));\n";
     }
     for (std::size_t index = 0; index < images.size(); ++index) {
-        output << "    RoboWeb::RegisterCompiledImage(\"" << Escape(images[index].url) << "\", std::vector<unsigned char>(kCompiledImage"
-               << index << ", kCompiledImage" << index << " + sizeof(kCompiledImage" << index << ")));\n";
+        output << "    RoboWeb::RegisterCompiledImageView(\"" << Escape(images[index].url) << "\", kCompiledImage" << index
+               << ", sizeof(kCompiledImage" << index << "));\n";
     }
     for (const ElementStyle& rule : document.styleRules) {
         output << "    {\n";
@@ -322,6 +321,8 @@ void WriteCompiledStyles(
 
 std::string GenerateCpp(const Document& document, const std::vector<CompiledWebFont>& fonts, const std::vector<CompiledImage>& images) {
     std::ostringstream output;
+    output << "// Performance contract: hover, caret blink, and scroll repaint cached draw records.\n";
+    output << "// LayoutDocument runs only when the viewport or live content changes.\n";
     output << "#include \"Runtime/HostLoop.h\"\n";
     output << "#include \"Render/BitmapFont.h\"\n";
     output << "#include \"Render/ImageDecoder.h\"\n\n";
