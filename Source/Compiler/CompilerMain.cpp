@@ -2,6 +2,8 @@
 #include "Compiler/FastPath.h"
 #include "Diagnostics/Diagnostics.h"
 #include "Parser/HtmlParser.h"
+#include "Render/StyleSheet.h"
+#include "Runtime/MiniScript.h"
 #include "Validate/TreeValidator.h"
 
 #include <cstdlib>
@@ -76,13 +78,14 @@ bool WriteFile(const std::string& path, const std::string& text) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "usage: RoboWebCompiler <input.html> -o <output.exe> --source-dir <Source>\n";
+        std::cerr << "usage: RoboWebCompiler <input.html> -o <output.exe> --source-dir <Source> [--css <style.css>]\n";
         return 1;
     }
     const std::string inputPath = argv[1];
     const std::string outputPath = Argument(argc, argv, "-o");
     const std::string sourceDir = Argument(argc, argv, "--source-dir");
     const std::string objectDir = Argument(argc, argv, "--object-dir");
+    const std::string cssPath = Argument(argc, argv, "--css");
     const std::string widthText = Argument(argc, argv, "--width");
     const std::string heightText = Argument(argc, argv, "--height");
     const int viewportWidth = widthText.empty() ? 0 : std::atoi(widthText.c_str());
@@ -102,6 +105,32 @@ int main(int argc, char** argv) {
     RoboWeb::HtmlParser parser;
     RoboWeb::Document document = parser.Parse(source, inputPath, diagnostics);
     RoboWeb::ValidateTree(document, diagnostics);
+    std::string scriptError;
+    if (!RoboWeb::LoadExternalScripts(document, scriptError)) {
+        std::cerr << inputPath << ":1:1: error: " << scriptError << "\n";
+        std::cerr << "RoboWebCompiler: compilation failed with 1 error\n";
+        return 1;
+    }
+    std::vector<RoboWeb::CompiledWebFont> fonts;
+    std::string styleError;
+    if (!RoboWeb::CompileLinkedStyles(document, fonts, styleError)) {
+        std::cerr << inputPath << ":1:1: error: " << styleError << "\n";
+        std::cerr << "RoboWebCompiler: compilation failed with 1 error\n";
+        return 1;
+    }
+    if (!cssPath.empty()) {
+        const std::string css = ReadFile(cssPath, readError);
+        if (!readError.empty()) {
+            std::cerr << cssPath << ":1:1: error: " << readError << "\n";
+            std::cerr << "RoboWebCompiler: compilation failed with 1 error\n";
+            return 1;
+        }
+        if (!RoboWeb::CompileStylesheetText(document, css, fonts, styleError)) {
+            std::cerr << cssPath << ":1:1: error: " << styleError << "\n";
+            std::cerr << "RoboWebCompiler: compilation failed with 1 error\n";
+            return 1;
+        }
+    }
     RoboWeb::WarnSlowPaths(document, diagnostics);
     diagnostics.Print(std::cerr);
     if (diagnostics.HasErrors()) {
@@ -110,13 +139,6 @@ int main(int argc, char** argv) {
             std::cerr << "s";
         }
         std::cerr << "\n";
-        return 1;
-    }
-    std::vector<RoboWeb::CompiledWebFont> fonts;
-    std::string styleError;
-    if (!RoboWeb::CompileLinkedStyles(document, fonts, styleError)) {
-        std::cerr << inputPath << ":1:1: error: " << styleError << "\n";
-        std::cerr << "RoboWebCompiler: compilation failed with 1 error\n";
         return 1;
     }
     std::vector<RoboWeb::CompiledImage> images;

@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -1578,17 +1580,37 @@ bool RelHas(const std::string& rel, const char* token) {
     return false;
 }
 
+bool ReadLocalText(const std::string& path, std::string& text) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return false;
+    }
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    if (!input && !input.eof()) {
+        return false;
+    }
+    text = buffer.str();
+    return true;
+}
+
 void Walk(Document& document, Node& node, StyleJob& job) {
     if (node.kind == ElementKind::Link) {
         const std::string rel = AttributeValue(node, "rel");
         const std::string href = AttributeValue(node, "href");
-        if (job.downloadRemote && RelHas(rel, "stylesheet") && href.find("://") != std::string::npos) {
-            const std::vector<unsigned char> bytes = Download(href);
-            if (bytes.empty()) {
+        if (job.downloadRemote && RelHas(rel, "stylesheet") && !href.empty()) {
+            std::string css;
+            std::string loadError;
+            if (!LoadTextResource(document, href, css, loadError)) {
                 job.failed = true;
-                job.error = "stylesheet was not loaded: " + href;
+                const std::string prefix = "resource was not loaded: ";
+                if (loadError.rfind(prefix, 0) == 0) {
+                    job.error = "stylesheet was not loaded: " + loadError.substr(prefix.size());
+                } else {
+                    job.error = loadError.empty() ? "stylesheet was not loaded: " + href : loadError;
+                }
             } else {
-                ParseStylesheet(document, std::string(bytes.begin(), bytes.end()), job);
+                ParseStylesheet(document, css, job);
             }
         }
     } else if (node.kind == ElementKind::Style) {
@@ -1825,6 +1847,322 @@ bool IsTiming(const std::string& value) {
     return FunctionList(text, "cubic-bezier steps linear");
 }
 
+std::vector<std::string> SplitTokens(const std::string& value) {
+    std::vector<std::string> tokens;
+    std::size_t index = 0;
+    while (index < value.size()) {
+        while (index < value.size() && (value[index] == ' ' || value[index] == '\t')) {
+            ++index;
+        }
+        if (index >= value.size()) {
+            break;
+        }
+        const std::size_t start = index;
+        while (index < value.size() && value[index] != ' ' && value[index] != '\t') {
+            ++index;
+        }
+        tokens.push_back(value.substr(start, index - start));
+    }
+    return tokens;
+}
+
+// Splits on a separator that sits outside any function parentheses, the way
+// CSS separates shadow layers and the radius halves of border-radius.
+std::vector<std::string> SplitTopLevel(const std::string& value, char separator) {
+    std::vector<std::string> parts;
+    std::string current;
+    int depth = 0;
+    for (char character : value) {
+        if (character == '(') {
+            ++depth;
+        } else if (character == ')') {
+            if (depth > 0) {
+                --depth;
+            }
+        }
+        if (character == separator && depth == 0) {
+            parts.push_back(Trim(current));
+            current.clear();
+            continue;
+        }
+        current.push_back(character);
+    }
+    parts.push_back(Trim(current));
+    return parts;
+}
+
+bool IsCssNumber(const std::string& value) {
+    const std::string text = ToLowerAscii(Trim(value));
+    bool digit = false;
+    bool dot = false;
+    for (char character : text) {
+        if (character == '.') {
+            if (dot) {
+                return false;
+            }
+            dot = true;
+            continue;
+        }
+        if (character < '0' || character > '9') {
+            return false;
+        }
+        digit = true;
+    }
+    return digit;
+}
+
+bool IsCssInteger(const std::string& value) {
+    const std::string text = ToLowerAscii(Trim(value));
+    if (text.empty()) {
+        return false;
+    }
+    std::size_t start = text[0] == '-' || text[0] == '+' ? 1 : 0;
+    if (start >= text.size()) {
+        return false;
+    }
+    for (std::size_t index = start; index < text.size(); ++index) {
+        if (text[index] < '0' || text[index] > '9') {
+            return false;
+        }
+    }
+    return true;
+}
+
+// A list of 1..maxCount lengths separated by spaces, as margin, padding,
+// border-spacing and the inset family accept.
+bool IsLengthList(const std::string& value, int minCount, int maxCount) {
+    const std::vector<std::string> tokens = SplitTokens(StripImportant(value));
+    if (static_cast<int>(tokens.size()) < minCount || static_cast<int>(tokens.size()) > maxCount) {
+        return false;
+    }
+    for (const std::string& token : tokens) {
+        if (!IsCssLength(token, false)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// One shadow layer: <length>{2,4} plus an optional color, and "inset" for
+// box-shadow only. text-shadow takes two or three lengths and never insets.
+bool IsShadowSpec(const std::string& part, bool allowInset) {
+    const std::vector<std::string> tokens = SplitTokens(part);
+    if (tokens.empty()) {
+        return false;
+    }
+    int lengths = 0;
+    int colors = 0;
+    bool inset = false;
+    for (const std::string& token : tokens) {
+        const std::string lower = ToLowerAscii(token);
+        if (lower == "inset") {
+            if (!allowInset || inset) {
+                return false;
+            }
+            inset = true;
+            continue;
+        }
+        if (IsCssLength(token, false)) {
+            ++lengths;
+            continue;
+        }
+        if (IsCssColor(token)) {
+            ++colors;
+            continue;
+        }
+        return false;
+    }
+    if (colors > 1) {
+        return false;
+    }
+    const int most = allowInset ? 4 : 3;
+    return lengths >= 2 && lengths <= most;
+}
+
+bool IsShadowList(const std::string& value, bool allowInset) {
+    const std::string text = ToLowerAscii(StripImportant(value));
+    if (text == "none" || text.find("var(") != std::string::npos) {
+        return true;
+    }
+    for (const std::string& part : SplitTopLevel(text, ',')) {
+        if (part.empty() || !IsShadowSpec(part, allowInset)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsOutlineStyleKeyword(const std::string& value) {
+    return KeywordValue(value, "none hidden dotted dashed solid double groove ridge inset outset auto");
+}
+
+bool IsOutlineWidthKeyword(const std::string& value) {
+    return KeywordValue(value, "thin medium thick");
+}
+
+bool IsOutlineShorthand(const std::string& value) {
+    const std::vector<std::string> tokens = SplitTokens(StripImportant(value));
+    if (tokens.empty()) {
+        return false;
+    }
+    int widths = 0;
+    int styles = 0;
+    int colors = 0;
+    for (const std::string& token : tokens) {
+        if (IsOutlineStyleKeyword(token)) {
+            ++styles;
+            continue;
+        }
+        if (IsOutlineWidthKeyword(token) || IsCssLength(token, false)) {
+            ++widths;
+            continue;
+        }
+        if (IsCssColor(token)) {
+            ++colors;
+            continue;
+        }
+        return false;
+    }
+    return widths <= 1 && styles <= 1 && colors <= 1;
+}
+
+bool IsOverflowKeyword(const std::string& value) {
+    return KeywordValue(value, "visible hidden clip scroll auto");
+}
+
+bool IsBorderRadius(const std::string& value) {
+    const std::vector<std::string> halves = SplitTopLevel(StripImportant(value), '/');
+    if (halves.size() > 2) {
+        return false;
+    }
+    for (const std::string& half : halves) {
+        if (!IsLengthList(half, 1, 4)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsAspectRatio(const std::string& value) {
+    const std::vector<std::string> tokens = SplitTokens(StripImportant(value));
+    if (tokens.empty()) {
+        return false;
+    }
+    std::size_t start = 0;
+    if (ToLowerAscii(tokens[0]) == "auto") {
+        if (tokens.size() == 1) {
+            return true;
+        }
+        start = 1;
+    }
+    std::string ratio;
+    for (std::size_t index = start; index < tokens.size(); ++index) {
+        ratio += tokens[index];
+    }
+    if (ratio.empty()) {
+        return false;
+    }
+    const std::vector<std::string> halves = SplitTopLevel(ratio, '/');
+    if (halves.size() == 1) {
+        return IsCssNumber(halves[0]);
+    }
+    if (halves.size() == 2) {
+        return IsCssNumber(halves[0]) && IsCssNumber(halves[1]);
+    }
+    return false;
+}
+
+bool IsTextOverflow(const std::string& value) {
+    const std::vector<std::string> tokens = SplitTokens(StripImportant(value));
+    if (tokens.empty() || tokens.size() > 2) {
+        return false;
+    }
+    for (const std::string& token : tokens) {
+        if (KeywordValue(token, "clip ellipsis")) {
+            continue;
+        }
+        if (token.size() >= 2 && (token.front() == '\'' || token.front() == '"')) {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+bool IsCursorValue(const std::string& value) {
+    const char* keywords =
+        "auto default none context-menu help pointer progress wait cell crosshair text vertical-text alias copy move no-drop "
+        "not-allowed grab grabbing e-resize n-resize ne-resize nw-resize s-resize se-resize sw-resize w-resize ew-resize ns-resize "
+        "nesw-resize nwse-resize col-resize row-resize all-scroll zoom-in zoom-out";
+    const std::string text = ToLowerAscii(StripImportant(value));
+    if (text.find("url(") != std::string::npos) {
+        // A url() fallback list: the value must still end in a cursor keyword.
+        std::size_t end = text.size();
+        while (end > 0 && (text[end - 1] == ' ' || text[end - 1] == '\t')) {
+            --end;
+        }
+        std::size_t start = end;
+        while (start > 0 && text[start - 1] != ' ' && text[start - 1] != '\t' && text[start - 1] != ')') {
+            --start;
+        }
+        return start < end && KeywordValue(text.substr(start, end - start), keywords);
+    }
+    return KeywordValue(text, keywords);
+}
+
+bool IsListStyleImage(const std::string& value) {
+    const std::string text = ToLowerAscii(StripImportant(value));
+    if (text == "none" || text.find("var(") != std::string::npos) {
+        return true;
+    }
+    if (text.compare(0, 4, "url(") == 0 && text.back() == ')') {
+        return true;
+    }
+    if (text.compare(0, 10, "image-set(") == 0 && text.back() == ')') {
+        return true;
+    }
+    if (text.find("gradient(") != std::string::npos && text.back() == ')') {
+        return true;
+    }
+    return false;
+}
+
+bool IsListStyleType(const std::string& value) {
+    const std::string text = ToLowerAscii(StripImportant(value));
+    if (text.size() >= 2 && (text.front() == '\'' || text.front() == '"')) {
+        return text.back() == text.front();
+    }
+    // Any identifier parses as a <counter-style-name> and falls back when the
+    // name is unknown, which is what a browser does.
+    return !text.empty() && text.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789-") == std::string::npos;
+}
+
+bool IsListStyleShorthand(const std::string& value) {
+    const std::vector<std::string> tokens = SplitTokens(StripImportant(value));
+    if (tokens.empty()) {
+        return false;
+    }
+    int types = 0;
+    int positions = 0;
+    int images = 0;
+    for (const std::string& token : tokens) {
+        if (KeywordValue(token, "inside outside")) {
+            ++positions;
+            continue;
+        }
+        if (IsListStyleImage(token)) {
+            ++images;
+            continue;
+        }
+        if (IsListStyleType(token)) {
+            ++types;
+            continue;
+        }
+        return false;
+    }
+    return types <= 1 && positions <= 1 && images <= 1;
+}
+
 bool CssValueOk(const std::string& name, const std::string& value) {
     if (name.size() >= 2 && name[0] == '-' && name[1] == '-') {
         return true;
@@ -1890,6 +2228,108 @@ bool CssValueOk(const std::string& name, const std::string& value) {
     }
     if (name == "container-type") {
         return KeywordValue(text, "normal size inline-size");
+    }
+    if (name == "box-sizing") {
+        return KeywordValue(text, "content-box border-box");
+    }
+    if (name == "text-shadow") {
+        return IsShadowList(text, false);
+    }
+    if (name == "box-shadow") {
+        return IsShadowList(text, true);
+    }
+    if (name == "overflow") {
+        const std::vector<std::string> tokens = SplitTokens(text);
+        if (tokens.empty() || tokens.size() > 2) {
+            return false;
+        }
+        for (const std::string& token : tokens) {
+            if (!IsOverflowKeyword(token)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if (name == "overflow-x" || name == "overflow-y" || name == "overflow-block" || name == "overflow-inline") {
+        return IsOverflowKeyword(text);
+    }
+    if (name == "outline") {
+        return IsOutlineShorthand(text);
+    }
+    if (name == "outline-width") {
+        return IsOutlineWidthKeyword(text) || IsCssLength(text, false);
+    }
+    if (name == "outline-style") {
+        return IsOutlineStyleKeyword(text);
+    }
+    if (name == "outline-color") {
+        return ToLowerAscii(text) == "invert" || IsCssColor(text);
+    }
+    if (name == "outline-offset") {
+        return IsCssLength(text, false);
+    }
+    if (name == "border-radius") {
+        return IsBorderRadius(text);
+    }
+    if (name == "aspect-ratio") {
+        return IsAspectRatio(text);
+    }
+    if (name == "text-overflow") {
+        return IsTextOverflow(text);
+    }
+    if (name == "direction") {
+        return KeywordValue(text, "ltr rtl");
+    }
+    if (name == "pointer-events") {
+        return KeywordValue(text, "auto none visiblepainted visiblefill visiblestroke visible painted fill stroke all bounding-box");
+    }
+    if (name == "cursor") {
+        return IsCursorValue(text);
+    }
+    if (name == "list-style-type") {
+        return IsListStyleType(text);
+    }
+    if (name == "list-style-position") {
+        return KeywordValue(text, "inside outside");
+    }
+    if (name == "list-style-image") {
+        return IsListStyleImage(text);
+    }
+    if (name == "list-style") {
+        return IsListStyleShorthand(text);
+    }
+    if (name == "word-break") {
+        return KeywordValue(text, "normal break-all keep-all break-word auto-phrase");
+    }
+    if (name == "overflow-wrap" || name == "word-wrap") {
+        return KeywordValue(text, "normal break-word anywhere");
+    }
+    if (name == "tab-size") {
+        return IsCssNumber(text) || IsCssLength(text, false);
+    }
+    if (name == "table-layout") {
+        return KeywordValue(text, "auto fixed");
+    }
+    if (name == "caption-side") {
+        return KeywordValue(text, "top bottom block-start block-end inline-start inline-end");
+    }
+    if (name == "empty-cells") {
+        return KeywordValue(text, "show hide");
+    }
+    if (name == "border-collapse") {
+        return KeywordValue(text, "collapse separate");
+    }
+    if (name == "border-spacing") {
+        return IsLengthList(text, 1, 2);
+    }
+    if (name == "float") {
+        return KeywordValue(text, "none left right inline-start inline-end");
+    }
+    if (name == "clear") {
+        return KeywordValue(text, "none left right both inline-start inline-end");
+    }
+    if (name == "z-index") {
+        return KeywordValue(text, "auto") || IsCssInteger(text);
     }
     if (name == "visibility") {
         return KeywordValue(text, "visible hidden collapse");
@@ -1960,6 +2400,10 @@ bool KnownCssProperty(const std::string& name) {
         "background background-color background-image display width height margin margin-top margin-right margin-bottom margin-left "
         "padding padding-top padding-right padding-bottom padding-left text-align text-underline-offset text-decoration-color "
         "text-decoration text-decoration-line white-space border border-width transform filter grid-template-columns grid-template-rows "
+        "box-sizing text-shadow box-shadow overflow overflow-x overflow-y overflow-block overflow-inline outline outline-width "
+        "outline-style outline-color outline-offset border-radius aspect-ratio text-overflow direction pointer-events cursor "
+        "list-style list-style-type list-style-position list-style-image word-break overflow-wrap word-wrap tab-size "
+        "table-layout caption-side empty-cells border-collapse border-spacing float clear z-index "
         "container-type position left top right bottom anchor-name animation-timing-function transition-timing-function animation "
         "min-width max-width min-height max-height opacity visibility "
         "transition animation-duration animation-name fill stroke stroke-width stroke-linecap stroke-linejoin stroke-miterlimit "
@@ -2034,6 +2478,44 @@ void LoadDocumentStyles(Document& document) {
     document.stylesLoaded = true;
     StyleJob job;
     Walk(document, *document.root, job);
+}
+
+bool LoadTextResource(const Document& document, const std::string& url, std::string& text, std::string& error) {
+    const std::string resolved = ResolveUrl(document, url);
+    if (resolved.empty()) {
+        error = "resource was not loaded: " + url;
+        return false;
+    }
+    if (resolved.find("://") != std::string::npos) {
+        const std::vector<unsigned char> bytes = Download(resolved);
+        if (bytes.empty()) {
+            error = "resource was not loaded: " + resolved;
+            return false;
+        }
+        text.assign(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        return true;
+    }
+    if (!ReadLocalText(resolved, text)) {
+        error = "resource was not loaded: " + resolved;
+        return false;
+    }
+    return true;
+}
+
+bool CompileStylesheetText(Document& document, const std::string& css, std::vector<CompiledWebFont>& fonts, std::string& error) {
+    StyleJob job;
+    job.fonts = &fonts;
+    job.downloadRemote = true;
+    ParseStylesheet(document, css, job);
+    document.stylesLoaded = true;
+    if (job.failed) {
+        error = job.error.empty() ? "stylesheet was not loaded" : job.error;
+        return false;
+    }
+    if (!job.note.empty() && document.status.empty()) {
+        document.status = "font " + job.note;
+    }
+    return true;
 }
 
 bool CompileLinkedStyles(Document& document, std::vector<CompiledWebFont>& fonts, std::string& error) {

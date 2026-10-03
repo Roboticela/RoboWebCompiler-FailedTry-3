@@ -10,6 +10,37 @@ namespace RoboWeb {
 
 namespace {
 
+// pointer-events: none takes an element and its subtree out of hit testing, the
+// way a browser does. The ancestor walk stops at the first element that sets it.
+bool IgnoresPointer(const Node& node) {
+    for (const Node* current = &node; current != nullptr; current = current->parent) {
+        if (!HasAttribute(*current, "style")) {
+            continue;
+        }
+        const std::string style = ToLowerAscii(AttributeValue(*current, "style"));
+        const std::size_t at = style.find("pointer-events");
+        if (at == std::string::npos) {
+            continue;
+        }
+        const std::size_t colon = style.find(':', at);
+        if (colon == std::string::npos) {
+            continue;
+        }
+        const std::size_t end = style.find(';', colon);
+        const std::string value = style.substr(colon + 1, end == std::string::npos ? std::string::npos : end - colon - 1);
+        std::string trimmed;
+        for (char character : value) {
+            if (character != ' ' && character != '\t') {
+                trimmed.push_back(character);
+            }
+        }
+        if (trimmed == "none") {
+            return true;
+        }
+    }
+    return false;
+}
+
 Node* HitTest(const LayoutResult& layout, int x, int y, int scrollY) {
     Node* best = nullptr;
     int bestArea = 0;
@@ -18,6 +49,9 @@ Node* HitTest(const LayoutResult& layout, int x, int y, int scrollY) {
         if (x >= box.x && y >= boxY && x < box.x + box.width && y < boxY + box.height) {
             const int area = box.width * box.height;
             if (best == nullptr || area < bestArea) {
+                if (IgnoresPointer(*box.node)) {
+                    continue;
+                }
                 best = box.node;
                 bestArea = area;
             }
@@ -827,9 +861,57 @@ bool DispatchHover(Document& document, const LayoutResult& layout, int x, int y)
     return true;
 }
 
+// The CSS cursor property on the nearest ancestor that sets it. An empty result
+// means no element declared one and the legacy attribute still decides.
+std::string CssCursorFor(const Node& node) {
+    for (const Node* current = &node; current != nullptr; current = current->parent) {
+        if (!HasAttribute(*current, "style")) {
+            continue;
+        }
+        const std::string style = ToLowerAscii(AttributeValue(*current, "style"));
+        const std::size_t at = style.find("cursor");
+        if (at == std::string::npos) {
+            continue;
+        }
+        const std::size_t colon = style.find(':', at);
+        if (colon == std::string::npos) {
+            continue;
+        }
+        const std::size_t end = style.find(';', colon);
+        const std::string value = style.substr(colon + 1, end == std::string::npos ? std::string::npos : end - colon - 1);
+        std::string trimmed;
+        for (char character : value) {
+            if (character != ' ' && character != '\t') {
+                trimmed.push_back(character);
+            }
+        }
+        if (trimmed == "text" || trimmed == "vertical-text") {
+            return "text";
+        }
+        if (trimmed == "pointer" || trimmed == "hand" || trimmed == "grab" || trimmed == "grabbing") {
+            return "pointer";
+        }
+        if (!trimmed.empty()) {
+            return "default";
+        }
+    }
+    return std::string();
+}
+
 PointerShape PointerAt(const LayoutResult& layout, int x, int y, int scrollY) {
     Node* hit = HitTest(layout, x, y, scrollY);
     for (Node* node = hit; node != nullptr; node = node->parent) {
+        // The CSS cursor property wins over the legacy HTML cursor attribute.
+        const std::string cssCursor = CssCursorFor(*node);
+        if (cssCursor == "text") {
+            return PointerShape::Text;
+        }
+        if (cssCursor == "pointer") {
+            return PointerShape::Hand;
+        }
+        if (!cssCursor.empty()) {
+            return PointerShape::Arrow;
+        }
         const std::string cursor = ToLowerAscii(AttributeValue(*node, "cursor"));
         if (cursor == "text") {
             return PointerShape::Text;

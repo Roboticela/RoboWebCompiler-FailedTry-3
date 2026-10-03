@@ -11,8 +11,10 @@
 #include "Render/ImageDecoder.h"
 #include "Render/InterFontData.h"
 #include "Render/Renderer.h"
+#include "Render/StyleSheet.h"
 #include "Runtime/FramePlan.h"
 #include "Runtime/Interaction.h"
+#include "Runtime/MiniScript.h"
 #include "Validate/TreeValidator.h"
 #include "Xml/XmlParser.h"
 #include "Xml/XPath.h"
@@ -916,6 +918,228 @@ void TestCssFunctions() {
         EXPECT(RoboWeb::PixelGreen(colorFrame, colorBox->x + 2, colorBox->y + 2) < 20);
     }
     RoboWeb::SetSvgAnimationTime(0);
+}
+
+// Each assertion here states the value a browser computes for the same markup,
+// so a regression shows up as a wrong box or a wrong pixel, not a wrong flag.
+void TestCssProperties() {
+    RoboWeb::Diagnostics diagnostics;
+    auto layoutOf = [&](const std::string& html, int width = 240, int height = 120) {
+        RoboWeb::Document document = Parse(html, diagnostics);
+        return RoboWeb::LayoutDocument(document, width, height);
+    };
+    auto boxWidth = [](const RoboWeb::LayoutResult& layout, const char* tag) {
+        const RoboWeb::ElementBox* box = RoboWeb::FindBox(layout, tag);
+        return box == nullptr ? -1 : box->width;
+    };
+    auto boxHeight = [](const RoboWeb::LayoutResult& layout, const char* tag) {
+        const RoboWeb::ElementBox* box = RoboWeb::FindBox(layout, tag);
+        return box == nullptr ? -1 : box->height;
+    };
+
+    // Every new property must be accepted, so a stylesheet using it stays clean.
+    const char* accepted[] = {
+        "box-sizing:border-box", "text-shadow:2px 2px #000", "text-shadow:none", "box-shadow:0px 0px 4px #00ff00",
+        "box-shadow:1px 1px #000, 2px 2px #000", "overflow:hidden", "overflow:hidden auto", "overflow-x:scroll", "overflow-y:visible",
+        "outline:2px solid #ff0000", "outline-width:thin", "outline-style:dashed", "outline-color:#ff0000", "outline-offset:2px",
+        "border-radius:4px", "border-radius:4px 2px", "aspect-ratio:16 / 9", "aspect-ratio:1.5", "text-overflow:ellipsis",
+        "direction:rtl", "pointer-events:none", "cursor:pointer", "list-style:square inside", "list-style-type:lower-roman",
+        "list-style-position:inside", "list-style-image:none", "word-break:break-all", "overflow-wrap:break-word", "tab-size:4",
+        "table-layout:fixed", "caption-side:bottom", "empty-cells:hide", "border-collapse:collapse", "border-spacing:2px 4px",
+        "float:left", "clear:both", "z-index:3", "z-index:auto",
+    };
+    for (const char* declaration : accepted) {
+        RoboWeb::Diagnostics cssDiagnostics;
+        RoboWeb::Document page = Parse("<!DOCTYPE html><div></div>", cssDiagnostics);
+        (void)page;
+        RoboWeb::ValidateCssText(std::string("div { ") + declaration + " }", "style.css", 1, cssDiagnostics);
+        EXPECT(!cssDiagnostics.HasErrors());
+    }
+    // A malformed value still fails, so the validator is not just a pass-through.
+    const char* rejected[] = {
+        "box-sizing:margin-box", "overflow:maybe", "aspect-ratio:16 // 9", "list-style-position:middle",
+        "pointer-events:sometimes", "cursor:banana", "z-index:1.5", "clear:upward", "text-shadow:2px",
+        "outline-style:wiggly", "border-radius:1px 2px 3px 4px 5px",
+    };
+    for (const char* declaration : rejected) {
+        RoboWeb::Diagnostics cssDiagnostics;
+        RoboWeb::ValidateCssText(std::string("div { ") + declaration + " }", "style.css", 1, cssDiagnostics);
+        EXPECT(cssDiagnostics.HasErrors());
+    }
+
+    // box-sizing: content-box grows the border box by the padding, and
+    // border-box makes the same width describe the border box instead.
+    EXPECT(boxWidth(layoutOf("<!DOCTYPE html><div style='width:50px;height:8px'></div>"), "div") == 50);
+    EXPECT(boxWidth(layoutOf("<!DOCTYPE html><div style='width:50px;height:8px;padding:5px'></div>"), "div") == 60);
+    EXPECT(boxWidth(layoutOf("<!DOCTYPE html><div style='width:50px;height:8px;padding:5px;box-sizing:border-box'></div>"), "div") == 50);
+    EXPECT(boxWidth(layoutOf("<!DOCTYPE html><div style='width:50px;height:8px;border:2px solid;padding:5px'></div>"), "div") == 64);
+    EXPECT(boxWidth(layoutOf("<!DOCTYPE html><div style='width:50px;height:8px;border:2px solid;padding:5px;box-sizing:border-box'></div>"), "div") == 50);
+
+    // text-shadow repeats the glyph run at the offset, so the shadow lands
+    // outside the glyphs where the shifted run covers white background.
+    {
+        RoboWeb::Document page = Parse("<!DOCTYPE html><div style='font-size:20px;text-shadow:14px 0px #00ff00'>X</div>", diagnostics);
+        RoboWeb::LayoutResult layout = RoboWeb::LayoutDocument(page, 240, 120);
+        int textOps = 0;
+        bool shadowFound = false;
+        for (const RoboWeb::DrawOp& op : layout.ops) {
+            if (op.kind != RoboWeb::DrawOp::Kind::Text) {
+                continue;
+            }
+            ++textOps;
+            if (op.color.green == 255 && op.color.red == 0 && op.color.blue == 0) {
+                shadowFound = true;
+            }
+        }
+        // One record for the glyphs and one for the shadow, offset to the right.
+        EXPECT(textOps == 2);
+        EXPECT(shadowFound);
+    }
+    // A shadow with no offset paints nothing extra, which keeps the record count
+    // at one and matches the browser, where the shadow hides under the text.
+    {
+        RoboWeb::Document page = Parse("<!DOCTYPE html><div style='font-size:20px;text-shadow:0px 0px #00ff00'>X</div>", diagnostics);
+        RoboWeb::LayoutResult layout = RoboWeb::LayoutDocument(page, 240, 120);
+        int textOps = 0;
+        for (const RoboWeb::DrawOp& op : layout.ops) {
+            if (op.kind == RoboWeb::DrawOp::Kind::Text) {
+                ++textOps;
+            }
+        }
+        EXPECT(textOps == 1);
+    }
+
+    // overflow: hidden clips the descendant record to the element's own box, so
+    // the wide child no longer paints outside the 20px parent.
+    {
+        RoboWeb::Document page = Parse(
+            "<!DOCTYPE html><div style='width:20px;height:10px;overflow:hidden'>"
+            "<div style='width:200px;height:10px;background:#ff0000'></div></div>",
+            diagnostics);
+        RoboWeb::LayoutResult layout = RoboWeb::LayoutDocument(page, 240, 120);
+        bool clipped = false;
+        for (const RoboWeb::DrawOp& op : layout.ops) {
+            if (op.kind == RoboWeb::DrawOp::Kind::Fill && op.color.red == 255 && op.clipped) {
+                clipped = true;
+                EXPECT(op.clipWidth <= 20);
+            }
+        }
+        EXPECT(clipped);
+    }
+    // overflow: visible, the default, leaves the same child unclipped.
+    {
+        RoboWeb::Document page = Parse(
+            "<!DOCTYPE html><div style='width:20px;height:10px'>"
+            "<div style='width:200px;height:10px;background:#ff0000'></div></div>",
+            diagnostics);
+        RoboWeb::LayoutResult layout = RoboWeb::LayoutDocument(page, 240, 120);
+        bool unclipped = false;
+        for (const RoboWeb::DrawOp& op : layout.ops) {
+            if (op.kind == RoboWeb::DrawOp::Kind::Fill && op.color.red == 255) {
+                EXPECT(!op.clipped);
+                unclipped = true;
+            }
+        }
+        EXPECT(unclipped);
+    }
+
+    // An outline paints outside the border box and never changes layout, so the
+    // box keeps its width while the frame gains red pixels around it.
+    {
+        RoboWeb::Document plain = Parse("<!DOCTYPE html><div style='width:40px;height:20px;background:#ffffff'></div>", diagnostics);
+        RoboWeb::LayoutResult plainLayout = RoboWeb::LayoutDocument(plain, 240, 120);
+        RoboWeb::Document outlined = Parse(
+            "<!DOCTYPE html><div style='width:40px;height:20px;background:#ffffff;outline:2px solid #ff0000'></div>", diagnostics);
+        RoboWeb::LayoutResult outlinedLayout = RoboWeb::LayoutDocument(outlined, 240, 120);
+        EXPECT(boxWidth(plainLayout, "div") == boxWidth(outlinedLayout, "div"));
+        EXPECT(boxHeight(plainLayout, "div") == boxHeight(outlinedLayout, "div"));
+        bool outlineStroke = false;
+        for (const RoboWeb::DrawOp& op : outlinedLayout.ops) {
+            if (op.kind == RoboWeb::DrawOp::Kind::Stroke && op.color.red == 255 && op.color.green == 0) {
+                outlineStroke = true;
+            }
+        }
+        EXPECT(outlineStroke);
+    }
+    // outline: none draws nothing.
+    {
+        RoboWeb::Document page = Parse("<!DOCTYPE html><div style='width:40px;height:20px;outline:none'></div>", diagnostics);
+        RoboWeb::LayoutResult layout = RoboWeb::LayoutDocument(page, 240, 120);
+        for (const RoboWeb::DrawOp& op : layout.ops) {
+            if (op.kind == RoboWeb::DrawOp::Kind::Stroke) {
+                EXPECT(!(op.color.red == 255 && op.color.green == 0));
+            }
+        }
+    }
+
+    // list-style: none removes the marker, and list-style-type picks its glyph.
+    {
+        RoboWeb::Document plain = Parse("<!DOCTYPE html><ul><li>Item</li></ul>", diagnostics);
+        RoboWeb::LayoutResult plainLayout = RoboWeb::LayoutDocument(plain, 240, 120);
+        int plainMarkers = 0;
+        for (const RoboWeb::DrawOp& op : plainLayout.ops) {
+            if (op.kind == RoboWeb::DrawOp::Kind::Text && op.text != "Item" && !op.text.empty()) {
+                ++plainMarkers;
+            }
+        }
+        EXPECT(plainMarkers == 1);
+        RoboWeb::Document nonePage = Parse("<!DOCTYPE html><ul><li style='list-style:none'>Item</li></ul>", diagnostics);
+        RoboWeb::LayoutResult noneLayout = RoboWeb::LayoutDocument(nonePage, 240, 120);
+        int noneMarkers = 0;
+        for (const RoboWeb::DrawOp& op : noneLayout.ops) {
+            if (op.kind == RoboWeb::DrawOp::Kind::Text && op.text != "Item" && !op.text.empty()) {
+                ++noneMarkers;
+            }
+        }
+        EXPECT(noneMarkers == 0);
+    }
+
+    // pointer-events: none takes the element out of hit testing, so a click
+    // lands on the button underneath it rather than on the overlay. The overlay
+    // is a block that covers the button, so the button is only reachable when
+    // the overlay is skipped.
+    {
+        // The button is absolutely positioned under the overlay so the two boxes
+        // cover the same pixels; the click can only reach the button when the
+        // overlay is skipped.
+        RoboWeb::Document page = Parse(
+            "<!DOCTYPE html><div id='over' style='position:absolute;left:0px;top:0px;width:80px;height:40px;pointer-events:none'></div>"
+            "<button id='under' style='position:absolute;left:0px;top:0px;width:80px;height:40px'></button>",
+            diagnostics);
+        RoboWeb::LayoutResult layout = RoboWeb::LayoutDocument(page, 240, 120);
+        const RoboWeb::ElementBox* overlay = nullptr;
+        const RoboWeb::ElementBox* button = nullptr;
+        for (const RoboWeb::ElementBox& box : layout.boxes) {
+            if (box.node == nullptr) {
+                continue;
+            }
+            const std::string id = RoboWeb::AttributeValue(*box.node, "id");
+            if (id == "over") {
+                overlay = &box;
+            } else if (id == "under") {
+                button = &box;
+            }
+        }
+        EXPECT(overlay != nullptr);
+        EXPECT(button != nullptr);
+        if (overlay != nullptr && button != nullptr) {
+            // The two boxes really do overlap, or the assertion below proves nothing.
+            EXPECT(button->y < overlay->y + overlay->height && button->y + button->height > overlay->y);
+            RoboWeb::DispatchClick(page, layout, overlay->x + 4, overlay->y + 4);
+            EXPECT(page.focus != nullptr);
+            EXPECT(page.focus != nullptr && RoboWeb::AttributeValue(*page.focus, "id") == "under");
+        }
+    }
+    // cursor: pointer reports the hand shape over the element's own box.
+    {
+        RoboWeb::Document page = Parse("<!DOCTYPE html><div style='width:40px;height:20px;cursor:pointer'></div>", diagnostics);
+        RoboWeb::LayoutResult layout = RoboWeb::LayoutDocument(page, 240, 120);
+        const RoboWeb::ElementBox* box = RoboWeb::FindBox(layout, "div");
+        EXPECT(box != nullptr);
+        if (box != nullptr) {
+            EXPECT(RoboWeb::PointerAt(layout, box->x + 2, box->y + 2, 0) == RoboWeb::PointerShape::Hand);
+        }
+    }
 }
 
 void TestScriptAndPresentation() {
@@ -5199,6 +5423,44 @@ void TestFastFrame() {
     RoboWeb::RegisterCompiledImageView("unit-red.ppm", kRedPixel, sizeof(kRedPixel));
     RoboWeb::DecodedImage image = RoboWeb::DecodeImageFile("unit-red.ppm");
     EXPECT(image.ok && image.width == 1 && image.rgba[0] == 255 && image.rgba[1] == 0);
+    {
+        std::ofstream cssFile("Build/page-link.css");
+        cssFile << "p { color: #112233; background: #abcdef; }\n";
+        cssFile.close();
+        std::ofstream scriptFile("Build/page-link.js");
+        scriptFile << "document.title = \"Linked\";\n";
+        scriptFile.close();
+        RoboWeb::HtmlParser parser;
+        RoboWeb::Document linked = parser.Parse(
+            "<!DOCTYPE html><link rel=\"stylesheet\" href=\"page-link.css\"><script src=\"page-link.js\"></script><p id=\"lead\">Hi</p>",
+            "Build/page.html", diagnostics);
+        std::string loadError;
+        EXPECT(RoboWeb::LoadExternalScripts(linked, loadError));
+        EXPECT(RoboWeb::GatherText(*linked.root).find("document.title") != std::string::npos);
+        std::vector<RoboWeb::CompiledWebFont> linkedFonts;
+        EXPECT(RoboWeb::CompileLinkedStyles(linked, linkedFonts, loadError));
+        bool foundColor = false;
+        for (const RoboWeb::ElementStyle& rule : linked.styleRules) {
+            if (rule.selector == "p" && rule.hasColor && rule.colorRed == 0x11 && rule.colorGreen == 0x22 && rule.colorBlue == 0x33 &&
+                rule.hasBackground && rule.backgroundRed == 0xab) {
+                foundColor = true;
+            }
+        }
+        EXPECT(foundColor);
+        std::string extraError;
+        EXPECT(RoboWeb::CompileStylesheetText(linked, "h1 { color: #010203; }\n", linkedFonts, extraError));
+        const std::string linkedCpp = RoboWeb::GenerateCpp(linked);
+        EXPECT(linkedCpp.find("document.title = \"Linked\"") != std::string::npos);
+        EXPECT(linkedCpp.find("colorRed = 17;") != std::string::npos);
+        EXPECT(linkedCpp.find("colorRed = 1;") != std::string::npos);
+        RoboWeb::Document missingCss = parser.Parse("<!DOCTYPE html><link rel=\"stylesheet\" href=\"missing-page.css\"><p>Hi</p>", "Build/page.html", diagnostics);
+        std::string missingError;
+        EXPECT(!RoboWeb::CompileLinkedStyles(missingCss, linkedFonts, missingError));
+        EXPECT(missingError.find("stylesheet was not loaded") != std::string::npos);
+        RoboWeb::Document missingScript = parser.Parse("<!DOCTYPE html><script src=\"missing-page.js\"></script>", "Build/page.html", diagnostics);
+        EXPECT(!RoboWeb::LoadExternalScripts(missingScript, missingError));
+        EXPECT(missingError.find("script was not loaded") != std::string::npos);
+    }
 }
 
 }  // namespace
@@ -5212,6 +5474,7 @@ int main() {
     TestPixelsAndInteraction();
     TestStyleRule();
     TestCssFunctions();
+    TestCssProperties();
     TestScriptAndPresentation();
     TestHtmlBehavior();
     TestSvgSpecification();

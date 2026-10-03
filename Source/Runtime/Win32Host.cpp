@@ -37,9 +37,12 @@ struct App {
     bool refreshing = false;
     bool hasMarquee = false;
     bool imagesSettled = false;
+    bool motionKnown = false;
+    bool shown = false;
     ViewCache view;
     FrameUpdate present;
     std::wstring pending;
+    std::wstring caption;
 };
 
 std::wstring Widen(const std::string& text) {
@@ -135,18 +138,23 @@ std::wstring Caption(const App& app) {
     return Widen(caption);
 }
 
-void Present(const App& app, HDC dc) {
-    const Framebuffer& frame = app.view.frame;
-    if (!app.present.paint || frame.width <= 0 || frame.height <= 0 || frame.pixels.empty()) {
+void BlitFrame(const Framebuffer& frame, HDC dc, int originX, int originY, int width, int height) {
+    if (dc == nullptr || frame.width <= 0 || frame.height <= 0 || frame.pixels.empty()) {
         return;
     }
-    const int originX = app.present.full ? 0 : app.present.x;
-    const int originY = app.present.full ? 0 : app.present.y;
-    const int width = app.present.full ? frame.width : app.present.width;
-    const int height = app.present.full ? frame.height : app.present.height;
-    if (width <= 0 || height <= 0) {
+    if (originX < 0) {
+        width += originX;
+        originX = 0;
+    }
+    if (originY < 0) {
+        height += originY;
+        originY = 0;
+    }
+    if (originX >= frame.width || originY >= frame.height || width <= 0 || height <= 0) {
         return;
     }
+    width = std::min(width, frame.width - originX);
+    height = std::min(height, frame.height - originY);
     BITMAPINFO info;
     ZeroMemory(&info, sizeof(info));
     info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -157,17 +165,42 @@ void Present(const App& app, HDC dc) {
     info.bmiHeader.biCompression = BI_RGB;
     std::vector<std::uint8_t> bgra(static_cast<std::size_t>(width * height * 4));
     for (int row = 0; row < height; ++row) {
+        const std::uint8_t* source = frame.pixels.data() + static_cast<std::size_t>(((originY + row) * frame.width + originX) * 4);
+        std::uint8_t* target = bgra.data() + static_cast<std::size_t>(row * width * 4);
         for (int column = 0; column < width; ++column) {
-            const std::size_t source = static_cast<std::size_t>(((originY + row) * frame.width + originX + column) * 4);
-            const std::size_t target = static_cast<std::size_t>((row * width + column) * 4);
-            bgra[target] = frame.pixels[source + 2];
-            bgra[target + 1] = frame.pixels[source + 1];
-            bgra[target + 2] = frame.pixels[source];
-            bgra[target + 3] = 255;
+            target[0] = source[2];
+            target[1] = source[1];
+            target[2] = source[0];
+            target[3] = 255;
+            source += 4;
+            target += 4;
         }
     }
     SetDIBitsToDevice(dc, originX, originY, static_cast<UINT>(width), static_cast<UINT>(height), 0, 0, 0, static_cast<UINT>(height),
         bgra.data(), &info, DIB_RGB_COLORS);
+}
+
+void Present(const App& app, HDC dc, const RECT& paint) {
+    BlitFrame(app.view.frame, dc, paint.left, paint.top, paint.right - paint.left, paint.bottom - paint.top);
+}
+
+void Publish(App& app) {
+    if (!app.present.paint || app.window == nullptr) {
+        return;
+    }
+    const Framebuffer& frame = app.view.frame;
+    const int originX = app.present.full ? 0 : app.present.x;
+    const int originY = app.present.full ? 0 : app.present.y;
+    const int width = app.present.full ? frame.width : app.present.width;
+    const int height = app.present.full ? frame.height : app.present.height;
+    HDC dc = GetDC(app.window);
+    if (dc == nullptr) {
+        RECT dirty{originX, originY, originX + width, originY + height};
+        InvalidateRect(app.window, &dirty, FALSE);
+        return;
+    }
+    BlitFrame(frame, dc, originX, originY, width, height);
+    ReleaseDC(app.window, dc);
 }
 
 void Refresh(App& app, FrameCause cause, Node* previousHover) {
@@ -210,32 +243,28 @@ void Refresh(App& app, FrameCause cause, Node* previousHover) {
         info.nPos = app.document->scrollY;
         SetScrollInfo(app.window, SB_VERT, &info, TRUE);
     }
-    SetWindowTextW(app.window, Caption(app).c_str());
-    const bool marquee = app.document->root != nullptr && TreeHasMarquee(*app.document->root);
-    const bool animated = app.document->root != nullptr && TreeHasSvgAnimation(*app.document->root);
-    if (marquee != app.hasMarquee || animated) {
-        app.hasMarquee = marquee || animated;
-        if (marquee || animated) {
-            SetTimer(app.window, 2, 33, nullptr);
-        } else {
-            KillTimer(app.window, 2);
+    const std::wstring caption = Caption(app);
+    if (caption != app.caption) {
+        app.caption = caption;
+        SetWindowTextW(app.window, caption.c_str());
+    }
+    if (!app.motionKnown || cause == FrameCause::Viewport || cause == FrameCause::Content) {
+        const bool marquee = app.document->root != nullptr && TreeHasMarquee(*app.document->root);
+        const bool animated = app.document->root != nullptr && TreeHasSvgAnimation(*app.document->root);
+        app.motionKnown = true;
+        if (marquee != app.hasMarquee || animated) {
+            app.hasMarquee = marquee || animated;
+            if (marquee || animated) {
+                SetTimer(app.window, 2, 33, nullptr);
+            } else {
+                KillTimer(app.window, 2);
+            }
         }
     }
     if (app.present.scrollDelta != 0) {
         ScrollWindowEx(app.window, 0, -app.present.scrollDelta, nullptr, nullptr, nullptr, nullptr, 0);
     }
-    if (app.present.paint) {
-        RECT dirty;
-        if (app.present.full) {
-            GetClientRect(app.window, &dirty);
-        } else {
-            dirty.left = app.present.x;
-            dirty.top = app.present.y;
-            dirty.right = app.present.x + app.present.width;
-            dirty.bottom = app.present.y + app.present.height;
-        }
-        InvalidateRect(app.window, &dirty, FALSE);
-    }
+    Publish(app);
     app.refreshing = false;
 }
 
@@ -423,13 +452,13 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         PAINTSTRUCT paint;
         HDC dc = BeginPaint(window, &paint);
         if (app != nullptr) {
-            Present(*app, dc);
+            Present(*app, dc, paint.rcPaint);
         }
         EndPaint(window, &paint);
         return 0;
     }
     case WM_SIZE:
-        if (app != nullptr && wParam != SIZE_MINIMIZED) {
+        if (app != nullptr && app->shown && wParam != SIZE_MINIMIZED) {
             Refresh(*app, FrameCause::Viewport, nullptr);
         }
         return 0;
@@ -580,8 +609,9 @@ int RunWindow(Document& document, int width, int height) {
         return 1;
     }
     SetTimer(app.window, 1, 530, nullptr);
-    Refresh(app, FrameCause::Viewport, nullptr);
     ShowWindow(app.window, SW_SHOW);
+    app.shown = true;
+    Refresh(app, FrameCause::Viewport, nullptr);
     UpdateWindow(app.window);
     MSG message;
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {

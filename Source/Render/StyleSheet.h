@@ -41,6 +41,8 @@ bool EvaluateCssPx(const std::string& text, const std::vector<StyleDeclaration>&
 bool EvaluateCssColor(const std::string& text, const std::vector<StyleDeclaration>& variables, std::uint8_t& red, std::uint8_t& green, std::uint8_t& blue);
 void ValidateCssText(const std::string& css, const std::string& path, int line, Diagnostics& diagnostics);
 bool CompileLinkedStyles(Document& document, std::vector<CompiledWebFont>& fonts, std::string& error);
+bool CompileStylesheetText(Document& document, const std::string& css, std::vector<CompiledWebFont>& fonts, std::string& error);
+bool LoadTextResource(const Document& document, const std::string& url, std::string& text, std::string& error);
 bool CompileRemoteImages(Document& document, std::vector<CompiledImage>& images, std::string& error);
 
 }

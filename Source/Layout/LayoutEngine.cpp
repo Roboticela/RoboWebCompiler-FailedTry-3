@@ -940,6 +940,24 @@ struct Engine {
         if (op.color.alpha == 0) {
             return;
         }
+        // A text shadow with no blur repeats the glyph run underneath the real
+        // one, so the same record shifted by the offset is exact. A blur has to
+        // soften the glyph shapes themselves; a blurred bounding rectangle would
+        // paint a box, so that form stays on the general engine and warns.
+        if (style.hasTextShadow && style.shadowColor.alpha != 0 && style.shadowBlurPx <= 0 &&
+            (style.shadowDx != 0 || style.shadowDy != 0)) {
+            Color shadowColor = style.shadowUsesText ? style.color : style.shadowColor;
+            ApplyCssFilters(shadowColor);
+            if (shadowColor.alpha != 0) {
+                DrawOp shadow = op;
+                shadow.x = x + style.shadowDx;
+                shadow.y = y + style.baselineShift + style.shadowDy;
+                shadow.color = shadowColor;
+                shadow.underline = false;
+                shadow.strike = false;
+                result->ops.push_back(shadow);
+            }
+        }
         op.bold = style.bold;
         op.italic = style.italic;
         op.monospace = style.monospace;
@@ -8858,24 +8876,92 @@ int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, in
     if (paintedBackground && backgroundIndex < result->ops.size()) {
         result->ops[backgroundIndex].height = borderHeight;
     }
-    if (style.shadowColor.alpha != 0 && width > 0 && borderHeight > 0) {
-        Fill(x + style.shadowDx, y + style.shadowDy, width, borderHeight, style.shadowColor, fixed);
+    // overflow: hidden or clip masks every record the element emitted to its own
+    // padding box, so no descendant paints past the boundary. Every op below
+    // gets the same clip rectangle. The outline, which paints outside the box,
+    // is exempt because a browser draws it over the clipped content.
+    const std::size_t clippedFrom = backgroundIndex;
+    if (style.clipsOverflow && width > 0 && borderHeight > 0) {
+        for (std::size_t index = clippedFrom; index < result->ops.size(); ++index) {
+            DrawOp& op = result->ops[index];
+            if (op.fixed != fixed) {
+                continue;
+            }
+            if (!op.clipped) {
+                op.clipped = true;
+                op.clipX = x;
+                op.clipY = y;
+                op.clipWidth = width;
+                op.clipHeight = borderHeight;
+                continue;
+            }
+            const int right = std::min(op.clipX + op.clipWidth, x + width);
+            const int bottom = std::min(op.clipY + op.clipHeight, y + borderHeight);
+            op.clipX = std::max(op.clipX, x);
+            op.clipY = std::max(op.clipY, y);
+            op.clipWidth = std::max(0, right - op.clipX);
+            op.clipHeight = std::max(0, bottom - op.clipY);
+        }
+    }
+    if (style.shadowColor.alpha != 0 && width > 0 && borderHeight > 0 && !style.shadowInset) {
+        Color shadowColor = style.shadowColor;
+        if (style.shadowUsesText) {
+            shadowColor = style.color;
+        }
+        if (style.shadowBlurPx > 0) {
+            // A CSS blur radius is twice the Gaussian standard deviation, so a
+            // blur(2px) shadow has sigma 1.
+            const double sigma = style.shadowBlurPx / 2.0;
+            const int spread = std::max(1, static_cast<int>(std::ceil(3.0 * sigma)));
+            const int shadowX = x + style.shadowDx;
+            const int shadowY = y + style.shadowDy;
+            for (int row = -spread; row < borderHeight + spread; ++row) {
+                for (int column = -spread; column < width + spread; ++column) {
+                    const double coverage =
+                        SvgBlurredBoxCoverage(shadowX + column, shadowY + row, shadowX, shadowY, width, borderHeight, sigma);
+                    if (coverage <= 0.002) {
+                        continue;
+                    }
+                    Color halo = shadowColor;
+                    const int alpha = static_cast<int>(shadowColor.alpha * coverage + 0.5);
+                    halo.alpha = static_cast<std::uint8_t>(alpha > 255 ? 255 : (alpha < 0 ? 0 : alpha));
+                    Fill(shadowX + column, shadowY + row, 1, 1, halo, fixed);
+                }
+            }
+        } else {
+            Fill(x + style.shadowDx, y + style.shadowDy, width, borderHeight, shadowColor, fixed);
+        }
     }
     if (style.blurPx > 0 && style.background.alpha != 0 && width > 0 && borderHeight > 0) {
         // A CSS blur(<length>) is a Gaussian whose standard deviation is that
         // length, so the halo follows the normal curve rather than a linear ramp.
+        // A small kernel stays pixel-exact. A wide glow is a fixed set of bands,
+        // because one draw record per pixel cannot refresh a window in real time.
         const double sigma = static_cast<double>(style.blurPx);
         const int spread = std::max(1, static_cast<int>(std::ceil(3.0 * sigma)));
-        for (int row = -spread; row < borderHeight + spread; ++row) {
-            for (int column = -spread; column < width + spread; ++column) {
-                const double coverage = SvgBlurredBoxCoverage(x + column, y + row, x, y, width, borderHeight, sigma);
-                if (coverage <= 0.002) {
-                    continue;
+        auto paintHalo = [&](int haloX, int haloY, int haloWidth, int haloHeight, double coverage) {
+            if (coverage <= 0.002 || haloWidth <= 0 || haloHeight <= 0) {
+                return;
+            }
+            Color halo = style.background;
+            const int alpha = static_cast<int>(style.background.alpha * coverage + 0.5);
+            halo.alpha = static_cast<std::uint8_t>(alpha > 255 ? 255 : (alpha < 0 ? 0 : alpha));
+            Fill(haloX, haloY, haloWidth, haloHeight, halo, fixed);
+        };
+        const int spanWidth = width + spread * 2;
+        const int spanHeight = borderHeight + spread * 2;
+        if (spanWidth <= 48 && spanHeight <= 48) {
+            for (int row = -spread; row < borderHeight + spread; ++row) {
+                for (int column = -spread; column < width + spread; ++column) {
+                    paintHalo(x + column, y + row, 1, 1, SvgBlurredBoxCoverage(x + column, y + row, x, y, width, borderHeight, sigma));
                 }
-                Color halo = style.background;
-                const int alpha = static_cast<int>(style.background.alpha * coverage + 0.5);
-                halo.alpha = static_cast<std::uint8_t>(alpha > 255 ? 255 : (alpha < 0 ? 0 : alpha));
-                Fill(x + column, y + row, 1, 1, halo, fixed);
+            }
+        } else {
+            const int bands = 12;
+            for (int band = bands; band >= 0; --band) {
+                const int inset = spread * band / bands;
+                const double coverage = SvgBlurredBoxCoverage(x - inset, y + borderHeight / 2, x, y, width, borderHeight, sigma);
+                paintHalo(x - inset, y - inset, width + inset * 2, borderHeight + inset * 2, coverage);
             }
         }
     }
@@ -9025,10 +9111,39 @@ int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, in
     if (style.border > 0) {
         Stroke(x, y, width, borderHeight, Color{118, 118, 118, 255}, fixed);
     }
+    if (style.hasOutline && style.outlineWidthPx > 0 && width > 0 && borderHeight > 0) {
+        // An outline sits just outside the border box and takes no space in
+        // layout, so it never shifts the box the way a border does.
+        const int grow = style.outlineWidthPx;
+        for (int band = 0; band < grow; ++band) {
+            const int inset = band;
+            Stroke(x - inset - 1, y - inset - 1, width + inset * 2 + 2, borderHeight + inset * 2 + 2, style.outlineColor, fixed);
+        }
+    }
     AddBox(node, x, y, width, borderHeight, style, fixed);
     if (node.kind == ElementKind::Li || node.kind == ElementKind::Summary) {
         std::string             marker = "\xE2\x80\xA2";
-        if (node.kind == ElementKind::Li && node.parent != nullptr && node.parent->kind != ElementKind::Ol) {
+        // list-style-type replaces the marker glyph, and list-style: none removes
+        // it entirely. The HTML type attribute only applies when CSS says nothing.
+        if (node.kind == ElementKind::Li && style.hasListStyle) {
+            switch (style.listStyleKind) {
+                case 0:
+                    marker.clear();
+                    break;
+                case 1:
+                    marker = "\xE2\x80\xA2";
+                    break;
+                case 2:
+                    marker = "\xE2\x97\xA6";
+                    break;
+                case 3:
+                    marker = "\xE2\x96\xAA";
+                    break;
+                default:
+                    marker.clear();
+                    break;
+            }
+        } else if (node.kind == ElementKind::Li && node.parent != nullptr && node.parent->kind != ElementKind::Ol) {
             std::string listType = AttributeValue(node, "type");
             if (listType.empty()) {
                 listType = AttributeValue(*node.parent, "type");
@@ -9069,9 +9184,20 @@ int Engine::LayoutBlock(Node& node, const ResolvedStyle& style, int x, int y, in
             if (valueOk) {
                 index = explicitValue;
             }
-            marker = ListMarker(index, AttributeValue(*node.parent, "type"));
+            std::string listType = AttributeValue(*node.parent, "type");
+            if (style.hasListStyle && style.listStyleKind >= 4) {
+                static const char* CSS_TYPES[] = {"", "disc", "circle", "square", "decimal", "decimal-leading-zero", "i", "I", "a", "A"};
+                listType = CSS_TYPES[style.listStyleKind];
+            }
+            marker = ListMarker(index, listType);
         }
-        Text(contentX - MeasureTextPx(marker, style.fontSizePx, style.bold, style.italic, style.fontFamily) - 6, contentY, marker, style, fixed);
+        if (!marker.empty()) {
+            const int markerWidth = MeasureTextPx(marker, style.fontSizePx, style.bold, style.italic, style.fontFamily);
+            // An inside marker sits in the content box; the default outside marker
+            // hangs to the left of it.
+            const int markerX = style.listStylePosition == 1 ? contentX : contentX - markerWidth - 6;
+            Text(markerX, contentY, marker, style, fixed);
+        }
     }
     return borderHeight;
 }
@@ -9200,6 +9326,22 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
     style.maxWidthPx = -1;
     style.minHeightPx = -1;
     style.maxHeightPx = -1;
+    style.borderBox = false;
+    style.shadowBlurPx = 0;
+    style.shadowUsesText = false;
+    style.shadowInset = false;
+    style.hasTextShadow = false;
+    style.overflowXKind = 0;
+    style.overflowYKind = 0;
+    style.clipsOverflow = false;
+    style.outlineWidthPx = 0;
+    style.outlineKind = 0;
+    style.hasOutline = false;
+    style.listStyleKind = -1;
+    style.listStylePosition = 0;
+    style.hasListStyle = false;
+    style.pointerEventsKind = -1;
+    style.cursorShape.clear();
     style.gradientColors.clear();
     style.gradientStopMilli.clear();
     style.gradientStopPx.clear();
@@ -9949,6 +10091,281 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
                     target.easeY2 = values[3];
                 }
             }
+            if (declaration.name == "box-sizing") {
+                target.borderBox = ToLowerAscii(TrimSpaces(declaration.value)) == "border-box";
+            }
+            if (declaration.name == "text-shadow" || declaration.name == "box-shadow") {
+                const std::string shadow = ToLowerAscii(TrimSpaces(declaration.value));
+                if (shadow != "none" && !shadow.empty()) {
+                    const bool textShadow = declaration.name == "text-shadow";
+                    const bool inset = shadow.find("inset") != std::string::npos;
+                    if (!inset || textShadow) {
+                        std::vector<std::string> parts;
+                        std::string current;
+                        int depth = 0;
+                        for (char character : shadow) {
+                            if (character == '(') {
+                                ++depth;
+                            } else if (character == ')') {
+                                if (depth > 0) {
+                                    --depth;
+                                }
+                            }
+                            if (character == ',' && depth == 0) {
+                                parts.push_back(TrimSpaces(current));
+                                current.clear();
+                                continue;
+                            }
+                            current.push_back(character);
+                        }
+                        parts.push_back(TrimSpaces(current));
+                        std::vector<std::string> tokens;
+                        for (std::size_t piece = 0; piece < parts.size(); ++piece) {
+                            std::size_t index = 0;
+                            while (index < parts[piece].size()) {
+                                while (index < parts[piece].size() && parts[piece][index] == ' ') {
+                                    ++index;
+                                }
+                                const std::size_t start = index;
+                                while (index < parts[piece].size() && parts[piece][index] != ' ') {
+                                    ++index;
+                                }
+                                if (start < index) {
+                                    tokens.push_back(parts[piece].substr(start, index - start));
+                                }
+                            }
+                        }
+                        std::vector<int> lengths;
+                        Color shadowColor{0, 0, 0, 255};
+                        bool colorSet = false;
+                        bool usesText = false;
+                        bool ok = true;
+                        for (const std::string& token : tokens) {
+                            if (ToLowerAscii(token) == "inset") {
+                                continue;
+                            }
+                            int pixels = 0;
+                            if (EvaluateCssPx(token, target.customProperties, context, pixels)) {
+                                lengths.push_back(pixels);
+                                continue;
+                            }
+                            const std::string lower = ToLowerAscii(token);
+                            if (lower == "currentcolor") {
+                                usesText = true;
+                                colorSet = true;
+                                continue;
+                            }
+                            std::uint8_t red = 0;
+                            std::uint8_t green = 0;
+                            std::uint8_t blue = 0;
+                            if (EvaluateCssColor(token, target.customProperties, red, green, blue)) {
+                                shadowColor = Color{red, green, blue, 255};
+                                colorSet = true;
+                                continue;
+                            }
+                            ok = false;
+                            break;
+                        }
+                        if (ok && lengths.size() >= 2) {
+                            target.shadowDx = lengths[0];
+                            target.shadowDy = lengths[1];
+                            target.shadowBlurPx = lengths.size() >= 3 ? std::max(0, lengths[2]) : 0;
+                            if (!colorSet) {
+                                shadowColor = Color{0, 0, 0, 255};
+                            }
+                            target.shadowColor = shadowColor;
+                            target.shadowUsesText = usesText;
+                            target.shadowInset = inset;
+                            target.hasTextShadow = true;
+                        }
+                    }
+                }
+            }
+            if (declaration.name == "overflow" || declaration.name == "overflow-x" || declaration.name == "overflow-y") {
+                const std::string overflow = ToLowerAscii(TrimSpaces(declaration.value));
+                int kind = 0;
+                if (overflow == "hidden" || overflow == "clip") {
+                    kind = 1;
+                } else if (overflow == "scroll" || overflow == "auto") {
+                    kind = 2;
+                }
+                if (declaration.name == "overflow" || declaration.name == "overflow-x") {
+                    target.overflowXKind = kind;
+                }
+                if (declaration.name == "overflow" || declaration.name == "overflow-y") {
+                    target.overflowYKind = kind;
+                }
+                target.clipsOverflow = target.overflowXKind != 0 || target.overflowYKind != 0;
+            }
+            if (declaration.name == "outline") {
+                const std::string outline = ToLowerAscii(TrimSpaces(declaration.value));
+                if (outline == "none" || outline.empty()) {
+                    target.outlineWidthPx = 0;
+                    target.hasOutline = false;
+                } else {
+                    int width = 0;
+                    bool widthSet = false;
+                    bool styleSet = false;
+                    int styleKind = 0;
+                    Color outlineColor{0, 0, 0, 255};
+                    bool colorSet = false;
+                    std::string token;
+                    auto acceptToken = [&](const std::string& raw) {
+                        if (raw.empty()) {
+                            return;
+                        }
+                        const std::string lower = ToLowerAscii(raw);
+                        if (lower == "none") {
+                            styleSet = true;
+                            styleKind = 0;
+                            return;
+                        }
+                        if (lower == "auto" || lower == "solid") {
+                            styleSet = true;
+                            styleKind = 1;
+                            return;
+                        }
+                        if (lower == "dotted" || lower == "dashed" || lower == "double" || lower == "groove" || lower == "ridge" ||
+                            lower == "inset" || lower == "outset" || lower == "hidden") {
+                            styleSet = true;
+                            styleKind = 2;
+                            return;
+                        }
+                        if (lower == "thin") {
+                            width = 1;
+                            widthSet = true;
+                            return;
+                        }
+                        if (lower == "medium") {
+                            width = 3;
+                            widthSet = true;
+                            return;
+                        }
+                        if (lower == "thick") {
+                            width = 5;
+                            widthSet = true;
+                            return;
+                        }
+                        int pixels = 0;
+                        if (EvaluateCssPx(raw, target.customProperties, context, pixels)) {
+                            width = std::max(0, pixels);
+                            widthSet = true;
+                            return;
+                        }
+                        std::uint8_t red = 0;
+                        std::uint8_t green = 0;
+                        std::uint8_t blue = 0;
+                        if (EvaluateCssColor(raw, target.customProperties, red, green, blue)) {
+                            outlineColor = Color{red, green, blue, 255};
+                            colorSet = true;
+                        }
+                    };
+                    for (std::size_t index = 0; index <= outline.size(); ++index) {
+                        const char letter = index < outline.size() ? outline[index] : ' ';
+                        if (letter == ' ' || letter == '\t') {
+                            acceptToken(token);
+                            token.clear();
+                        } else {
+                            token.push_back(letter);
+                        }
+                    }
+                    target.outlineWidthPx = widthSet ? width : 3;
+                    target.outlineKind = styleSet ? styleKind : 1;
+                    target.outlineColor = outlineColor;
+                    target.hasOutline = target.outlineWidthPx > 0 && target.outlineKind != 0;
+                }
+            }
+            if (declaration.name == "outline-width") {
+                int pixels = 0;
+                if (EvaluateCssPx(declaration.value, target.customProperties, context, pixels)) {
+                    target.outlineWidthPx = std::max(0, pixels);
+                    target.hasOutline = target.outlineWidthPx > 0 && target.outlineKind != 0;
+                } else {
+                    const std::string width = ToLowerAscii(TrimSpaces(declaration.value));
+                    if (width == "thin") {
+                        target.outlineWidthPx = 1;
+                        target.hasOutline = target.outlineKind != 0;
+                    } else if (width == "medium") {
+                        target.outlineWidthPx = 3;
+                        target.hasOutline = target.outlineKind != 0;
+                    } else if (width == "thick") {
+                        target.outlineWidthPx = 5;
+                        target.hasOutline = target.outlineKind != 0;
+                    }
+                }
+            }
+            if (declaration.name == "outline-style") {
+                const std::string outlineStyle = ToLowerAscii(TrimSpaces(declaration.value));
+                if (outlineStyle == "none" || outlineStyle == "hidden") {
+                    target.outlineKind = 0;
+                } else if (outlineStyle == "auto" || outlineStyle == "solid") {
+                    target.outlineKind = 1;
+                } else if (!outlineStyle.empty()) {
+                    target.outlineKind = 2;
+                }
+                target.hasOutline = target.outlineWidthPx > 0 && target.outlineKind != 0;
+            }
+            if (declaration.name == "outline-color") {
+                std::uint8_t red = 0;
+                std::uint8_t green = 0;
+                std::uint8_t blue = 0;
+                if (EvaluateCssColor(declaration.value, target.customProperties, red, green, blue)) {
+                    target.outlineColor = Color{red, green, blue, 255};
+                }
+            }
+            if (declaration.name == "list-style" || declaration.name == "list-style-type") {
+                const std::string list = ToLowerAscii(TrimSpaces(declaration.value));
+                if (list == "none") {
+                    target.listStyleKind = 0;
+                    target.hasListStyle = true;
+                } else if (list == "disc") {
+                    target.listStyleKind = 1;
+                    target.hasListStyle = true;
+                } else if (list == "circle") {
+                    target.listStyleKind = 2;
+                    target.hasListStyle = true;
+                } else if (list == "square") {
+                    target.listStyleKind = 3;
+                    target.hasListStyle = true;
+                } else if (list == "decimal") {
+                    target.listStyleKind = 4;
+                    target.hasListStyle = true;
+                } else if (list == "decimal-leading-zero") {
+                    target.listStyleKind = 5;
+                    target.hasListStyle = true;
+                } else if (list == "lower-roman") {
+                    target.listStyleKind = 6;
+                    target.hasListStyle = true;
+                } else if (list == "upper-roman") {
+                    target.listStyleKind = 7;
+                    target.hasListStyle = true;
+                } else if (list == "lower-alpha" || list == "lower-latin") {
+                    target.listStyleKind = 8;
+                    target.hasListStyle = true;
+                } else if (list == "upper-alpha" || list == "upper-latin") {
+                    target.listStyleKind = 9;
+                    target.hasListStyle = true;
+                }
+            }
+            if (declaration.name == "list-style-position") {
+                target.listStylePosition = ToLowerAscii(TrimSpaces(declaration.value)) == "inside" ? 1 : 0;
+            }
+            if (declaration.name == "pointer-events") {
+                const std::string pointer = ToLowerAscii(TrimSpaces(declaration.value));
+                target.pointerEventsKind = pointer == "none" ? 0 : (pointer.empty() ? -1 : 1);
+            }
+            if (declaration.name == "cursor") {
+                const std::string cursor = ToLowerAscii(TrimSpaces(declaration.value));
+                if (cursor == "pointer" || cursor == "hand") {
+                    target.cursorShape = "pointer";
+                } else if (cursor == "text" || cursor == "vertical-text") {
+                    target.cursorShape = "text";
+                } else if (cursor == "default" || cursor == "auto") {
+                    target.cursorShape = "default";
+                } else if (!cursor.empty()) {
+                    target.cursorShape = cursor;
+                }
+            }
             if (declaration.name == "position" && ToLowerAscii(declaration.value) == "absolute") {
                 target.positionKind = 1;
             }
@@ -10511,6 +10928,20 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
                 mixChannel(fromRule->backgroundGreen, toRule->backgroundGreen),
                 mixChannel(fromRule->backgroundBlue, toRule->backgroundBlue),
                 255};
+        }
+    }
+    // box-sizing: border-box makes width and height describe the border box,
+    // which is how the engine already stores them. content-box, the browser
+    // default, makes them describe the content box, so the border box grows by
+    // the border and padding.
+    if (!style.borderBox) {
+        const int horizontalEdges = style.border * 2 + style.paddingLeft + style.paddingRight;
+        const int verticalEdges = style.border * 2 + style.paddingTop + style.paddingBottom;
+        if (style.widthPx > 0) {
+            style.widthPx += horizontalEdges;
+        }
+        if (style.heightPx > 0) {
+            style.heightPx += verticalEdges;
         }
     }
     return style;

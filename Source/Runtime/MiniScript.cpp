@@ -1,6 +1,10 @@
 #include "Runtime/MiniScript.h"
 
 #include "Core/Utf8.h"
+#include "Render/StyleSheet.h"
+
+#include <memory>
+#include <vector>
 
 namespace RoboWeb {
 
@@ -265,6 +269,44 @@ void WalkScripts(Document& document, Node& node) {
 }
 
 }  // namespace
+
+bool LoadExternalScripts(Document& document, std::string& error) {
+    if (document.root == nullptr) {
+        return true;
+    }
+    std::vector<Node*> stack{document.root.get()};
+    while (!stack.empty()) {
+        Node* node = stack.back();
+        stack.pop_back();
+        if (node->kind == ElementKind::Script) {
+            const std::string type = ToLowerAscii(AttributeValue(*node, "type"));
+            const bool javascript = type.empty() || type == "text/javascript" || type == "application/javascript" || type == "module";
+            const std::string src = AttributeValue(*node, "src");
+            if (javascript && !src.empty()) {
+                std::string source;
+                if (!LoadTextResource(document, src, source, error)) {
+                    const std::string prefix = "resource was not loaded: ";
+                    if (error.rfind(prefix, 0) == 0) {
+                        error = "script was not loaded: " + error.substr(prefix.size());
+                    } else if (error.empty()) {
+                        error = "script was not loaded: " + src;
+                    }
+                    return false;
+                }
+                node->children.clear();
+                auto child = std::make_unique<Node>();
+                child->type = Node::Type::Text;
+                child->text = source;
+                child->parent = node;
+                node->children.push_back(std::move(child));
+            }
+        }
+        for (const std::unique_ptr<Node>& child : node->children) {
+            stack.push_back(child.get());
+        }
+    }
+    return true;
+}
 
 void RunDocumentScripts(Document& document) {
     if (document.scriptsRan || document.root == nullptr) {
