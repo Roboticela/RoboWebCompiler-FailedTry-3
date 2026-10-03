@@ -31,6 +31,7 @@ struct ViewCache {
     int geometryStamp = 0;
     int scrollY = 0;
     bool ready = false;
+    bool dependsOnViewportHeight = true;
     LayoutResult layout;
     Framebuffer frame;
 };

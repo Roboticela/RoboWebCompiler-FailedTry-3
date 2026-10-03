@@ -484,16 +484,107 @@ int GeometryStamp(const Document& document) {
     return StampDocument(document, true);
 }
 
+bool TextUsesViewportHeight(const std::string& value) {
+    const std::string lower = ToLowerAscii(value);
+    return lower.find("vh") != std::string::npos || lower.find("vb") != std::string::npos;
+}
+
+bool NodeUsesViewportHeight(const Node& node) {
+    for (const Attribute& attribute : node.attributes) {
+        const std::string name = ToLowerAscii(attribute.name);
+        if (TextUsesViewportHeight(attribute.value)) {
+            return true;
+        }
+        if ((name == "height" || name == "min-height" || name == "max-height" || name == "style") && attribute.value.find('%') != std::string::npos) {
+            return true;
+        }
+    }
+    for (const std::unique_ptr<Node>& child : node.children) {
+        if (NodeUsesViewportHeight(*child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool DocumentDependsOnViewportHeight(const Document& document, const LayoutResult& layout) {
+    if (document.root != nullptr && NodeUsesViewportHeight(*document.root)) {
+        return true;
+    }
+    for (const ElementStyle& rule : document.styleRules) {
+        for (const StyleDeclaration& declaration : rule.declarations) {
+            if (TextUsesViewportHeight(declaration.value)) {
+                return true;
+            }
+            if ((declaration.name == "height" || declaration.name == "min-height" || declaration.name == "max-height") &&
+                declaration.value.find('%') != std::string::npos) {
+                return true;
+            }
+        }
+    }
+    for (const DrawOp& op : layout.ops) {
+        if (!op.fixed) {
+            continue;
+        }
+        const bool pageBackground = op.x == 0 && op.y == 0 && op.width == layout.viewportWidth && op.height == layout.viewportHeight;
+        if (!pageBackground) {
+            return true;
+        }
+    }
+    for (const ElementBox& box : layout.boxes) {
+        if (box.fixed) {
+            return true;
+        }
+    }
+    return false;
+}
+
+FrameUpdate ResizeViewportHeight(ViewCache& cache, Document& document, int height, bool settled) {
+    const int oldHeight = cache.frame.height;
+    const int width = cache.frame.width;
+    for (DrawOp& op : cache.layout.ops) {
+        if (op.fixed && op.x == 0 && op.y == 0 && op.width == width && op.height == oldHeight) {
+            op.height = height;
+        }
+    }
+    cache.layout.viewportHeight = height;
+    cache.height = height;
+    FrameUpdate update;
+    update.paint = true;
+    update.full = true;
+    update.width = width;
+    update.height = height;
+    if (height > oldHeight) {
+        Framebuffer grown;
+        grown.width = width;
+        grown.height = height;
+        grown.pixels.assign(static_cast<std::size_t>(width * height * 4), 255);
+        std::memcpy(grown.pixels.data(), cache.frame.pixels.data(), static_cast<std::size_t>(width * oldHeight * 4));
+        cache.frame = std::move(grown);
+        RenderDirty(cache.layout, document.scrollY, cache.frame, 0, oldHeight, width, height - oldHeight, settled);
+        ++gStats.dirtyRasterCount;
+        return update;
+    }
+    if (height < oldHeight && width > 0) {
+        cache.frame.pixels.resize(static_cast<std::size_t>(width * height * 4));
+        cache.frame.height = height;
+    }
+    return update;
+}
+
 FrameUpdate AdvanceFrame(
     ViewCache& cache, Document& document, int width, int height, FrameCause cause, Node* previousHover, bool settled) {
-    const bool viewportChanged = !cache.ready || cache.width != width || cache.height != height;
-    const bool cheapCause = cache.ready && !viewportChanged &&
+    const int clampedWidth = std::max(MIN_VIEWPORT_PX, std::min(MAX_VIEWPORT_PX, width));
+    const int clampedHeight = std::max(MIN_VIEWPORT_PX, std::min(MAX_VIEWPORT_PX, height));
+    const bool widthChanged = !cache.ready || cache.width != clampedWidth;
+    const bool heightChanged = !cache.ready || cache.height != clampedHeight;
+    const bool cheapCause = cache.ready && !widthChanged && !heightChanged &&
                             (cause == FrameCause::Hover || cause == FrameCause::Scroll || cause == FrameCause::Caret);
     const int stamp = cheapCause ? cache.contentStamp : ContentStamp(document);
     const int geometry = cheapCause ? cache.geometryStamp : GeometryStamp(document);
     const bool geometryChanged = !cache.ready || cache.geometryStamp != geometry;
     const bool hoverLayout = cause == FrameCause::Hover && (AnchorNeedsLayout(previousHover) || AnchorNeedsLayout(document.hover));
-    const bool layout = cause == FrameCause::Viewport || viewportChanged || geometryChanged || hoverLayout;
+    const bool layout = !cache.ready || widthChanged || geometryChanged || hoverLayout || (heightChanged && cache.dependsOnViewportHeight);
     if (layout) {
         cache.layout = LayoutDocument(document, width, height);
         cache.frame = RenderDocument(cache.layout, document.scrollY, settled);
@@ -503,9 +594,14 @@ FrameUpdate AdvanceFrame(
         cache.contentStamp = ContentStamp(document);
         cache.geometryStamp = GeometryStamp(document);
         cache.scrollY = document.scrollY;
+        cache.dependsOnViewportHeight = DocumentDependsOnViewportHeight(document, cache.layout);
+        cache.layout.dependsOnViewportHeight = cache.dependsOnViewportHeight;
         ++gStats.layoutCount;
         ++gStats.fullRasterCount;
         return FullUpdate(cache);
+    }
+    if (heightChanged) {
+        return ResizeViewportHeight(cache, document, clampedHeight, settled);
     }
     if (cause == FrameCause::Scroll) {
         const int delta = document.scrollY - cache.scrollY;

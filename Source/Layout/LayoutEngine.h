@@ -81,6 +81,7 @@ struct LayoutResult {
     std::vector<DrawOp> ops;
     bool caretPresent = false;
     DrawOp caret;
+    bool dependsOnViewportHeight = false;
 };
 
 struct ResolvedStyle {
