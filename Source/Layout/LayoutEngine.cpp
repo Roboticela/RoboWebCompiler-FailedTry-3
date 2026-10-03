@@ -1568,6 +1568,14 @@ struct Engine {
         while (slot + 1 < pattern.size() && offset >= cumulative[slot + 1]) {
             ++slot;
         }
+        // A zero-length dash that begins exactly on the phase boundary still
+        // paints its dot (round and square caps), so point the walk at it.
+        for (std::size_t candidate = 0; candidate + 1 < pattern.size(); ++candidate) {
+            if (candidate % 2 == 0 && !(pattern[candidate] > 0) && cumulative[candidate] == offset) {
+                slot = candidate;
+                break;
+            }
+        }
         bool on = slot % 2 == 0;
         double remaining = cumulative[slot + 1] - offset;
         double cursor = 0;
@@ -1650,7 +1658,7 @@ struct Engine {
             std::vector<std::vector<SvgPoint>> contours;
             SvgStrokeContours(points, thickness, join, cap, miterLimit, close, contours);
             if (!contours.empty()) {
-                FillContours(contours, originX, originY, color, fixed, false);
+                FillContours(contours, originX, originY, color, fixed, false, true);
             }
             return;
         }
@@ -1659,7 +1667,7 @@ struct Engine {
             std::vector<std::vector<SvgPoint>> contours;
             SvgStrokeContours(run, thickness, join, cap, miterLimit, false, contours);
             if (!contours.empty()) {
-                FillContours(contours, originX, originY, color, fixed, false);
+                FillContours(contours, originX, originY, color, fixed, false, true);
             }
         }
     }
@@ -3471,7 +3479,12 @@ struct Engine {
         return color.alpha != 0;
     }
 
-    void FillContours(const std::vector<std::vector<SvgPoint>>& contours, int originX, int originY, Color color, bool fixed, bool evenOdd) {
+    // `centerSampling` maps a span back to the pixel columns whose centers the
+    // span actually covers. Fill geometry keeps the historic floor mapping,
+    // while stroke outlines use it so sub-pixel boundaries keep the pixels a
+    // browser paints at the edge of a join, cap or dash.
+    void FillContours(const std::vector<std::vector<SvgPoint>>& contours, int originX, int originY, Color color, bool fixed, bool evenOdd,
+        bool centerSampling = false) {
         if (color.alpha == 0) {
             return;
         }
@@ -3483,6 +3496,12 @@ struct Engine {
                 maxY = std::max(maxY, static_cast<int>(std::ceil(point.y)));
             }
         }
+        auto columnAt = [centerSampling](double crossing) {
+            if (centerSampling) {
+                return static_cast<int>(std::ceil(crossing - 0.5));
+            }
+            return static_cast<int>(crossing);
+        };
         for (int row = minY; row <= maxY; ++row) {
             const double sampleY = static_cast<double>(row) + 0.5;
             struct Hit {
@@ -3502,8 +3521,7 @@ struct Engine {
                         continue;
                     }
                     const double distance = (sampleY - start.y) / (end.y - start.y);
-                    const int x = static_cast<int>(start.x + distance * (end.x - start.x));
-                    hits.push_back(Hit{x, end.y > start.y ? 1 : -1});
+                    hits.push_back(Hit{columnAt(start.x + distance * (end.x - start.x)), end.y > start.y ? 1 : -1});
                 }
             }
             std::sort(hits.begin(), hits.end(), [](const Hit& left, const Hit& right) { return left.x < right.x; });
@@ -8447,7 +8465,79 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
             target.border = rule.borderPx;
         }
     };
+    auto absorbVariables = [](ResolvedStyle& target, const ElementStyle& rule) {
+        for (const StyleDeclaration& declaration : rule.declarations) {
+            if (declaration.name.size() < 2 || declaration.name[0] != '-' || declaration.name[1] != '-') {
+                continue;
+            }
+            bool replaced = false;
+            for (StyleDeclaration& existing : target.customProperties) {
+                if (existing.name == declaration.name) {
+                    existing.value = declaration.value;
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced) {
+                target.customProperties.push_back(declaration);
+            }
+        }
+    };
+    auto resolveLengths = [](ResolvedStyle& target, const ElementStyle& rule) {
+        int fontSize = target.fontSizePx;
+        for (const StyleDeclaration& declaration : rule.declarations) {
+            int pixels = 0;
+            if (!EvaluateCssPx(declaration.value, target.customProperties, fontSize, pixels)) {
+                continue;
+            }
+            if (declaration.name == "font-size" && pixels > 0) {
+                target.fontSizePx = pixels;
+                fontSize = pixels;
+            } else if (declaration.name == "width") {
+                target.widthPx = std::max(0, pixels);
+            } else if (declaration.name == "height") {
+                target.heightPx = std::max(0, pixels);
+            } else if (declaration.name == "margin-top") {
+                target.marginTop = std::max(0, pixels);
+            } else if (declaration.name == "margin-right") {
+                target.marginRight = std::max(0, pixels);
+            } else if (declaration.name == "margin-bottom") {
+                target.marginBottom = std::max(0, pixels);
+            } else if (declaration.name == "margin-left") {
+                target.marginLeft = std::max(0, pixels);
+            } else if (declaration.name == "padding-top") {
+                target.paddingTop = std::max(0, pixels);
+            } else if (declaration.name == "padding-right") {
+                target.paddingRight = std::max(0, pixels);
+            } else if (declaration.name == "padding-bottom") {
+                target.paddingBottom = std::max(0, pixels);
+            } else if (declaration.name == "padding-left") {
+                target.paddingLeft = std::max(0, pixels);
+            } else if (declaration.name == "border" || declaration.name == "border-width") {
+                target.border = std::max(0, pixels);
+            }
+        }
+        for (const StyleDeclaration& declaration : rule.declarations) {
+            if (declaration.name != "color" && declaration.name != "background" && declaration.name != "background-color") {
+                continue;
+            }
+            std::uint8_t red = 0;
+            std::uint8_t green = 0;
+            std::uint8_t blue = 0;
+            if (!EvaluateCssColor(declaration.value, target.customProperties, red, green, blue)) {
+                continue;
+            }
+            if (declaration.name == "color") {
+                target.color = Color{red, green, blue, 255};
+            } else {
+                target.background = Color{red, green, blue, 255};
+            }
+        }
+    };
     auto matches = [](const Node& current, const std::string& selector) {
+        if (selector == ":root") {
+            return current.parent != nullptr && current.parent->type == Node::Type::Document;
+        }
         if (selector == "*") {
             return true;
         }
@@ -8586,15 +8676,38 @@ ResolvedStyle ResolveStyle(const Node& node, const ResolvedStyle& parent, const 
         }
         style.fontSizePx = nextSize;
     }
+    std::vector<const Node*> ancestors;
+    for (const Node* cursor = node.parent; cursor != nullptr; cursor = cursor->parent) {
+        if (cursor->type == Node::Type::Element) {
+            ancestors.push_back(cursor);
+        }
+    }
+    for (std::size_t ancestorIndex = ancestors.size(); ancestorIndex > 0; --ancestorIndex) {
+        const Node& ancestor = *ancestors[ancestorIndex - 1];
+        for (const ElementStyle& rule : document.styleRules) {
+            if (matches(ancestor, rule.selector)) {
+                absorbVariables(style, rule);
+            }
+        }
+        if (HasAttribute(ancestor, "style")) {
+            ElementStyle ancestorStyle;
+            ApplyStyleText(ancestorStyle, AttributeValue(ancestor, "style"));
+            absorbVariables(style, ancestorStyle);
+        }
+    }
     for (const ElementStyle& rule : document.styleRules) {
         if (matches(node, rule.selector)) {
+            absorbVariables(style, rule);
             applyRule(style, rule);
+            resolveLengths(style, rule);
         }
     }
     if (HasAttribute(node, "style")) {
         ElementStyle inlineRule;
         ApplyStyleText(inlineRule, AttributeValue(node, "style"));
+        absorbVariables(style, inlineRule);
         applyRule(style, inlineRule);
+        resolveLengths(style, inlineRule);
     }
     return style;
 }

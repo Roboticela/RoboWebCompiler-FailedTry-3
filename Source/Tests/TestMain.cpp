@@ -436,6 +436,50 @@ void TestStyleRule() {
     EXPECT(CountMessages(diagnostics, RoboWeb::Severity::Warning, "CSS is not implemented") == 0);
 }
 
+void TestCssFunctions() {
+    RoboWeb::Diagnostics diagnostics;
+    auto widthOf = [&](const std::string& html) {
+        RoboWeb::Document document = Parse(html, diagnostics);
+        RoboWeb::LayoutResult layout = RoboWeb::LayoutDocument(document, 240, 120);
+        const RoboWeb::ElementBox* box = RoboWeb::FindBox(layout, "div");
+        return box == nullptr ? -1 : box->width;
+    };
+    EXPECT(widthOf("<!DOCTYPE html><style>div { width: calc(10px + 22px); height: 8px }</style><div></div>") == 32);
+    EXPECT(widthOf("<!DOCTYPE html><style>:root { --box: 36px } div { width: var(--box); height: 8px }</style><div></div>") == 36);
+    EXPECT(widthOf("<!DOCTYPE html><style>div { --n: 16px; width: var(--missing, var(--n)); height: 8px }</style><div></div>") == 16);
+    EXPECT(widthOf("<!DOCTYPE html><style>div { width: min(100px, 18px); height: 8px }</style><div></div>") == 18);
+    EXPECT(widthOf("<!DOCTYPE html><style>div { width: max(4px, 21px); height: 8px }</style><div></div>") == 21);
+    EXPECT(widthOf("<!DOCTYPE html><style>div { width: clamp(10px, 50px, 24px); height: 8px }</style><div></div>") == 24);
+    EXPECT(widthOf("<!DOCTYPE html><style>div { width: calc(sin(90deg) * 30px); height: 8px }</style><div></div>") == 30);
+    EXPECT(widthOf("<!DOCTYPE html><style>div { width: round(nearest, 13px, 5px); height: 8px }</style><div></div>") == 15);
+    EXPECT(widthOf("<!DOCTYPE html><style>div { width: mod(18px, 5px); height: 8px }</style><div></div>") == 3);
+    EXPECT(widthOf("<!DOCTYPE html><style>div { width: calc(hypot(3px, 4px)); height: 8px }</style><div></div>") == 5);
+    EXPECT(widthOf("<!DOCTYPE html><style>div { width: calc(pow(2, 3) * 3px); height: 8px }</style><div></div>") == 24);
+    EXPECT(widthOf("<!DOCTYPE html><style>div { width: calc(progress(30px, 10px, 50px) * 40px); height: 8px }</style><div></div>") == 20);
+    EXPECT(widthOf("<!DOCTYPE html><style>div { width: calc(abs(-18px)); height: 8px }</style><div></div>") == 18);
+    EXPECT(widthOf("<!DOCTYPE html><style>div { width: rem(18px, 5px); height: 8px }</style><div></div>") == 3);
+    EXPECT(widthOf("<!DOCTYPE html><style>div { width: mod(-18px, 5px); height: 8px }</style><div></div>") == 2);
+    EXPECT(widthOf("<!DOCTYPE html><div style='width: calc(cos(0deg) * 11px); height: 8px'></div>") == 11);
+    EXPECT(widthOf("<!DOCTYPE html><div style='width: calc(sqrt(9) * 4px); height: 8px'></div>") == 12);
+    EXPECT(widthOf("<!DOCTYPE html><div style='width: calc((sign(-5px) + 2) * 8px); height: 8px'></div>") == 8);
+    EXPECT(widthOf("<!DOCTYPE html><div style='width: calc(log(100, 10) * 4px); height: 8px'></div>") == 8);
+    EXPECT(widthOf("<!DOCTYPE html><div style='width: calc(exp(0) * 14px); height: 8px'></div>") == 14);
+    EXPECT(widthOf("<!DOCTYPE html><div style='width: calc(atan2(4px, 4px) / 45deg * 10px); height: 8px'></div>") == 10);
+    EXPECT(widthOf("<!DOCTYPE html><div style='width: calc(tan(45deg) * 9px); height: 8px'></div>") == 9);
+    EXPECT(widthOf("<!DOCTYPE html><div style='width: calc(asin(1) / 90deg * 20px); height: 8px'></div>") == 20);
+    RoboWeb::Document variableColor = Parse(
+        "<!DOCTYPE html><style>:root { --ink: #ff0000 } div { --ink: #00ff00; width: 20px; height: 10px; background: var(--ink) }</style><div></div>",
+        diagnostics);
+    RoboWeb::LayoutResult variableColorLayout = RoboWeb::LayoutDocument(variableColor, 240, 120);
+    RoboWeb::Framebuffer variableColorFrame = RoboWeb::RenderDocument(variableColorLayout, 0);
+    const RoboWeb::ElementBox* variableColorBox = RoboWeb::FindBox(variableColorLayout, "div");
+    EXPECT(variableColorBox != nullptr);
+    if (variableColorBox != nullptr) {
+        EXPECT(RoboWeb::PixelRed(variableColorFrame, variableColorBox->x + 2, variableColorBox->y + 2) == 0);
+        EXPECT(RoboWeb::PixelGreen(variableColorFrame, variableColorBox->x + 2, variableColorBox->y + 2) == 255);
+    }
+}
+
 void TestScriptAndPresentation() {
     RoboWeb::Diagnostics diagnostics;
     RoboWeb::Document document = Parse(
@@ -4001,7 +4045,8 @@ void TestSvgSpecification() {
         EXPECT(isRed(miterJoin, 13, 3));
         EXPECT(isWhite(miterJoin, 15, 3));
         EXPECT(isWhite(bevelJoin, 13, 3));
-        EXPECT(isRed(bevelJoin, 11, 3));
+        EXPECT(isRed(bevelJoin, 11, 4));
+        EXPECT(isWhite(bevelJoin, 13, 4));
         EXPECT(isRed(roundJoin, 12, 3));
         EXPECT(isWhite(roundJoin, 13, 3));
         SvgFrame miterClip = render(
@@ -4098,6 +4143,7 @@ int main() {
     TestLayoutMatchesBrowserDefaults();
     TestPixelsAndInteraction();
     TestStyleRule();
+    TestCssFunctions();
     TestScriptAndPresentation();
     TestHtmlBehavior();
     TestSvgSpecification();

@@ -118,6 +118,7 @@ struct ResolvedStyle {
     int heightPx = -1;
     DisplayKind display = DisplayKind::Block;
     std::string fontFamily;
+    std::vector<StyleDeclaration> customProperties;
 };
 
 int LineHeightPx(int fontSizePx);

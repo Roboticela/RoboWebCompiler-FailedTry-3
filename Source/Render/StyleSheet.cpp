@@ -4,6 +4,7 @@
 #include "Render/ImageDecoder.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -160,8 +161,586 @@ int ParseWeight(const std::string& value) {
     return std::atoi(text.c_str());
 }
 
+struct CssQty {
+    double value = 0;
+    int unit = 0;
+    bool ok = false;
+};
+
+const int CSS_NUMBER = 0;
+const int CSS_PX = 1;
+const int CSS_DEG = 2;
+
+void SkipCssSpace(const std::string& text, std::size_t& index) {
+    while (index < text.size() && (text[index] == ' ' || text[index] == '\t' || text[index] == '\n' || text[index] == '\r')) {
+        ++index;
+    }
+}
+
+bool ReadCssIdent(const std::string& text, std::size_t& index, std::string& name) {
+    SkipCssSpace(text, index);
+    if (index >= text.size() || !((text[index] >= 'A' && text[index] <= 'Z') || (text[index] >= 'a' && text[index] <= 'z') || text[index] == '_')) {
+        return false;
+    }
+    name.clear();
+    while (index < text.size()) {
+        const char character = text[index];
+        if ((character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '-' ||
+            character == '_') {
+            name.push_back(character >= 'A' && character <= 'Z' ? static_cast<char>(character - 'A' + 'a') : character);
+            ++index;
+            continue;
+        }
+        break;
+    }
+    return !name.empty();
+}
+
+bool SubstituteCssVars(const std::string& text, const std::vector<StyleDeclaration>& variables, int depth, std::string& output) {
+    if (depth > 16) {
+        return false;
+    }
+    output.clear();
+    for (std::size_t index = 0; index < text.size();) {
+        const bool call = index + 4 <= text.size() && ToLowerAscii(text.substr(index, 4)) == "var(";
+        if (!call) {
+            output.push_back(text[index]);
+            ++index;
+            continue;
+        }
+        std::size_t cursor = index + 4;
+        int depthCount = 1;
+        bool quoted = false;
+        char quote = 0;
+        for (; cursor < text.size(); ++cursor) {
+            const char character = text[cursor];
+            if (quoted) {
+                if (character == quote) {
+                    quoted = false;
+                }
+                continue;
+            }
+            if (character == '"' || character == '\'') {
+                quoted = true;
+                quote = character;
+                continue;
+            }
+            if (character == '(') {
+                ++depthCount;
+            } else if (character == ')') {
+                --depthCount;
+                if (depthCount == 0) {
+                    break;
+                }
+            }
+        }
+        if (cursor >= text.size()) {
+            return false;
+        }
+        const std::string inner = text.substr(index + 4, cursor - (index + 4));
+        std::string name;
+        std::string fallback;
+        bool sawComma = false;
+        int argumentDepth = 0;
+        bool argumentQuoted = false;
+        char argumentQuote = 0;
+        for (std::size_t piece = 0; piece < inner.size(); ++piece) {
+            const char character = inner[piece];
+            if (argumentQuoted) {
+                if (character == argumentQuote) {
+                    argumentQuoted = false;
+                }
+                if (!sawComma) {
+                    name.push_back(character);
+                } else {
+                    fallback.push_back(character);
+                }
+                continue;
+            }
+            if (character == '"' || character == '\'') {
+                argumentQuoted = true;
+                argumentQuote = character;
+            }
+            if (character == '(') {
+                ++argumentDepth;
+            } else if (character == ')' && argumentDepth > 0) {
+                --argumentDepth;
+            }
+            if (character == ',' && argumentDepth == 0 && !sawComma) {
+                sawComma = true;
+                continue;
+            }
+            if (!sawComma) {
+                name.push_back(character);
+            } else {
+                fallback.push_back(character);
+            }
+        }
+        name = Trim(name);
+        fallback = Trim(fallback);
+        std::string replacement;
+        bool found = false;
+        for (const StyleDeclaration& declaration : variables) {
+            if (declaration.name == name) {
+                replacement = declaration.value;
+                found = true;
+            }
+        }
+        if (!found) {
+            if (!sawComma) {
+                return false;
+            }
+            replacement = fallback;
+        }
+        std::string resolved;
+        if (!SubstituteCssVars(replacement, variables, depth + 1, resolved)) {
+            return false;
+        }
+        output += resolved;
+        index = cursor + 1;
+    }
+    return true;
+}
+
+bool ParseCssSum(const std::string& text, std::size_t& index, int fontSizePx, CssQty& quantity);
+
+bool ParseCssFunction(const std::string& name, const std::string& text, std::size_t& index, int fontSizePx, CssQty& quantity) {
+    if (name == "calc") {
+        if (!ParseCssSum(text, index, fontSizePx, quantity)) {
+            return false;
+        }
+    } else if (name == "min" || name == "max" || name == "hypot") {
+        CssQty current;
+        if (!ParseCssSum(text, index, fontSizePx, current)) {
+            return false;
+        }
+        double squares = current.value * current.value;
+        SkipCssSpace(text, index);
+        while (index < text.size() && text[index] == ',') {
+            ++index;
+            CssQty next;
+            if (!ParseCssSum(text, index, fontSizePx, next) || next.unit != current.unit) {
+                return false;
+            }
+            if (name == "min" && next.value < current.value) {
+                current = next;
+            }
+            if (name == "max" && next.value > current.value) {
+                current = next;
+            }
+            if (name == "hypot") {
+                squares += next.value * next.value;
+            }
+            SkipCssSpace(text, index);
+        }
+        quantity = current;
+        if (name == "hypot") {
+            quantity.value = std::sqrt(squares);
+        }
+    } else if (name == "clamp") {
+        CssQty low;
+        CssQty preferred;
+        CssQty high;
+        if (!ParseCssSum(text, index, fontSizePx, low)) {
+            return false;
+        }
+        SkipCssSpace(text, index);
+        if (index >= text.size() || text[index] != ',') {
+            return false;
+        }
+        ++index;
+        if (!ParseCssSum(text, index, fontSizePx, preferred) || preferred.unit != low.unit) {
+            return false;
+        }
+        SkipCssSpace(text, index);
+        if (index >= text.size() || text[index] != ',') {
+            return false;
+        }
+        ++index;
+        if (!ParseCssSum(text, index, fontSizePx, high) || high.unit != low.unit) {
+            return false;
+        }
+        quantity = preferred;
+        if (quantity.value < low.value) {
+            quantity = low;
+        }
+        if (quantity.value > high.value) {
+            quantity = high;
+        }
+    } else if (name == "round") {
+        std::string strategy = "nearest";
+        const std::size_t mark = index;
+        std::string keyword;
+        if (ReadCssIdent(text, index, keyword) && (keyword == "nearest" || keyword == "up" || keyword == "down" || keyword == "to-zero")) {
+            strategy = keyword;
+            SkipCssSpace(text, index);
+            if (index < text.size() && text[index] == ',') {
+                ++index;
+            }
+        } else {
+            index = mark;
+        }
+        if (!ParseCssSum(text, index, fontSizePx, quantity)) {
+            return false;
+        }
+        CssQty step;
+        SkipCssSpace(text, index);
+        if (index < text.size() && text[index] == ',') {
+            ++index;
+            if (!ParseCssSum(text, index, fontSizePx, step) || step.unit != quantity.unit || step.value == 0) {
+                return false;
+            }
+        } else if (quantity.unit == CSS_NUMBER) {
+            step.value = 1;
+            step.unit = CSS_NUMBER;
+            step.ok = true;
+        } else {
+            return false;
+        }
+        const double quotient = quantity.value / step.value;
+        double rounded = std::floor(quotient + 0.5);
+        if (strategy == "up") {
+            rounded = std::ceil(quotient - 1e-9);
+        } else if (strategy == "down") {
+            rounded = std::floor(quotient + 1e-9);
+        } else if (strategy == "to-zero") {
+            rounded = std::trunc(quotient);
+        }
+        quantity.value = rounded * step.value;
+    } else if (name == "mod" || name == "rem") {
+        CssQty dividend;
+        CssQty divisor;
+        if (!ParseCssSum(text, index, fontSizePx, dividend)) {
+            return false;
+        }
+        SkipCssSpace(text, index);
+        if (index >= text.size() || text[index] != ',') {
+            return false;
+        }
+        ++index;
+        if (!ParseCssSum(text, index, fontSizePx, divisor) || divisor.unit != dividend.unit || divisor.value == 0) {
+            return false;
+        }
+        double remainder = std::fmod(dividend.value, divisor.value);
+        if (name == "mod" && ((remainder < 0 && divisor.value > 0) || (remainder > 0 && divisor.value < 0))) {
+            remainder += divisor.value;
+        }
+        quantity = dividend;
+        quantity.value = remainder;
+    } else if (name == "progress") {
+        CssQty value;
+        CssQty start;
+        CssQty end;
+        if (!ParseCssSum(text, index, fontSizePx, value)) {
+            return false;
+        }
+        SkipCssSpace(text, index);
+        if (index >= text.size() || text[index] != ',') {
+            return false;
+        }
+        ++index;
+        if (!ParseCssSum(text, index, fontSizePx, start) || start.unit != value.unit) {
+            return false;
+        }
+        SkipCssSpace(text, index);
+        if (index >= text.size() || text[index] != ',') {
+            return false;
+        }
+        ++index;
+        if (!ParseCssSum(text, index, fontSizePx, end) || end.unit != value.unit || end.value == start.value) {
+            return false;
+        }
+        quantity.value = (value.value - start.value) / (end.value - start.value);
+        quantity.unit = CSS_NUMBER;
+        quantity.ok = true;
+    } else if (name == "abs" || name == "sign") {
+        if (!ParseCssSum(text, index, fontSizePx, quantity)) {
+            return false;
+        }
+        if (name == "abs") {
+            quantity.value = std::fabs(quantity.value);
+        } else {
+            quantity.unit = CSS_NUMBER;
+            quantity.value = quantity.value < 0 ? -1 : (quantity.value > 0 ? 1 : 0);
+        }
+    } else if (name == "sin" || name == "cos" || name == "tan" || name == "asin" || name == "acos" || name == "atan") {
+        if (!ParseCssSum(text, index, fontSizePx, quantity)) {
+            return false;
+        }
+        double radians = quantity.value;
+        if (quantity.unit == CSS_DEG) {
+            radians = quantity.value * std::acos(-1.0) / 180.0;
+        } else if (quantity.unit != CSS_NUMBER) {
+            return false;
+        }
+        if (name == "sin") {
+            quantity.value = std::sin(radians);
+        } else if (name == "cos") {
+            quantity.value = std::cos(radians);
+        } else if (name == "tan") {
+            quantity.value = std::tan(radians);
+        } else if (name == "asin") {
+            quantity.value = std::asin(radians) * 180.0 / std::acos(-1.0);
+        } else if (name == "acos") {
+            quantity.value = std::acos(radians) * 180.0 / std::acos(-1.0);
+        } else {
+            quantity.value = std::atan(radians) * 180.0 / std::acos(-1.0);
+        }
+        quantity.unit = name == "sin" || name == "cos" || name == "tan" ? CSS_NUMBER : CSS_DEG;
+        quantity.ok = true;
+    } else if (name == "atan2") {
+        CssQty yValue;
+        CssQty xValue;
+        if (!ParseCssSum(text, index, fontSizePx, yValue)) {
+            return false;
+        }
+        SkipCssSpace(text, index);
+        if (index >= text.size() || text[index] != ',') {
+            return false;
+        }
+        ++index;
+        if (!ParseCssSum(text, index, fontSizePx, xValue) || xValue.unit != yValue.unit) {
+            return false;
+        }
+        quantity.value = std::atan2(yValue.value, xValue.value) * 180.0 / std::acos(-1.0);
+        quantity.unit = CSS_DEG;
+        quantity.ok = true;
+    } else if (name == "pow" || name == "sqrt" || name == "log" || name == "exp") {
+        if (!ParseCssSum(text, index, fontSizePx, quantity) || quantity.unit != CSS_NUMBER) {
+            return false;
+        }
+        if (name == "pow") {
+            SkipCssSpace(text, index);
+            if (index >= text.size() || text[index] != ',') {
+                return false;
+            }
+            ++index;
+            CssQty exponent;
+            if (!ParseCssSum(text, index, fontSizePx, exponent) || exponent.unit != CSS_NUMBER) {
+                return false;
+            }
+            quantity.value = std::pow(quantity.value, exponent.value);
+        } else if (name == "sqrt") {
+            if (quantity.value < 0) {
+                return false;
+            }
+            quantity.value = std::sqrt(quantity.value);
+        } else if (name == "exp") {
+            quantity.value = std::exp(quantity.value);
+        } else {
+            SkipCssSpace(text, index);
+            if (index < text.size() && text[index] == ',') {
+                ++index;
+                CssQty base;
+                if (!ParseCssSum(text, index, fontSizePx, base) || base.unit != CSS_NUMBER || !(base.value > 0) || base.value == 1) {
+                    return false;
+                }
+                quantity.value = std::log(quantity.value) / std::log(base.value);
+            } else if (quantity.value > 0) {
+                quantity.value = std::log(quantity.value);
+            } else {
+                return false;
+            }
+        }
+        quantity.unit = CSS_NUMBER;
+        quantity.ok = true;
+    } else {
+        return false;
+    }
+    SkipCssSpace(text, index);
+    if (index >= text.size() || text[index] != ')') {
+        return false;
+    }
+    ++index;
+    quantity.ok = true;
+    return true;
+}
+
+bool ParseCssFactor(const std::string& text, std::size_t& index, int fontSizePx, CssQty& quantity) {
+    SkipCssSpace(text, index);
+    if (index >= text.size()) {
+        return false;
+    }
+    if (text[index] == '+' || text[index] == '-') {
+        const char sign = text[index];
+        ++index;
+        if (!ParseCssFactor(text, index, fontSizePx, quantity)) {
+            return false;
+        }
+        if (sign == '-') {
+            quantity.value = -quantity.value;
+        }
+        return true;
+    }
+    if (text[index] == '(') {
+        ++index;
+        if (!ParseCssSum(text, index, fontSizePx, quantity)) {
+            return false;
+        }
+        SkipCssSpace(text, index);
+        if (index >= text.size() || text[index] != ')') {
+            return false;
+        }
+        ++index;
+        return true;
+    }
+    const std::size_t mark = index;
+    std::string name;
+    if (ReadCssIdent(text, index, name)) {
+        SkipCssSpace(text, index);
+        if (index < text.size() && text[index] == '(') {
+            ++index;
+            return ParseCssFunction(name, text, index, fontSizePx, quantity);
+        }
+        index = mark;
+    }
+    SkipCssSpace(text, index);
+    std::size_t start = index;
+    if (index < text.size() && (text[index] == '+' || text[index] == '-')) {
+        ++index;
+    }
+    bool sawDigit = false;
+    bool sawDot = false;
+    while (index < text.size()) {
+        const char character = text[index];
+        if (character >= '0' && character <= '9') {
+            sawDigit = true;
+            ++index;
+            continue;
+        }
+        if (character == '.' && !sawDot) {
+            sawDot = true;
+            ++index;
+            continue;
+        }
+        break;
+    }
+    if (!sawDigit) {
+        return false;
+    }
+    quantity.value = std::strtod(text.c_str() + start, nullptr);
+    quantity.ok = true;
+    quantity.unit = CSS_NUMBER;
+    std::string unit;
+    while (index < text.size() && ((text[index] >= 'A' && text[index] <= 'Z') || (text[index] >= 'a' && text[index] <= 'z'))) {
+        const char character = text[index];
+        unit.push_back(character >= 'A' && character <= 'Z' ? static_cast<char>(character - 'A' + 'a') : character);
+        ++index;
+    }
+    if (unit.empty()) {
+        return true;
+    }
+    if (unit == "px") {
+        quantity.unit = CSS_PX;
+        return true;
+    }
+    if (unit == "em") {
+        quantity.value *= std::max(1, fontSizePx);
+        quantity.unit = CSS_PX;
+        return true;
+    }
+    if (unit == "deg") {
+        quantity.unit = CSS_DEG;
+        return true;
+    }
+    if (unit == "rad") {
+        quantity.value = quantity.value * 180.0 / std::acos(-1.0);
+        quantity.unit = CSS_DEG;
+        return true;
+    }
+    if (unit == "grad") {
+        quantity.value *= 0.9;
+        quantity.unit = CSS_DEG;
+        return true;
+    }
+    if (unit == "turn") {
+        quantity.value *= 360.0;
+        quantity.unit = CSS_DEG;
+        return true;
+    }
+    return false;
+}
+
+bool ParseCssProduct(const std::string& text, std::size_t& index, int fontSizePx, CssQty& quantity) {
+    if (!ParseCssFactor(text, index, fontSizePx, quantity)) {
+        return false;
+    }
+    while (true) {
+        SkipCssSpace(text, index);
+        if (index >= text.size() || (text[index] != '*' && text[index] != '/')) {
+            break;
+        }
+        const char operation = text[index];
+        ++index;
+        CssQty next;
+        if (!ParseCssFactor(text, index, fontSizePx, next)) {
+            return false;
+        }
+        if (operation == '*') {
+            if (quantity.unit != CSS_NUMBER && next.unit != CSS_NUMBER) {
+                return false;
+            }
+            quantity.value *= next.value;
+            if (quantity.unit == CSS_NUMBER) {
+                quantity.unit = next.unit;
+            }
+        } else {
+            if (next.value == 0 || (quantity.unit == CSS_NUMBER && next.unit != CSS_NUMBER)) {
+                return false;
+            }
+            quantity.value /= next.value;
+            if (next.unit != CSS_NUMBER) {
+                quantity.unit = CSS_NUMBER;
+            }
+        }
+    }
+    return true;
+}
+
+bool ParseCssSum(const std::string& text, std::size_t& index, int fontSizePx, CssQty& quantity) {
+    if (!ParseCssProduct(text, index, fontSizePx, quantity)) {
+        return false;
+    }
+    while (true) {
+        SkipCssSpace(text, index);
+        if (index >= text.size() || (text[index] != '+' && text[index] != '-')) {
+            break;
+        }
+        const char operation = text[index];
+        ++index;
+        CssQty next;
+        if (!ParseCssProduct(text, index, fontSizePx, next) || next.unit != quantity.unit) {
+            return false;
+        }
+        quantity.value += operation == '+' ? next.value : -next.value;
+    }
+    return quantity.ok;
+}
+
+bool EvaluateCssPxInner(const std::string& text, const std::vector<StyleDeclaration>& variables, int fontSizePx, int& pixels) {
+    std::string resolved;
+    if (!SubstituteCssVars(text, variables, 0, resolved)) {
+        return false;
+    }
+    std::size_t index = 0;
+    CssQty quantity;
+    if (!ParseCssSum(resolved, index, fontSizePx < 1 ? 16 : fontSizePx, quantity)) {
+        return false;
+    }
+    SkipCssSpace(resolved, index);
+    if (index != resolved.size() || quantity.unit != CSS_PX) {
+        return false;
+    }
+    pixels = static_cast<int>(std::lround(quantity.value));
+    return true;
+}
+
 int ParseSizePx(const std::string& value) {
     const std::string text = ToLowerAscii(Trim(value));
+    int calculated = 0;
+    if (EvaluateCssPxInner(value, {}, 16, calculated)) {
+        return std::max(0, calculated);
+    }
     if (text == "0") {
         return 0;
     }
@@ -473,7 +1052,8 @@ void ParseDeclarations(const std::string& body, ElementStyle& rule) {
         }
         ApplyDeclaration(rule, piece.substr(0, colon), piece.substr(colon + 1));
         StyleDeclaration declaration;
-        declaration.name = ToLowerAscii(Trim(piece.substr(0, colon)));
+        const std::string rawName = Trim(piece.substr(0, colon));
+        declaration.name = rawName.size() >= 2 && rawName[0] == '-' && rawName[1] == '-' ? rawName : ToLowerAscii(rawName);
         declaration.value = Trim(piece.substr(colon + 1));
         if (!declaration.name.empty() && !declaration.value.empty()) {
             rule.declarations.push_back(declaration);
@@ -822,6 +1402,18 @@ void ApplyStyleTextInternal(ElementStyle& rule, const std::string& declarations)
 
 void ApplyStyleText(ElementStyle& rule, const std::string& declarations) {
     ApplyStyleTextInternal(rule, declarations);
+}
+
+bool EvaluateCssPx(const std::string& text, const std::vector<StyleDeclaration>& variables, int fontSizePx, int& pixels) {
+    return EvaluateCssPxInner(text, variables, fontSizePx, pixels);
+}
+
+bool EvaluateCssColor(const std::string& text, const std::vector<StyleDeclaration>& variables, std::uint8_t& red, std::uint8_t& green, std::uint8_t& blue) {
+    std::string resolved;
+    if (!SubstituteCssVars(text, variables, 0, resolved)) {
+        return false;
+    }
+    return ParseHexColor(resolved, red, green, blue);
 }
 
 void LoadDocumentStyles(Document& document) {
